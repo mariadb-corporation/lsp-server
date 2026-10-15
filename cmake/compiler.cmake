@@ -58,3 +58,12 @@ function(mdbls_target_warnings target)
   target_compile_options(${target} PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${MDBLS_WARNING_FLAGS}>)
 endfunction()
+
+# RapidJSON's SIMD scanning of strings and whitespace: a 256 MB didOpen is
+# one JSON string.  Set for every target, so that all translation units see
+# the same RapidJSON code.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64|ARM64)$")
+  add_compile_definitions(RAPIDJSON_NEON)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+  add_compile_definitions(RAPIDJSON_SSE2)
+endif()

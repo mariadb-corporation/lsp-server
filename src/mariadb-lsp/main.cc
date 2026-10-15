@@ -39,6 +39,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef _WIN32
@@ -745,7 +746,8 @@ int main(int argc, char **argv) {
     const double lines_ms = ms_since(t0);
 
     t0 = Clock::now();
-    const auto index = mdbls::Statement_index::build(text, o->index);
+    const auto index = mdbls::Statement_index::build_parallel(
+        text, o->index, o->threads > 0 ? o->threads : std::max(1u, std::thread::hardware_concurrency()));
     const double index_ms = ms_since(t0);
 
     t0 = Clock::now();

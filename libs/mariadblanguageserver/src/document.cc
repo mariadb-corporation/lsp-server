@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <thread>
 
 namespace mdbls {
 
@@ -41,7 +42,8 @@ void Document::rebuild() {
   m_snapshot.reset();
   m_lines = std::make_shared<Line_map>(*m_text);
   const size_t old_count = m_index ? m_index->statements().size() : 0;
-  m_index = std::make_shared<const Statement_index>(Statement_index::build(*m_text, m_options));
+  m_index = std::make_shared<const Statement_index>(Statement_index::build_parallel(
+      *m_text, m_options, std::max(1u, std::thread::hardware_concurrency())));
   ++m_generation;
   // Everything is replaced: queued jobs' verdicts will all be dropped.
   m_history.push_back({0, old_count, m_index->statements().size(), 0});

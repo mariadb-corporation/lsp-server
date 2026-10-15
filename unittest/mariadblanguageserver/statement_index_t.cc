@@ -341,4 +341,44 @@ TEST(Statement_index, update_equals_build_for_random_edits) {
   }
 }
 
+TEST(Statement_index, build_parallel_equals_build) {
+  static const std::vector<std::string> pieces = {
+      "SELECT 1;\n", "SELECT 'a\nb;';\n", "-- c\n", "/* x;\ny */", "DELIMITER $$\n",
+      "SELECT 2$$\n", "DELIMITER ;\n", "SET sql_mode='ANSI_QUOTES';\n", "SELECT \"q;\n\";\n",
+      "SET sql_mode='';\n", "SET @m=@@sql_mode;\n", "SET sql_mode=@m;\n",
+      "SET sql_mode='NO_BACKSLASH_ESCAPES';\n", "SELECT 'x\\';\n", "/*!40101 SET a=1 */;\n",
+      "/*!40101 SELECT 1;\n", "*/;\n", "x", "\n", "'", "SELECT 3\\G\n"};
+  auto same = [](const Statement_index &a, const Statement_index &b) {
+    return flatten(a) == flatten(b) && a.final_delimiter() == b.final_delimiter() &&
+           a.open_at_end() == b.open_at_end() && a.errors() == b.errors();
+  };
+  for (unsigned seed = 1; seed <= 2000; ++seed) {
+    std::mt19937 rng(seed);
+    std::string text;
+    for (int k = 20 + rng() % 60; k > 0; --k) text += pieces[rng() % pieces.size()];
+    const auto want = Statement_index::build(text);
+    for (unsigned threads : {2u, 3u, 7u}) {
+      const auto got = Statement_index::build_parallel(text, {}, threads, 1 + rng() % 64);
+      ASSERT_TRUE(same(got, want)) << "seed " << seed << " threads " << threads << " final '"
+                                   << got.final_delimiter() << "' / '" << want.final_delimiter()
+                                   << "' open " << int(got.open_at_end()) << " / "
+                                   << int(want.open_at_end()) << " errors "
+                                   << got.errors().size() << " / " << want.errors().size() << "\n"
+                                   << testing::PrintToString(flatten(got)) << "\n"
+                                   << testing::PrintToString(flatten(want)) << "\n" << text;
+    }
+  }
+  for (const char *name : {"sakila-schema.sql", "mysqldump_t.sql", "mrs_grammar_test.sql",
+                           "world.sql"}) {
+    const std::string text = read_file(name);
+    const auto want = Statement_index::build(text);
+    for (unsigned threads : {2u, 5u, 16u}) {
+      for (size_t chunk : {size_t{64}, size_t{1000}, text.size() / 3}) {
+        ASSERT_TRUE(same(Statement_index::build_parallel(text, {}, threads, chunk), want))
+            << name << " threads " << threads << " chunk " << chunk;
+      }
+    }
+  }
+}
+
 }  // namespace mdbls

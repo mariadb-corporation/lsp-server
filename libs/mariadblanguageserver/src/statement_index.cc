@@ -21,6 +21,7 @@
 #include <cctype>
 #include <limits>
 #include <stdexcept>
+#include <thread>
 
 #include "mdbls/sql_mode.h"
 #include "mysqlshdk/libs/utils/utils_mysql_parsing.h"
@@ -174,6 +175,144 @@ Statement_index Statement_index::build(std::string_view text, const Index_option
   Sql_mode_tracker tracker(options.sql_mode, options.version_id);
   index.scan(text, 0, tracker, options.delimiter, [](const Statement &) { return false; });
   return index;
+}
+
+Statement_index Statement_index::build_parallel(std::string_view text,
+                                               const Index_options &options, unsigned threads,
+                                               size_t min_chunk) {
+  min_chunk = std::max<size_t>(min_chunk, 1);
+  if (threads <= 1 || text.size() < 2 * min_chunk) return build(text, options);
+  if (text.size() >= std::numeric_limits<uint32_t>::max()) {
+    throw std::length_error("text of 4 GiB or more");
+  }
+  const uint32_t size = static_cast<uint32_t>(text.size());
+  constexpr uint32_t k_split_bits = k_ansi_quotes | k_no_backslash_escapes;
+
+  // Chunk k is [bounds[k], bounds[k + 1]); every bound after the first
+  // follows a line break.
+  const size_t n = std::min<size_t>(threads, text.size() / min_chunk);
+  std::vector<uint32_t> bounds{0};
+  for (size_t k = 1; k < n; ++k) {
+    const size_t nl = text.find('\n', k * text.size() / n);
+    if (nl == std::string_view::npos || nl + 1 >= text.size()) break;
+    if (nl + 1 > bounds.back()) bounds.push_back(static_cast<uint32_t>(nl + 1));
+  }
+  bounds.push_back(size);
+  const size_t chunks = bounds.size() - 1;
+  if (chunks < 2) return build(text, options);
+
+  // Chunks 1.. split speculatively, each up to the first statement that
+  // starts in the next chunk.
+  std::vector<Statement_index> parts(chunks);
+  {
+    std::vector<std::thread> workers;
+    for (size_t k = 1; k < chunks; ++k) {
+      workers.emplace_back([&, k] {
+        Sql_mode_tracker t(options.sql_mode, options.version_id);
+        const uint32_t limit = bounds[k + 1];
+        parts[k].scan(text, bounds[k], t, options.delimiter,
+                      [limit](const Statement &st) { return st.begin >= limit; });
+      });
+    }
+    for (auto &w : workers) w.join();
+  }
+  // Splitter messages carry no position: they cannot be told apart from
+  // ones a wrong guess produced.
+  for (const auto &p : parts) {
+    if (!p.m_errors.empty()) return build(text, options);
+  }
+
+  auto find_in_part = [&](size_t k, uint32_t begin) -> size_t {
+    const auto &v = parts[k].m_statements;
+    const auto it = std::lower_bound(v.begin(), v.end(), begin,
+                                     [](const Statement &s, uint32_t off) { return s.begin < off; });
+    return it != v.end() && it->begin == begin ? static_cast<size_t>(it - v.begin()) : v.size();
+  };
+  // Whether two splits of the same statement leave the splitter in the same
+  // state: what follows them is then split alike, given the same sql_mode
+  // (checked statement by statement).  The state before them does not
+  // matter, nor whether they saw the DELIMITER commands before them.  Only a
+  // clean state (no string or comment open) is known to be the same.
+  auto same_after = [](const Statement_index &a, const Statement &x, const Statement_index &b,
+                       const Statement &y) {
+    return x.end == y.end && x.body_end == y.body_end && x.kind == y.kind && x.clean_after &&
+           y.clean_after &&
+           a.m_delimiters[x.delimiter] == b.m_delimiters[y.delimiter] &&
+           a.m_delimiters[x.active_delimiter] == b.m_delimiters[y.active_delimiter];
+  };
+
+  Statement_index index;
+  Sql_mode_tracker tracker(options.sql_mode, options.version_id);
+  // Appends statement `j` of part `k`, if it was split in the sql_mode in
+  // force there.
+  auto take = [&](size_t k, size_t j) {
+    const Statement &sp = parts[k].m_statements[j];
+    if ((parts[k].m_modes[sp.mode].bits & k_split_bits) != (tracker.bits() & k_split_bits)) {
+      return false;
+    }
+    Statement x = sp;
+    x.delimiter = index.intern_delimiter(parts[k].m_delimiters[sp.delimiter]);
+    x.active_delimiter = index.intern_delimiter(parts[k].m_delimiters[sp.active_delimiter]);
+    x.mode = index.intern_mode({tracker.mode(), tracker.bits(), tracker.known()});
+    index.m_statements.push_back(x);
+    if (x.mentions_sql_mode) tracker.observe(index.text_of(text, x));
+    return true;
+  };
+
+  uint32_t pos = 0;
+  std::string delimiter = options.delimiter;
+  for (;;) {
+    // Split sequentially until a statement matches one of the part its
+    // begin falls in.
+    size_t k = 0, j = 0;
+    bool aligned = false;
+    index.scan(text, pos, tracker, delimiter, [&](const Statement &st) {
+      k = static_cast<size_t>(std::upper_bound(bounds.begin(), bounds.end(), st.begin) -
+                              bounds.begin()) - 1;
+      if (k == 0 || k >= chunks) return false;
+      j = find_in_part(k, st.begin);
+      aligned = j < parts[k].m_statements.size() &&
+                same_after(parts[k], parts[k].m_statements[j], index, st);
+      return aligned;
+    });
+    if (!aligned) return index;  // split to the end
+
+    // Take the part's statements while they were split in the true state.
+    for (++j;; ++j) {
+      if (j == parts[k].m_statements.size()) {
+        if (k + 1 == chunks) {
+          // The last part ends at the end of the text, in the state checked.
+          index.m_open_at_end = parts[k].m_open_at_end;
+          index.m_final_delimiter = parts[k].m_final_delimiter;
+          return index;
+        }
+        break;  // a part that ended early: split on from here
+      }
+      if (!take(k, j)) {
+        break;
+      }
+      const Statement &sp = parts[k].m_statements[j];
+      if (k + 1 < chunks && sp.begin >= bounds[k + 1]) {
+        // The first statement of the next chunk, taken from this part, which
+        // also saw what came before it: go on in the next part if its split
+        // of the statement leaves the same state.
+        const size_t j2 = find_in_part(k + 1, sp.begin);
+        if (j2 == parts[k + 1].m_statements.size() ||
+            !same_after(parts[k + 1], parts[k + 1].m_statements[j2], parts[k], sp)) {
+          break;
+        }
+        ++k;
+        j = j2;
+      }
+    }
+    // Within a part, statements follow each other in one split, so the
+    // last one taken may have left a string or comment open; split from
+    // the last clean point then.
+    const Statement &last = index.m_statements.back();
+    if (!last.clean_after) return build(text, options);
+    pos = last.end;
+    delimiter = index.m_delimiters[last.active_delimiter];
+  }
 }
 
 Statement_index Statement_index::update(const Statement_index &old, std::string_view text,

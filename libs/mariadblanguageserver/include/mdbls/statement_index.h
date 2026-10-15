@@ -103,6 +103,16 @@ class Statement_index {
  public:
   static Statement_index build(std::string_view text, const Index_options &options = {});
 
+  // Equal to build(), on up to `threads` threads for a text of at least
+  // 2 * `min_chunk` bytes.  Each chunk after a line break is split
+  // speculatively from the starting state; a sequential pass keeps a chunk's
+  // statements from the first one that matches what a sequential split
+  // produces there (same extent, delimiter, splitting flags and a clean
+  // splitter on both sides), checks each further one against the true
+  // sql_mode, and splits sequentially wherever they disagree.
+  static Statement_index build_parallel(std::string_view text, const Index_options &options,
+                                        unsigned threads, size_t min_chunk = 4u << 20);
+
   // The index of `text`, the document after replacing `removed` bytes at
   // `edit_begin` of the text `old` was built from with `inserted` bytes.
   // Equal to build(text, options), but only the region around the edit is
