@@ -1,15 +1,17 @@
 /* src/mdbp_lex.cc -- the ONE translation unit that contains MariaDB's sliced
  * lexer, plus every shim body that slice needs, plus the bridge declared in
- * src/mdbp_lex.h.  Compiled with g++; everything else in build/mdbparse is C.
+ * src/mdbp_lex.h.  The library's one C++ file; the parser, the runtime and
+ * the API are C.
  *
- * WHY IT #includes build/lexer_extracted.cc INSTEAD OF LINKING IT
- * --------------------------------------------------------------
- * Exactly the reason src/parser_glue.c #includes build/parser.c: the slice is
- * a generated artefact that must be compiled in exactly one place, and the
+ * WHY IT #includes generated/lexer_extracted.cc INSTEAD OF LINKING IT
+ * ------------------------------------------------------------------
+ * Exactly the reason src/parser_glue.c #includes bison's parser.c: the slice
+ * is a generated artefact that must be compiled in exactly one place, and the
  * shim bodies below have to see the sliced TYPES (Lex_input_stream and the
  * YYSTYPE union whose members are sliced out of sql/lex_ident_cli.h) to be
- * definable at all.  `-I build` finds it.  Nothing in build/ is hand-edited:
- * this is our own file including a generated one.
+ * definable at all.  generated/ is on the include path.  This is our own
+ * file including a generated one; changes to the slice go into
+ * generated/lexer_extracted.cc as UPSTREAM.md describes, not here.
  *
  * WHAT IS SHIM AND WHAT IS SLICE
  * ------------------------------
@@ -35,23 +37,23 @@
  * digest as not modelled, so the body is ours to write -- and it is the only
  * point in MariaDB's own control flow where (a) the token just scanned and
  * (b) the stream position that produced it are both in hand.  So this file's
- * add_digest_token does two jobs, both of them observation rather than
- * behaviour: it records the token's byte span, and it arms `parsing_place`
- * from the caller's valid() answers for the token that has just arrived.
- * Task 8.3 replaces the valid() source; the seam does not move.
+ * add_digest_token records the token's byte span -- observation, not
+ * behaviour.  (`parsing_place` is not touched here: it is written only by
+ * the parser's preserved grammar actions; see section 6.)
  */
 #include <limits.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* -I build.  Pulls in src/lexshim.h (twice, phases 1 and 2), build/lexstates.h,
- * build/keywords.h, $MARIADB_SOURCE_DIR/strings/ctype-utf8.h and build/parser.h. */
+/* From generated/.  Pulls in src/lexshim.h (twice, phases 1 and 2),
+ * generated/lexstates.h, generated/keywords.h, generated/ctype-utf8.h (a copy
+ * of MariaDB's strings/ctype-utf8.h) and bison's parser.h. */
 #include "lexer_extracted.cc"
 
-/* The two 256-byte tables, generated at build time by build/state_maps_gen.cc
- * (charset route (b), evidence/P5a/spike.json) from MariaDB's own
- * init_state_maps() over its own ctype_utf8mb4. */
+/* The two 256-byte tables, computed once by the state-map generator that
+ * tools/lexslice.py builds and runs (see UPSTREAM.md) from MariaDB's own
+ * init_state_maps() over its own ctype_utf8mb4, and committed. */
 #include "state_maps.h"
 
 extern "C" {
@@ -66,28 +68,29 @@ extern "C" {
 static int mdbp_strnncollsp(struct charset_info_st *cs, const uchar *a,
                             size_t alen, const uchar *b, size_t blen);
 
-/* P3.1 deliverable 6, carried over from P2 (evidence/P7/globals.json: all
- * four of mdbp_coll, mdbp_cs_utf8mb4, my_charset_bin and my_charset_latin1
- * are class never_written, section .data -- genuinely writable for the life
- * of the process).  `const` here moves the storage to .data.rel.ro: it still
- * carries relocations (the pointers below), but the loader write-protects it
- * once those are resolved, which .data never is.  src/lexshim.h's
- * charset_info_st::coll field is const to match, so this needs no cast. */
+/* Nothing ever writes mdbp_coll, mdbp_cs_utf8mb4, my_charset_bin or
+ * my_charset_latin1, but without `const` all four would sit in .data,
+ * writable for the life of the process.  `const` here moves the storage to
+ * .data.rel.ro: it still carries relocations (the pointers below), but the
+ * loader write-protects it once those are resolved, which .data never is.
+ * src/lexshim.h's charset_info_st::coll field is const to match, so this
+ * needs no cast. */
 static const MY_COLLATION_HANDLER mdbp_coll= { mdbp_strnncollsp };
 
 /* ctype / state_map / ident_map / mbmaxlen / number / coll.
  * `number` is utf8mb4_general_ci's collation id in the pinned tree; nothing
  * here compares it with the server, it exists because the struct has it.
  * const, same reason as mdbp_coll above.  CHARSET_INFO itself STAYS
- * non-const (src/lexshim.h:115): get_charset_by_csname()'s return type and
- * mdbp_strnncollsp()'s parameter type are dictated by sliced sql_lex.cc call
- * sites that declare non-const `CHARSET_INFO *` locals from them, and
- * changing either would be changing a signature the sliced lexer calls --
- * K7's hard stop.  So every place THIS FILE needs a non-const CHARSET_INFO*
- * out of this const table (system_charset_info, national_charset_info,
- * get_charset_by_csname()'s return, below) casts the const away itself, in
- * our own shim code, never inside sliced output -- the same pattern
- * charset_info_st::charlen() already uses two lines down. */
+ * non-const (src/lexshim.h's charset_info_st): get_charset_by_csname()'s
+ * return type and mdbp_strnncollsp()'s parameter type are dictated by
+ * sliced sql_lex.cc call sites that declare non-const `CHARSET_INFO *`
+ * locals from them, and changing either would be changing a signature the
+ * sliced lexer calls, which the shim must never do.  So every place THIS
+ * FILE needs a non-const CHARSET_INFO* out of this const table
+ * (system_charset_info, national_charset_info, get_charset_by_csname()'s
+ * return, below) casts the const away itself, in our own shim code, never
+ * inside sliced output -- the same pattern charset_info_st::charlen()
+ * already uses. */
 static const charset_info_st mdbp_cs_utf8mb4=
 {
   ctype_utf8mb4, mdbp_state_map, mdbp_ident_map, 4, 45, &mdbp_coll
@@ -112,10 +115,10 @@ const CHARSET_INFO my_charset_latin1=
   ctype_latin1, mdbp_state_map, mdbp_ident_map, 1, 8, &mdbp_coll
 };
 
-/* PLAN.md P2.1: thread_local ahead of need -- not per_parse under P1's
- * measurement, but P3.1 makes the pointer itself a per-parse parameter
- * (deliverable 4, mdbp_lex_new()/mdbp_lex_next() below) and the sliced lexer
- * reaches it as a global either way, so this is the mechanism regardless.
+/* thread_local: the pointer itself is a per-parse parameter
+ * (mdbp_lex_new()/mdbp_lex_next() below set it to the lexer's charset) and
+ * the sliced lexer reaches it as a global, so one copy per thread is what
+ * keeps concurrent parses apart.
  * Every thread's copy is initialised to the same address, &mdbp_cs_utf8mb4,
  * which is not itself thread_local: there is one shared utf8mb4 table and
  * every thread's pointer points at it.  The const_cast is the one this file
@@ -199,7 +202,7 @@ struct charset_info_st *get_charset_by_csname(const char *name, uint, myf)
            to_upper_lex[(uchar) want[j]] == to_upper_lex[(uchar) name[j]])
       j++;
     if (want[j] == '\0' && name[j] == '\0')
-      /* const_cast: mdbp_cs_utf8mb4 is const (P3.1 deliverable 6, above);
+      /* const_cast: mdbp_cs_utf8mb4 is const (see above);
        * this function's return type stays non-const `struct charset_info_st
        * *` because sql_lex.cc:2992's call site declares a non-const
        * `CHARSET_INFO *cs` local from it -- changing the return type would
@@ -232,14 +235,15 @@ const char *ErrConvString::ptr() const
 /* ======================================================================
  * 2.  The keyword hash.  MariaDB generates get_hash_symbol() into lex_hash.h
  *     with sql/gen_lex_hash.cc, which #includes the server to build a perfect
- *     hash over the very tables build/keywords.h already carries.  We cannot
- *     run that generator (it needs the server's headers), so this is the same
- *     QUESTION answered without the hash: gen_lex_hash.cc:404-478 searches
- *     symbols[] when `function` is false and symbols[] + sql_functions[] when
- *     it is true, always through lex_casecmp/to_upper_lex, always on the full
- *     length.  Both tables and lex_casecmp are sliced; only the search is
- *     ours, and it is linear rather than hashed because this is a
- *     conformance tool, not a server.
+ *     hash over the very tables generated/keywords.h already carries.  We
+ *     cannot run that generator (it needs the server's headers), so this is
+ *     the same QUESTION answered without the hash: gen_lex_hash.cc:404-478
+ *     searches symbols[] when `function` is false and symbols[] +
+ *     sql_functions[] when it is true, always through
+ *     lex_casecmp/to_upper_lex, always on the full length.  Both tables
+ *     and lex_casecmp are sliced; only the search is ours, and it is linear
+ *     rather than hashed because a parser that lexes one statement at a
+ *     time does not need the server's hash.
  * ====================================================================== */
 
 struct st_symbol *get_hash_symbol(const char *s, unsigned int len, bool function)
@@ -292,7 +296,7 @@ struct mdbp_lexer
   mdbp_valid_fn valid;
   void *user;
 
-  /* P3.1 deliverable 4: this lexer's charset, resolved once by
+  /* This lexer's charset, resolved once by
    * mdbp_charset_by_name() in mdbp_lex_new() below.  mdbp_lex_new() and
    * mdbp_lex_next() set system_charset_info/national_charset_info to this
    * value for the duration of the sliced calls that can read them, the same
@@ -313,13 +317,12 @@ struct mdbp_lexer
 
 /* The lexer whose lex_token() call is in progress, for add_digest_token to
  * find.  A member function has no user pointer, and each thread parses one
- * statement at a time (batch mode reuses one lexer per record, serially);
- * mdbp_lex_next sets it around the call and clears it after, so it is never
- * stale within a thread.
+ * statement at a time; mdbp_lex_next sets it around the call and clears it
+ * after, so it is never stale within a thread.
  *
- * PLAN.md P2.1: classified per_parse (evidence/P7/globals.json), so it is
- * `thread_local` -- one pointer per thread rather than one shared across
- * every thread's concurrent parse.  No signature change. */
+ * It is per parse, so it is `thread_local` -- one pointer per thread rather
+ * than one shared across every thread's concurrent parse.  No signature
+ * change. */
 static thread_local mdbp_lexer *mdbp_current= NULL;
 
 static void *mdbp_alloc(mdbp_lexer *lx, size_t size)
@@ -338,15 +341,16 @@ static void *mdbp_alloc(mdbp_lexer *lx, size_t size)
  * 4.  The THD shim.  One body per thd.md row.
  * ====================================================================== */
 
-/* thd.md `thd->charset()` (sql_lex.cc:2038): utf8mb4, always.  FAITHFUL for
- * the connection charset D-9 fixes. */
+/* thd.md `thd->charset()` (sql_lex.cc:2038): utf8mb4, always.  FAITHFUL:
+ * utf8mb4 is the only connection charset this lexer accepts. */
 CHARSET_INFO *THD::charset() const
 {
   return system_charset_info;
 }
 
 /* thd.md `thd->variables.sql_mode & MODE_NO_BACKSLASH_ESCAPES`
- * (sql_lex.cc:1665).  FAITHFUL: the flag reaches here from --sql-mode. */
+ * (sql_lex.cc:1665).  FAITHFUL: the flag reaches here from the caller's
+ * sql_mode list. */
 bool THD::backslash_escapes() const
 {
   return (variables.sql_mode & MODE_NO_BACKSLASH_ESCAPES) == 0;
@@ -391,8 +395,8 @@ unsigned long THD::get_utf8_flag() const
 }
 
 /* sql_lex.cc reads thd->query() only inside the WITH_WSREP block that
- * lexslice.py's isolate_wsrep rule removes.  Defined so a future reference
- * cannot become an undefined symbol at link time. */
+ * tools/lexslice.py's isolate_wsrep rule removes.  Defined so a future
+ * reference cannot become an undefined symbol at link time. */
 const char *THD::query() const
 {
   return mdbp_current != NULL ? mdbp_current->buf : NULL;
@@ -444,27 +448,21 @@ static int mdbp_is_contraction(int token)
          token == VALUES_LESS_SYM || token == VALUES_IN_SYM;
 }
 
-/* WHERE `parsing_place` COMES FROM NOW (task P1.1).
+/* WHERE `parsing_place` COMES FROM.
  *
- * It used to be computed HERE, per token, from the caller's valid() answers --
- * `mdbp_arm_parsing_place()`, the one place in this library where behaviour
- * was decided rather than copied.  It is gone.  The field is written by
- * MariaDB's OWN grammar actions, lifted verbatim by
- * `tools/stub.py`'s `preserve_parsing_place` rule (every lifted
- * statement is enumerated in `build/stub-map.json`'s `preserve` block), into
- * the very `SELECT_LEX` this lexer reads: `mdbp_lex_select()` below hands
- * `&lx->sel` to the parse context, and `src/mdbp_api.c`'s `mdbp_parse_sql()`
- * installs it before `yyparse` runs.
+ * Not from here.  The field is written only by the parser's preserved
+ * grammar actions: MariaDB's own statements, kept verbatim inside otherwise
+ * blanked actions by `tools/stub.py`'s `preserve_parsing_place` rule, which
+ * write into the very `SELECT_LEX` this lexer reads: `mdbp_lex_select()`
+ * below hands `&lx->sel` to the parse context, and `src/mdbp_api.c`'s
+ * `mdbp_parse_sql()` installs it before `yyparse` runs.
  *
- * When NO parser runs -- the three static `--valid` modes, which lex a record
- * and hand the vector to `mdbp_parse_tokens()` afterwards -- nothing can
- * write it, so the caller DECLARES it: `mdbp_lex_set_parsing_place()`, the
- * CLI's `--parsing-place`, and `tests/data/parsing-place-declarations.json`
- * for the fixtures that need it.  Neither route infers the value or its
- * timing; the spend (`sql_lex.cc:1963` and the rest, already in the slice) is
- * MariaDB's own and is what clears it.
+ * When no parser runs (mdbp_lex_sql() and mdbp_lex_sql_prefix()), nothing
+ * writes it and it stays the NO_MATTER mdbp_lex_new() gives it.  Nothing
+ * infers the value or its timing; the spend (`sql_lex.cc:1963` and the
+ * rest, already in the slice) is MariaDB's own and is what clears it.
  *
- * `add_digest_token` therefore does ONE job again -- recording the span. */
+ * `add_digest_token` therefore does one job -- recording the span. */
 
 void Lex_input_stream::add_digest_token(uint token, LEX_YYSTYPE yylval)
 {
@@ -488,8 +486,7 @@ void Lex_input_stream::add_digest_token(uint token, LEX_YYSTYPE yylval)
    * the escaped byte.  Anchoring on `str == m_tok_start` is what tells a
    * lexeme the C just measured from a stale semantic value: get_token() and
    * get_text() both point `str` at THD-allocated memory instead. */
-  /* task P1.1 (plan `sqlmode-composite-expansion.md`), D-12: ABORT_SYM is
-   * EXCLUDED from this anchor.  The plain '/' '*' comment branch
+  /* ABORT_SYM is EXCLUDED from this anchor.  The plain '/' '*' comment branch
    * (sql_lex.cc, the arm before MY_LEX_LONG_COMMENT's consume_comment(0))
    * writes yylval->lex_comment.str = m_ptr for its own bookkeeping, at the
    * moment m_ptr == m_tok_start -- before the '/' and '*' are even skipped
@@ -497,7 +494,7 @@ void Lex_input_stream::add_digest_token(uint token, LEX_YYSTYPE yylval)
    * ident_cli, so lex_comment.str ALIASES ident_cli.str and satisfies the
    * anchor by coincidence, while ident_cli.length is left holding whatever
    * the PRECEDING real token set (lex_comment.length is never written on
-   * this path): a STALE value that truncated the ABORT_SYM span here. No
+   * this path): a stale value that would truncate the ABORT_SYM span. No
    * ABORT_SYM return in the slice ever sets an identifier lexeme
    * (sql/sql_lex.cc:2312, 2324, 2328, 2338, 2599, 2644, 2652, 2805), so its
    * end is always m_ptr, never yylval-derived. */
@@ -531,8 +528,7 @@ void Lex_input_stream::add_digest_token(uint token, LEX_YYSTYPE yylval)
      * a byte that is not part of the query -- so the token covers nothing.
      * The condition on ABORT_SYM is MY_LEX_EOL's own (`eof()` and inside a
      * comment, one yyGet since start_token); every OTHER ABORT_SYM return
-     * scanned real bytes and keeps them.  reflex.py reports the same three
-     * (reflex.py:1095, 1098, 1107). */
+     * scanned real bytes and keeps them. */
     end= start;
   }
 
@@ -555,13 +551,12 @@ void Lex_input_stream::add_digest_token(uint token, LEX_YYSTYPE yylval)
  * 7.  The bridge (src/mdbp_lex.h).
  * ====================================================================== */
 
-/* The five sql_mode flags this lexer implements (PLAN §1.3(3), D-8), the two
- * it refuses (ORACLE, MSSQL), and the six composite names of
- * MDBP_MODE_COMPOSITES below, which OR in some of these five bits the same
- * way sql/sys_vars.cc's expand_sql_mode() does (task P1.1).  Every OTHER
- * element of the CLI's comma list -- TRADITIONAL included -- is a server
- * mode with no lexical effect and is inert, which is the acceptance rule
- * tests/test_mdbparse_cli.py pins. */
+/* The five sql_mode flags this lexer implements (the ones thd.md section 2
+ * shows the lexer reading), the two it refuses (ORACLE, MSSQL), and the six
+ * composite names of MDBP_MODE_COMPOSITES below, which OR in some of these
+ * five bits the same way sql/sys_vars.cc's expand_sql_mode() does.  Every
+ * other element of the comma list -- TRADITIONAL included -- is a server
+ * mode with no lexical effect and is accepted and inert. */
 struct mdbp_mode_flag
 {
   const char *name;
@@ -577,28 +572,26 @@ static const struct mdbp_mode_flag MDBP_MODE_FLAGS[]=
   { "NO_BACKSLASH_ESCAPES", MODE_NO_BACKSLASH_ESCAPES },
 };
 
-/* task P1.1 (plan `sqlmode-composite-expansion.md`), D-2/D-5: the six
- * composite sql_mode names sql/sys_vars.cc's expand_sql_mode() (pinned tree
- * bab03b0f) ORs some of MDBP_MODE_FLAGS' five bits into -- ANSI, POSTGRESQL,
- * DB2 and MAXDB each add ANSI_QUOTES | PIPES_AS_CONCAT | IGNORE_SPACE;
- * MYSQL40 and MYSQL323 each add HIGH_NOT_PRECEDENCE.  expand_sql_mode() also
+/* The six composite sql_mode names sql/sys_vars.cc's expand_sql_mode()
+ * (pinned tree bab03b0f) ORs some of MDBP_MODE_FLAGS' five bits into --
+ * ANSI, POSTGRESQL, DB2 and MAXDB each add ANSI_QUOTES | PIPES_AS_CONCAT |
+ * IGNORE_SPACE; MYSQL40 and MYSQL323 each add HIGH_NOT_PRECEDENCE.
+ * expand_sql_mode() also
  * ORs bits this lexer has no flag for (MODE_NO_KEY_OPTIONS and the rest),
  * which is why this table's bits are a SUBSET of the server's, never the
  * whole of it.  TRADITIONAL is not here: it ORs none of the five (only
  * MODE_STRICT_TRANS_TABLES and other flags this lexer does not read), so it
  * stays inert exactly like any other unmatched name.  ORACLE and MSSQL are
- * not here either: D-3, they stay refused regardless of what they would
- * expand to.  tests/test_sqlmode_composites.py derives this same mapping
- * FROM sql/sys_vars.cc and checks the library against it, rather than
- * copying this table a second time (Rules).
+ * not here either: they stay refused regardless of what they would expand
+ * to.  When the pin moves, re-check this table against expand_sql_mode() in
+ * the new sql/sys_vars.cc.
  *
  * Each row's `name` is a fixed-size char array, not a pointer: a
  * `const char *` initialised from a string literal needs a load-time
  * relocation, which would move this table out of `.rodata` into
- * `.data.rel.ro` and into the writable-globals inventory
- * (tests/test_globals_classify_blackbox.py's pin of 19, unchanged by this
- * table). A fixed-size array holds its bytes inline: no relocation, no
- * entry in that inventory. */
+ * `.data.rel.ro`, among the library's writable-at-load-time globals.  A
+ * fixed-size array holds its bytes inline: no relocation, and the table
+ * stays in `.rodata`. */
 struct mdbp_mode_composite
 {
   char name[11];               /* "POSTGRESQL", the longest, plus the NUL */
@@ -627,7 +620,7 @@ static int mdbp_name_eq(const char *begin, size_t n, const char *name)
 }
 
 /* Returns 0 and fills *bits, or -1 when the list names ORACLE or MSSQL --
- * modes this lexer cannot honour, which PLAN §2.2 says must not look
+ * modes this lexer cannot honour, which must be refused rather than look
  * honoured. */
 static int mdbp_parse_sql_mode(const char *list, unsigned long long *bits)
 {
@@ -648,10 +641,9 @@ static int mdbp_parse_sql_mode(const char *list, unsigned long long *bits)
     for (k= 0; k < sizeof MDBP_MODE_FLAGS / sizeof MDBP_MODE_FLAGS[0]; k++)
       if (mdbp_name_eq(begin, n, MDBP_MODE_FLAGS[k].name))
         *bits |= MDBP_MODE_FLAGS[k].bit;
-    /* task P1.1: a composite ORs its own bits in, on top of (never instead
-     * of) a single flag's -- D-4, "one place", the SAME loop shape as
-     * MDBP_MODE_FLAGS above, so a list may mix composites and single flags
-     * freely (Contract). */
+    /* A composite ORs its own bits in, on top of (never instead of) a
+     * single flag's -- the same loop shape as MDBP_MODE_FLAGS above, so a
+     * list may mix composites and single flags freely. */
     for (k= 0; k < sizeof MDBP_MODE_COMPOSITES / sizeof MDBP_MODE_COMPOSITES[0]; k++)
       if (mdbp_name_eq(begin, n, MDBP_MODE_COMPOSITES[k].name))
         *bits |= MDBP_MODE_COMPOSITES[k].bits;
@@ -661,13 +653,13 @@ static int mdbp_parse_sql_mode(const char *list, unsigned long long *bits)
   return 0;
 }
 
-/* P3.1 deliverable 4: the name -> table step, for a name
+/* The name -> table step, for a name
  * mdbp_charset_refused() (src/mdbp_api.c) has ALREADY accepted -- this is not
  * a second refusal rule, it is the resolution the C side has no CHARSET_INFO
  * type to perform itself.  utf8mb4_general_ci is the one alias
  * mdbp_charset_refused() accepts, and it resolves to the SAME table: there is
- * only one, so accepting the alias is not accepting a second behaviour
- * (PLAN.md D-8).  NULL only if this is ever called with a name the C-side
+ * only one, so accepting the alias is not accepting a second behaviour.
+ * NULL only if this is ever called with a name the C-side
  * refusal did not see -- defensive, mirrors mdbp_parse_sql_mode()'s -1 for
  * ORACLE/MSSQL above.  The const_cast is the one src/mdbp_lex.cc's charset
  * section explains: mdbp_cs_utf8mb4 is const, this function's return type
@@ -692,26 +684,23 @@ extern "C" mdbp_lexer *mdbp_lex_new(const char *sql, size_t len,
    * get_hash_symbol compares against.  MariaDB calls it once per server
    * start; once per process is the same thing.
    *
-   * PLAN.md P4.1 deliverable 1.  lex_init() WRITES MariaDB's own shared
-   * keyword tables (symbols[].length, sql_functions[].length), so two
-   * threads calling mdbp_parser_new() at the same moment used to run it
-   * twice, concurrently, over the same tables while a third thread's lexer
-   * could already be reading them.  Those tables are MariaDB's and live in
-   * GENERATED output (build/keywords.h), which extract.sh rewrites on every
-   * run: the guard therefore cannot go on them, it goes HERE, on the one
-   * call site, which is ours and survives regeneration.
+   * lex_init() WRITES MariaDB's own shared keyword tables
+   * (symbols[].length, sql_functions[].length), so two threads calling
+   * mdbp_parser_new() at the same moment must not both run it, concurrently,
+   * over the same tables while a third thread's lexer could already be
+   * reading them.  Those tables are MariaDB's and live in generated output
+   * (generated/keywords.h), which a re-extraction rewrites: the guard
+   * therefore does not go on them, it goes HERE, on the one call site,
+   * which is ours and survives regeneration.
    *
    * pthread_once(3) rather than a C++ function-local static: a dynamically
-   * initialised local static makes g++ emit __cxa_guard_acquire /
-   * __cxa_guard_release, which live in libstdc++ and would give this shared
-   * object a second DT_NEEDED -- `library_links_only_libc` is a banked
-   * headline of this plan and must stay true.  std::call_once is out for the
-   * same reason (and this translation unit is -fno-exceptions).  glibc's own
-   * C11 call_once() is implemented on __pthread_once, so this is the same
-   * primitive the C side (src/parser_glue.c) uses, reached by the one
-   * spelling that is safe in C++ here, and it lives in libc.  Every thread
+   * initialised local static makes the compiler emit __cxa_guard_acquire /
+   * __cxa_guard_release, which live in the C++ runtime library and would
+   * make this library depend on it.  std::call_once is out for the same
+   * reason.  On POSIX systems this is the same primitive the C side's
+   * mdbp_once() (src/mdbp_once.h) uses, and it lives in libc.  Every thread
    * returning from pthread_once() sees the finished tables, which is the
-   * happens-before edge a bare `if (!done)` never had. */
+   * happens-before edge a bare `if (!done)` would not give. */
   static pthread_once_t keyword_lengths_once= PTHREAD_ONCE_INIT;
   unsigned long long bits= 0;
   mdbp_lexer *lx;
@@ -742,7 +731,7 @@ extern "C" mdbp_lexer *mdbp_lex_new(const char *sql, size_t len,
     memcpy(lx->buf, sql, len);
   /* MariaDB's alloc_query() NUL-terminates the query buffer, and
    * lex_one_token relies on it: state_map[0] == MY_LEX_EOL is how the scanner
-   * learns it is at the end (reflex.py's module docstring says the same). */
+   * learns it is at the end. */
   lx->buf[len]= '\0';
 
   lx->valid= valid;
@@ -751,10 +740,10 @@ extern "C" mdbp_lexer *mdbp_lex_new(const char *sql, size_t len,
   lx->thd.lex= &lx->lex;
   lx->thd.m_parser_state= &lx->ps;
   lx->thd.variables.sql_mode= bits;
-  /* The comment gate's release id (src/lexshim.h's MYSQL_VERSION_ID, plan
-   * `tokeniser-entry-points.md` D-7).  Every lexer starts at the one default
-   * (D-9); mdbp_lex_set_version_id() below is how a caller changes it.  A
-   * field of this lexer, so no thread_local and no global (D-8). */
+  /* The comment gate's release id (src/lexshim.h's MYSQL_VERSION_ID).
+   * Every lexer starts at the one default; mdbp_lex_set_version_id() below
+   * is how a caller changes it.  A field of this lexer, so no thread_local
+   * and no global. */
   lx->thd.variables.mdbp_version_id= MDBP_LEX_DEFAULT_VERSION_ID;
   lx->lex.current_select= &lx->sel;
   /* NO_MATTER is the value the field carries everywhere outside the grammar
@@ -767,7 +756,7 @@ extern "C" mdbp_lexer *mdbp_lex_new(const char *sql, size_t len,
 
   /* init() allocates the pre-processed buffer through THD::alloc, which reads
    * mdbp_current; set it for the duration.  system_charset_info and
-   * national_charset_info bracket it the same way (P3.1 deliverable 4):
+   * national_charset_info bracket it the same way:
    * init() is one of the two places the sliced lexer can read them, the
    * other being MYSQLlex() in mdbp_lex_next below. */
   saved= mdbp_current;
@@ -789,8 +778,9 @@ extern "C" mdbp_lexer *mdbp_lex_new(const char *sql, size_t len,
   mdbp_current= saved;
 
   /* reset() sets stmt_prepare_mode FALSE (sql_lex.cc:857) because the server
-   * turns it on only for a PREPARE; PLAN §1.8 / thd.md §3 default it ON here,
-   * and --no-prepare-mode turns it off. */
+   * turns it on only for a PREPARE; thd.md section 3 (`stmt_prepare_mode`)
+   * defaults it ON here, so that `?` is accepted, and a caller's
+   * prepare_mode 0 (the CLI's --no-prepare-mode) turns it off. */
   lx->ps.m_lip.stmt_prepare_mode= prepare_mode ? TRUE : FALSE;
   return lx;
 }
@@ -818,7 +808,7 @@ extern "C" const char *mdbp_lex_eof_token(const mdbp_lexer *lx)
   return lx == NULL ? NULL : lx->eof_token;
 }
 
-/* THE JOIN (src/lexshim.h's `THE JOIN` comment, task P1.1 deliverable 4).
+/* THE JOIN (src/lexshim.h's `THE JOIN` comment).
  *
  * The `SELECT_LEX` this lexer reads through `thd->lex->current_select` is
  * `lx->sel`, one object, owned by the lexer for its whole life.  Handing its
@@ -831,13 +821,12 @@ extern "C" SELECT_LEX *mdbp_lex_select(mdbp_lexer *lx)
   return lx == NULL ? NULL : &lx->sel;
 }
 
-/* The comment gate's release id, for this lexer only (plan
- * `tokeniser-entry-points.md` P3).  It writes the field src/lexshim.h's
- * MYSQL_VERSION_ID names, which the sliced lex_one_token() reads through its
- * own `thd` parameter at both read sites, so the sliced bytes never see a
- * difference.  The range is checked BEFORE anything is stored: an id the
- * server's five- or six-digit test cannot mean is refused with -1 and the
- * lexer keeps the id it had. */
+/* The comment gate's release id, for this lexer only.  It writes the field
+ * src/lexshim.h's MYSQL_VERSION_ID names, which the sliced lex_one_token()
+ * reads through its own `thd` parameter at both read sites, so the sliced
+ * bytes never see a difference.  The range is checked BEFORE anything is
+ * stored: an id the server's five- or six-digit test cannot mean is refused
+ * with -1 and the lexer keeps the id it had. */
 extern "C" int mdbp_lex_set_version_id(mdbp_lexer *lx, unsigned long id)
 {
   if (lx == NULL || id < MDBP_LEX_VERSION_ID_MIN || id > MDBP_LEX_VERSION_ID_MAX)
@@ -853,12 +842,10 @@ extern "C" int mdbp_lex_set_version_id(mdbp_lexer *lx, unsigned long id)
  * valid_symbols[] is a property of the parser state and cannot be spent, so
  * the consumption is modelled the only way it can be: by asking valid() about
  * the token the C actually chose and emitting it only if the parser can take
- * it.  reflex.py:1479 (`if not self.valid(chosen): return token`) is the same
- * step, and the same measurement stands behind it -- the family gate alone
- * costs 845 records (evidence/P2b/trajectory.jsonl iter 1 -> 2, fp_total
- * 3,645 -> 2,800), the witness being the partition list of `CREATE TABLE t1
+ * it.  Without this step the arm fires where the server's would already
+ * be spent; the witness is the partition list of `CREATE TABLE t1
  * (a int) PARTITION BY RANGE (a) (PARTITION p0 VALUES LESS THAN (1))`, whose
- * state can shift LEFT_PAREN_WITH but not LEFT_PAREN_ALT.
+ * state can shift LEFT_PAREN_WITH but not LEFT_PAREN_ALT (thd.md row 5).
  *
  * Downgrading AFTER lex_token returned is equivalent to declining inside it:
  * the arm's only other effects -- buffering the lookahead
@@ -903,7 +890,7 @@ extern "C" int mdbp_lex_next(mdbp_lexer *lx, mdbp_token *out)
   lx->nrec= 0;
   mdbp_current= lx;
   /* system_charset_info/national_charset_info bracket MYSQLlex() the same
-   * way mdbp_current does (P3.1 deliverable 4): this is the other of the two
+   * way mdbp_current does: this is the other of the two
    * places the sliced lexer can read them (the other is init(), in
    * mdbp_lex_new above). */
   saved_sys= system_charset_info;
@@ -937,7 +924,7 @@ extern "C" int mdbp_lex_next(mdbp_lexer *lx, mdbp_token *out)
     if (mdbp_is_contraction(token))
     {
       span.start= lx->rec[0].start;   /* one token out of two: the span covers
-                                       * both (PLAN §1.3(1)) */
+                                       * both */
       span.end= lx->rec[1].end;
     }
     else
@@ -958,8 +945,7 @@ extern "C" int mdbp_lex_next(mdbp_lexer *lx, mdbp_token *out)
 
   if (token == 0)
   {
-    /* bison's end marker.  reflex.py's next() does not yield it either; it is
-     * what ends the stream. */
+    /* bison's end marker.  Not yielded; it is what ends the stream. */
     lx->finished= 1;
     lx->eof_token= "$end";
     return 0;

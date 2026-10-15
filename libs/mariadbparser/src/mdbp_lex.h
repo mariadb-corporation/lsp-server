@@ -1,6 +1,6 @@
 /* src/mdbp_lex.h -- the bridge, and the ONLY thing that crosses between the
  * C++ lexer translation unit (src/mdbp_lex.cc, which #includes the sliced
- * build/lexer_extracted.cc) and the C parser translation units.
+ * generated/lexer_extracted.cc) and the C parser translation units.
  *
  * WHY THERE HAS TO BE A BRIDGE AT ALL.  The two halves disagree about
  * YYSTYPE.  src/stub.h records that the extracted grammar is built with
@@ -15,8 +15,8 @@
  * `enum enum_parsing_place` from src/stub.h (which includes the first) --
  * deliberately REUSED, not duplicated: a second token struct would be a
  * second place for a byte offset to be wrong, and a second SELECT_LEX would
- * be a second place for the one field MariaDB's lexer reads to live (task
- * P1.1; see src/lexshim.h's `THE JOIN`).
+ * be a second place for the one field MariaDB's lexer reads to live (see
+ * src/lexshim.h's `THE JOIN`).
  */
 #ifndef MDBP_LEX_H
 #define MDBP_LEX_H
@@ -30,8 +30,8 @@ typedef struct mdbp_lexer mdbp_lexer;
 typedef int (*mdbp_valid_fn)(const char *terminal_name, void *user);
 
 /* sql/len need not be NUL-terminated; the lexer keeps its own copy.
- * sql_mode is the CLI's comma list; charset is the connection charset name
- * (P3.1, PLAN.md D-9/D-10) -- NULL means "utf8mb4"; prepare_mode is 0/1.
+ * sql_mode is a comma-separated sql_mode list; charset is the connection
+ * charset name -- NULL means "utf8mb4"; prepare_mode is 0/1.
  * valid may be NULL, which means "always 0" (parsing_place == NO_MATTER).
  * Returns NULL on allocation failure, an sql_mode this lexer refuses, or a
  * charset this lexer refuses (the caller is expected to have already
@@ -48,7 +48,7 @@ int mdbp_lex_next(mdbp_lexer *lx, mdbp_token *out);
 /* "$end" or "ABORT_SYM" once the stream ended; NULL before that. */
 const char *mdbp_lex_eof_token(const mdbp_lexer *lx);
 
-/* THE JOIN (task P1.1).  The one `SELECT_LEX` this lexer reads its
+/* THE JOIN.  The one `SELECT_LEX` this lexer reads its
  * `parsing_place` out of, so the parser's own lifted actions can write it:
  * src/mdbp_api.c's mdbp_parse_sql() points `mdbp_ctx.current_select` here
  * before yyparse runs, and from then on the field the actions set and the
@@ -57,24 +57,24 @@ const char *mdbp_lex_eof_token(const mdbp_lexer *lx);
 SELECT_LEX *mdbp_lex_select(mdbp_lexer *lx);
 
 
-/* THE COMMENT GATE'S RELEASE ID (plan `tokeniser-entry-points.md` P3).
+/* THE COMMENT GATE'S RELEASE ID.
  *
  * MariaDB's lexer reads a versioned comment -- '/' '*' '!' followed by five
  * or six digits -- as SQL only when those digits pass a test against the
  * server's own release id, MYSQL_VERSION_ID (major*10000 + minor*100 +
- * patch).  src/lexshim.h makes that macro a field of this lexer's THD
- * (its D-7), so the id is per lexer and nothing about it is global (D-8).
+ * patch).  src/lexshim.h makes that macro a field of this lexer's THD, so
+ * the id is per lexer and nothing about it is global.
  *
- * MDBP_LEX_DEFAULT_VERSION_ID is THE ONE SOURCE of the default (D-9): the
- * pinned MariaDB tree's own release id.  mdbp_lex_new() gives every lexer
- * this value and src/mdbp_api.c's mdbp_parser_new() gives every parser this
- * value; nothing else spells the number.  tests/test_version_id.py asserts
- * that it equals source/PROVENANCE.json's version.id and the Python
- * oracle's reflex.MYSQL_VERSION_ID, so a pin move that forgets it fails
- * there.  The public header and README.md do not repeat it: a caller learns
- * it from mdbp_parser_version_id() on a new parser.
+ * MDBP_LEX_DEFAULT_VERSION_ID is the one source of the default: the pinned
+ * MariaDB tree's own release id.  mdbp_lex_new() gives every lexer this
+ * value and src/mdbp_api.c's mdbp_parser_new() gives every parser this
+ * value; nothing else spells the number.  Nothing checks it automatically:
+ * when the pin's VERSION changes it has to be updated by hand, as
+ * libs/mariadbparser/UPSTREAM.md says.  The public header and README.md do
+ * not repeat it: a caller learns it from mdbp_parser_version_id() on a new
+ * parser.
  *
- * MDBP_LEX_VERSION_ID_MIN/_MAX are the accepted range (D-6): the server's
+ * MDBP_LEX_VERSION_ID_MIN/_MAX are the accepted range: the server's
  * test compares five- or six-digit numbers, so an id outside it cannot mean
  * a release.  Both setters -- this file's and the public
  * mdbp_parser_set_version_id() -- check against these two macros and
@@ -91,13 +91,13 @@ SELECT_LEX *mdbp_lex_select(mdbp_lexer *lx);
 int mdbp_lex_set_version_id(mdbp_lexer *lx, unsigned long id);
 void mdbp_lex_free(mdbp_lexer *lx);
 
-/* NOT NUL-TERMINATED.  `out->text` points at `byte_start` inside the lexer's
+/* Not NUL-terminated.  `out->text` points at `byte_start` inside the lexer's
  * own copy of the query, so its length is `byte_end - byte_start` and it is
  * NOT a C string: the byte after it is the next byte of the query.  Every
  * consumer in this repository uses the offsets; nothing calls strlen() on it.
  *
- * THE STREAM ENDS THE WAY tools/vendor/bison2ts/reflex.py's next() ends it:
- *   - END_OF_INPUT IS yielded.  It is a declared terminal (sql_yacc.yy:426)
+ * How the stream ends:
+ *   - END_OF_INPUT is yielded.  It is a declared terminal (sql_yacc.yy:426)
  *     that three live rules need, and MariaDB's lex_token passes it through.
  *   - bison's $end (token 0) is NOT yielded; it ends the stream and makes
  *     mdbp_lex_eof_token() answer "$end".

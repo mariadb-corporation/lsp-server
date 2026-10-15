@@ -1,29 +1,24 @@
 /* src/lexshim.h -- the fake THD / LEX / SELECT_LEX surface the sliced lexer
- * compiles against (task 7.2, P5a).
+ * compiles against.
  *
  * SEEDED FROM tools/vendor/thd.md, WHICH IS THE LEDGER OF SERVER STATE THE
  * LEXER READS.  One field per row of that document, each carrying the
  * sql_lex.cc line the ledger cites as a comment.  Nothing here is invented:
- * anything the compiler demands beyond the ledger is added in a later round
- * and recorded in evidence/P5a/shim-symbols.json as a finding (open question
- * Q7: is the ledger complete?).  The `[thd.md ...]` tag on a field says the
- * ledger asked for it; `[round N]` says the compiler demanded that very name
- * in round N -- cross-check it against that round's `new_symbols` in
- * evidence/P5a/shim-symbols.json -- and `[round N, with X]` says the compiler
- * named X, not this, and this is what X's declaration needs.
+ * a `thd.md` tag on a field says the ledger asked for it; an untagged
+ * declaration is a name the sliced code needs to compile or link beyond the
+ * ledger, with the sql_lex.cc line that uses it; and `[with X]` says the
+ * slice names X, not this, and this is what X's declaration needs.
  *
  * WHAT THIS IS NOT.  It is not a lexer.  Everything that IS MariaDB source is
- * sliced by tools/lexslice.py into build/lexer_extracted.cc; what lives
+ * sliced by tools/lexslice.py into generated/lexer_extracted.cc; what lives
  * here is the fake THD/LEX/SELECT_LEX surface that slice compiles against,
  * plus MariaDB's spellings for the C scaffolding its own sources use.
  *
- * TASK 8.2 (P5b) MADE IT LINK.  Under P5a the function DECLARATIONS below had
- * no bodies on purpose -- `g++ -c` never links, and an empty body would have
- * been a behavioural claim the spike had not measured.  Every one of them now
- * has a body in src/mdbp_lex.cc, carrying the tools/vendor/thd.md row or the
- * sql_lex.cc behaviour that justifies it and saying whether it is faithful or
- * a deliberate no-op.  Nothing that is lexing is shimmed: `init`, `reset`,
- * `get_text` and `unescape` moved INTO the slice in 8.2.
+ * Every function declared below has a body in src/mdbp_lex.cc, carrying the
+ * tools/vendor/thd.md row or the sql_lex.cc behaviour that justifies it and
+ * saying whether it is faithful or a deliberate no-op.  Nothing that is
+ * lexing is shimmed: `init`, `reset`, `get_text` and `unescape` are part of
+ * the slice.
  *
  * tools/vendor/thd.md is VENDORED: read it, never patch it.
  */
@@ -35,7 +30,7 @@
  * declared HERE.  They moved so that there is exactly one of each: see THE
  * JOIN below.  It pulls in include/mdbparse.h (which this file already saw
  * through src/mdbp_lex.h) and nothing else of ours; it must never pull in
- * build/parser.h, and it does not. */
+ * bison's parser.h, and it does not. */
 #include "stub.h"
 
 #include <stddef.h>
@@ -54,8 +49,8 @@ typedef unsigned long ulong;
 typedef char my_bool;
 typedef uint32_t my_wc_t;
 typedef unsigned int my_repertoire_t;
-typedef unsigned long myf;                       /* sql_lex.cc:2987 [round 1] */
-/* [8.2] MariaDB's spellings for the widths strings/my_strtoll10.c is written
+typedef unsigned long myf;                       /* sql_lex.cc:2987 */
+/* MariaDB's spellings for the widths strings/my_strtoll10.c is written
  * in.  Scaffolding, not ledger rows -- the FUNCTION is sliced. */
 typedef long long longlong;
 typedef unsigned long long ulonglong;
@@ -65,7 +60,7 @@ typedef unsigned int uint32;
 
 /* The comment token's value, read at sql_lex.cc:2565-2575 (HINT_COMMENT).
  * thd.md's `lip->hint_comment` row says the branch is never taken; the type
- * still has to exist for the slice to compile. [round 1, with YYSTYPE::lex_comment] */
+ * still has to exist for the slice to compile. [with YYSTYPE::lex_comment] */
 struct Lex_comment_st
 {
   char *str;
@@ -74,11 +69,11 @@ struct Lex_comment_st
 };
 
 /* include/my_sys.h's element-count macro, used by
- * find_keyword_qualified_special_func (sql_lex.cc:2775). [round 1] */
+ * find_keyword_qualified_special_func (sql_lex.cc:2775). */
 #define array_elements(A) ((size_t) (sizeof(A) / sizeof(A[0])))
 
 /* strings/ library entry point, read at sql_lex.cc:2474 for the version
- * digits of a versioned comment. [round 1]  Task 8.2 SLICES the definition
+ * digits of a versioned comment.  The definition is sliced
  * (strings/my_strtoll10.c, SLICE_SUPPORT), so this is only the forward
  * declaration that keeps the ordering honest. */
 extern longlong my_strtoll10(const char *nptr, char **endptr, int *error);
@@ -98,13 +93,13 @@ typedef struct st_mysql_const_lex_string { const char *str; size_t length; }
 /* thd.md row `thd->charset()` (sql_lex.cc:2038-2040, 1643, 2913, 2877, 3026):
  * "utf8mb4, always".  The lexer reads exactly three things off CHARSET_INFO --
  * the two 256-byte maps and the character length -- so those three are what
- * the shim carries.  Which of the plan's two charset routes fills them is the
- * charset decision in evidence/P5a/spike.json, and P5b's test is what checks
- * the 512 bytes byte-for-byte. */
+ * the shim carries.  The two maps come from generated/state_maps.h, computed
+ * by MariaDB's own init_state_maps() over the sliced utf8mb4 ctype table (see
+ * libs/mariadbparser/UPSTREAM.md). */
 struct MY_COLLATION_HANDLER
 {
   /* find_keyword_qualified_special_func (sql_lex.cc:2782) is the one caller
-   * in the slice. [round 1, with CHARSET_INFO::coll] */
+   * in the slice. [with CHARSET_INFO::coll] */
   int (*strnncollsp)(struct charset_info_st *, const uchar *, size_t,
                      const uchar *, size_t);
 };
@@ -116,22 +111,21 @@ struct charset_info_st
   const uchar *ident_map;
   uint mbmaxlen;
   uint number;
-  /* P3.1 deliverable 6: const, so an instance built entirely from constant
+  /* const, so an instance built entirely from constant
    * data (src/mdbp_lex.cc's mdbp_coll) can itself be const and move out of
    * writable memory.  The one sliced reader, sql_lex.cc:2782's
    * `cs->coll->strnncollsp(cs, ...)`, only ever reads the field and calls
    * through it. */
-  const MY_COLLATION_HANDLER *coll;              /* sql_lex.cc:2782 [round 1] */
-  bool use_mb() const;                           /* sql_lex.cc:2875, 2918 [round 1] */
-  int charlen(const char *s, const char *e) const; /* sql_lex.cc:2880 [round 1] */
+  const MY_COLLATION_HANDLER *coll;              /* sql_lex.cc:2782 */
+  bool use_mb() const;                           /* sql_lex.cc:2875, 2918 */
+  int charlen(const char *s, const char *e) const; /* sql_lex.cc:2880 */
 };
-typedef struct charset_info_st CHARSET_INFO;     /* [round 2] -- the ONE
-                                                  * symbol round 2 demanded */
+typedef struct charset_info_st CHARSET_INFO;
 
 /* include/m_ctype.h's `my_ismbchar(cs, a, b)` -- "the length of the multi-byte
  * character at `a`, or 0".  A macro there too; here it forwards to the sliced
  * my_charlen_utf8mb4 through CHARSET_INFO::charlen (src/mdbp_lex.cc).  Read by
- * get_text() (sql_lex.cc:1656) and my_unescape() (sql_lex.cc:1577). [8.2] */
+ * get_text() (sql_lex.cc:1656) and my_unescape() (sql_lex.cc:1577). */
 static inline int mdbp_ismbchar(const CHARSET_INFO *cs, const char *s,
                                 const char *e)
 {
@@ -140,31 +134,32 @@ static inline int mdbp_ismbchar(const CHARSET_INFO *cs, const char *s,
 }
 #define my_ismbchar(cs, a, b) mdbp_ismbchar((cs), (a), (b))
 /* include/my_global.h: multi-byte support is compiled in.  get_text() and
- * my_unescape() both guard their charlen() calls with it. [8.2] */
+ * my_unescape() both guard their charlen() calls with it. */
 #define USE_MB 1
-/* const since P3.1 deliverable 6 (evidence/P7/globals.json: never_written) --
+/* const: nothing ever writes it, so it can live in read-only memory --
  * ErrConvString's constructor below takes `const CHARSET_INFO *` to match, so
  * the sliced call `ErrConvString csname(str->str + 1, str->length - 1,
  * &my_charset_bin);` (sql_lex.cc:2986) needs no cast. */
 extern const CHARSET_INFO my_charset_bin;        /* sql_lex.cc:2986
-                                                  * [round 1, with ErrConvString] */
-/* PLAN.md P2.1: thread_local ahead of need (P3 makes the pointer itself
- * per-parse; today it always points at &mdbp_cs_utf8mb4).  Every declaration
- * of a thread_local entity in one translation unit must repeat the
- * specifier, so this extern and src/mdbp_lex.cc's definition agree. */
-extern thread_local CHARSET_INFO *national_charset_info; /* sql_lex.cc:2158 [round 1] */
-#define MY_CS_PRIMARY 32                         /* sql_lex.cc:2993 [round 1] */
+                                                  * [with ErrConvString] */
+/* thread_local: the pointer is per parse -- mdbp_lex_new()/mdbp_lex_next()
+ * set it to the lexer's charset around the sliced calls that read it -- and
+ * the sliced lexer reaches it as a global.  Every declaration of a
+ * thread_local entity in one translation unit must repeat the specifier, so
+ * this extern and src/mdbp_lex.cc's definition agree. */
+extern thread_local CHARSET_INFO *national_charset_info; /* sql_lex.cc:2158 */
+#define MY_CS_PRIMARY 32                         /* sql_lex.cc:2993 */
 extern CHARSET_INFO *get_charset_by_csname(const char *name, uint flags,
                                            unsigned long my_flags);
-                                                 /* sql_lex.cc:2992 [round 1] */
+                                                 /* sql_lex.cc:2992 */
 
 /* sql/sql_error.h's error-message string wrapper: scan_ident_middle
- * (sql_lex.cc:2986) builds one to name an unknown character set. [round 1] */
+ * (sql_lex.cc:2986) builds one to name an unknown character set. */
 class ErrConvString
 {
   /* sql/sql_error.h sizes ErrConv's buffer at MYSQL_ERRMSG_SIZE; the one call
    * site builds one on the stack, so the buffer has to be here rather than in
-   * src/mdbp_lex.cc.  512 is MYSQL_ERRMSG_SIZE in the pinned tree. [8.2] */
+   * src/mdbp_lex.cc.  512 is MYSQL_ERRMSG_SIZE in the pinned tree. */
   char m_buf[512];
 public:
   ErrConvString(const char *str, size_t length, const CHARSET_INFO *cs);
@@ -207,23 +202,22 @@ public:
 #define MY_REPERTOIRE_UNICODE30  2
 extern my_bool my_charset_is_ascii_based(CHARSET_INFO *cs);
 
-/* PLAN.md P2.1: thread_local ahead of need, same reasoning as
- * national_charset_info above. */
+/* thread_local, same reasoning as national_charset_info above. */
 extern thread_local CHARSET_INFO *system_charset_info;
 /* strings/my_strtoll10.c skips leading spaces through my_isspace() against
  * latin1; the ctype table is sliced (SLICE_SUPPORT), the CHARSET_INFO that
- * wraps it is built in src/mdbp_lex.cc.  const since P3.1 deliverable 6
- * (evidence/P7/globals.json: never_written); my_isspace() is a macro over
- * ->ctype, so it does not care whether its argument is const. [8.2] */
+ * wraps it is built in src/mdbp_lex.cc.  const because nothing ever writes
+ * it; my_isspace() is a macro over ->ctype, so it does not care whether its
+ * argument is const. */
 extern const CHARSET_INFO my_charset_latin1;
-/* `to_upper_lex` is NOT declared here any more: task 8.2 slices sql_lex.cc's
- * own `static uchar to_upper_lex[]` (sql_lex.cc:646), and a non-static
+/* `to_upper_lex` is not declared here: the slice carries sql_lex.cc's own
+ * `static uchar to_upper_lex[]` (sql_lex.cc:646), and a non-static
  * declaration ahead of a static definition is a hard error. */
 
 /* --- sql_mode (thd.md section 2) ----------------------------------------- */
 /* One #define per flag row of the ledger's sql_mode table, with the
  * sql_lex.cc line it cites.  The values are bit positions, not MariaDB's own
- * numbering: nothing in this phase compares a mode value with the server. */
+ * numbering: nothing here compares a mode value with the server. */
 #define MODE_ANSI_QUOTES          (1ULL << 0)  /* thd.md: sql_lex.cc:2388 */
 #define MODE_PIPES_AS_CONCAT      (1ULL << 1)  /* thd.md: sql_lex.cc:1450 */
 #define MODE_HIGH_NOT_PRECEDENCE  (1ULL << 2)  /* thd.md: sql_lex.cc:1447 */
@@ -234,21 +228,21 @@ extern const CHARSET_INFO my_charset_latin1;
 
 /* --- MYSQL_VERSION_ID (thd.md section 3) --------------------------------- */
 /* thd.md: read at sql_lex.cc:2488, 2493 -- in the slice,
- * build/lexer_extracted.cc:1767 and :1769, both inside
+ * generated/lexer_extracted.cc:1767 and :1769, both inside
  * `Lex_input_stream::lex_one_token(YYSTYPE *yylval, THD *thd)` -- and the
  * ledger records the pinned tree's release id there, a constant.
  *
- * PER LEXER SINCE plan `tokeniser-entry-points.md` P3 (its D-7).  The sliced
- * lexer's bytes do not change: MYSQL_VERSION_ID stays a macro, and it now
- * names `mdbp_version_id`, a field of THIS file's own struct system_variables
- * below, reached through the `thd` parameter both read sites already have.
- * src/mdbp_lex.cc's mdbp_lex_new() sets the field to
- * MDBP_LEX_DEFAULT_VERSION_ID (src/mdbp_lex.h, the one source of the default,
- * D-9), and mdbp_lex_set_version_id() stores a caller's id.  That the macro
- * binds to a parameter called `thd` is a CHECK, not a hope:
- * tests/test_version_id.py fails if the slice ever has a MYSQL_VERSION_ID
- * outside a function whose parameter list declares `THD *thd`, which is
- * what a future slice that moved a read site would produce. */
+ * Here it is per lexer.  The sliced lexer's bytes do not change:
+ * MYSQL_VERSION_ID stays a macro, and it names `mdbp_version_id`, a field of
+ * this file's own struct system_variables below, reached through the `thd`
+ * parameter both read sites already have.  src/mdbp_lex.cc's mdbp_lex_new()
+ * sets the field to MDBP_LEX_DEFAULT_VERSION_ID (src/mdbp_lex.h, the one
+ * source of the default), and mdbp_lex_set_version_id() stores a caller's
+ * id.  The macro relies on a parameter called `thd` being in scope: after a
+ * re-extraction or a hand edit that moves a read site, check that every
+ * MYSQL_VERSION_ID in generated/lexer_extracted.cc is still inside a
+ * function whose parameter list declares `THD *thd`; nothing checks this
+ * automatically. */
 #define MYSQL_VERSION_ID (thd->variables.mdbp_version_id)
 
 /* --- parsing_place (thd.md section 1) ------------------------------------ */
@@ -258,7 +252,7 @@ extern const CHARSET_INFO my_charset_latin1;
  * They are declared ONCE, in src/stub.h, which is included just above -- and
  * that is deliberate, because src/stub.h is also what bison's generated
  * parser is compiled against.  So `mdbp_ctx.current_select` (the field the
- * lifted `sql_yacc.yy` actions write, task P1.1) and `LEX::current_select`
+ * lifted `sql_yacc.yy` actions write) and `LEX::current_select`
  * (the field `Lex_input_stream::lex_token` reads at its five feedback sites,
  * sql_lex.cc:1961/1971/1985/1994/2006) are POINTERS TO THE SAME TYPE, and on
  * the live path they are pointers to THE SAME OBJECT: src/mdbp_lex.cc's
@@ -273,13 +267,13 @@ extern const CHARSET_INFO my_charset_latin1;
  * `save_parsing_place` too, because sql_yacc.yy:12796/12797/14295 move the
  * field through it. */
 
-#define OPTION_LEX_FOUND_COMMENT (1UL << 0)   /* sql_lex.cc:2412 [round 1] */
+#define OPTION_LEX_FOUND_COMMENT (1UL << 0)   /* sql_lex.cc:2412 */
 
 struct LEX
 {
   SELECT_LEX *current_select;             /* thd.md rows 1-5, via thd->lex */
-  ulong lex_options;                      /* sql_lex.cc:2412, 2423 [round 1] */
-  bool safe_to_cache_query;               /* sql_lex.cc:2510, 2535 [round 1] */
+  ulong lex_options;                      /* sql_lex.cc:2412, 2423 */
+  bool safe_to_cache_query;               /* sql_lex.cc:2510, 2535 */
   /* thd.md section 3, `lookup_keywords_after_qualifier` (sql_lex.cc:2191):
    * assumed false; only sql_yacc.yy's field_spec rule sets it. */
   struct { bool lookup_keywords_after_qualifier; } parsing_options;
@@ -291,9 +285,9 @@ class Lex_input_stream;          /* defined by the slice, below this header */
 /* MYSQLlex/ORAlex reach the lexer as thd->m_parser_state->m_lip.  The
  * definition is in PHASE 2 at the bottom of this file, because it holds a
  * Lex_input_stream BY VALUE and that class is sliced out of sql/sql_lex.h
- * between the two inclusions.  THD only needs the pointer. [8.2 -- P5a held a
- * reference member here so the whole struct could be declared in phase 1; a
- * reference cannot be initialised by the malloc-and-memset the bridge uses.] */
+ * between the two inclusions.  THD only needs the pointer.  (A reference
+ * member would not do: a reference cannot be initialised by the
+ * malloc-and-memset the bridge uses.) */
 struct Parser_state;
 
 struct sql_digest_state;         /* thd.md: digest only, "not modelled" */
@@ -302,7 +296,7 @@ struct system_variables
 {
   unsigned long long sql_mode;            /* thd.md section 2 */
   bool query_cache_strip_comments;        /* sql_lex.cc versioned-comment arm */
-  /* MYSQL_VERSION_ID, above (plan `tokeniser-entry-points.md` D-7): the
+  /* MYSQL_VERSION_ID, above: the
    * release id this lexer judges versioned comments against. */
   unsigned long mdbp_version_id;
 };
@@ -320,12 +314,12 @@ struct THD
    * (sql_lex.cc:1693) and body_utf8_start both assign it to a char*. */
   char *alloc(size_t size);
   const char *query() const;
-  char *strmake(const char *str, size_t size);  /* sql_lex.cc:1794 [round 1] */
+  char *strmake(const char *str, size_t size);  /* sql_lex.cc:1794 */
   unsigned long get_utf8_flag() const;          /* sql_lex.cc:2987
-                                                 * [round 1, with myf: one
+                                                 * [with myf: one
                                                  * declaration, both names] */
   /* thd.md section 2, MODE_NO_BACKSLASH_ESCAPES (sql_lex.cc:1665): read by
-   * the sliced Lex_input_stream::unescape (sql_lex.cc:1630). [8.2] */
+   * the sliced Lex_input_stream::unescape (sql_lex.cc:1630). */
   bool backslash_escapes() const;
 };
 
@@ -337,27 +331,27 @@ union YYSTYPE;                   /* defined in phase 2, at the bottom */
 /* --- keyword lookup ------------------------------------------------------ */
 /* find_keyword calls get_hash_symbol, which MariaDB defines in GENERATED
  * lex_hash.h (built by sql/gen_lex_hash.cc, which itself #includes the
- * server).  Declared, not defined: `-c` never links, and generating
- * lex_hash.h is P5b's problem, not this spike's.  build/keywords.h carries
- * sql/lex.h's two tables so the SYM() names are checked against
- * build/parser.h at compile time. */
+ * server).  Declared here; src/mdbp_lex.cc defines it as a plain search
+ * over the same tables.  generated/keywords.h carries sql/lex.h's two
+ * tables so the SYM() names are checked against bison's parser.h at compile
+ * time. */
 struct st_symbol;
 extern struct st_symbol *get_hash_symbol(const char *s, unsigned int len,
                                          bool function);
 
-/* build/parser.h declares `int yyparse(struct mdbp_ctx *ctx)` -- P2's own
- * %param, not a server symbol.  Forward-declared here so including parser.h
- * outside src/mdbp_internal.h is not a diagnostic. [round 1] */
+/* bison's parser.h declares `int yyparse(struct mdbp_ctx *ctx)` -- this
+ * library's own %param, not a server symbol.  Forward-declared here so
+ * including parser.h outside src/mdbp_internal.h is not a diagnostic. */
 struct mdbp_ctx;
 
-/* --- charset route (b) generator only (build/state_maps_gen.cc) ---------- */
+/* --- state-map generator only (state_maps_gen.cc) ----------------------- */
 /* mysys/charset.c's init_state_maps() allocates the 512 bytes through
  * my_once_alloc and asks the charset for a character's length through
- * my_ci_charlen.  Both are macros in MariaDB's own headers; the generator is
- * a build-time program whose only output is the two tables, so plain malloc
- * and a direct utf8mb4 call are exactly what the route means.
- * [charset route (b) only: the generator compiles clean, so no round ever
- * demanded these -- see spike.json charset.evidence.route_b] */
+ * my_ci_charlen.  Both are macros in MariaDB's own headers.  The generator,
+ * state_maps_gen.cc, is written, compiled and run by `tools/lexslice.py
+ * --compile-state-maps` to produce generated/state_maps.h; its only output
+ * is the two tables, so plain malloc and a direct utf8mb4 call are all it
+ * needs.  The library itself does not use these two macros. */
 #define my_once_alloc(size, flags) malloc(size)
 extern int mdbp_charlen(CHARSET_INFO *cs, const uchar *s, const uchar *e);
 #define my_ci_charlen(cs, s, e) mdbp_charlen((cs), (s), (e))
@@ -372,7 +366,7 @@ extern int mdbp_charlen(CHARSET_INFO *cs, const uchar *s, const uchar *e);
  * are debug-build scaffolding that compiles to nothing in a release server
  * too; MY_TEST is a boolean cast.  Demanded by the sliced
  * Lex_input_stream::init (sql_lex.cc:810) and ::reset (:855) and by
- * lex_init (:686). [8.2] */
+ * lex_init (:686). */
 #define MY_TEST(a) ((a) ? 1 : 0)
 #define DBUG_EXECUTE_IF(keyword, code) do { } while (0)
 #define DBUG_SET(a) do { } while (0)
@@ -384,7 +378,7 @@ extern int mdbp_charlen(CHARSET_INFO *cs, const uchar *s, const uchar *e);
  * errno values, as the sliced my_strtoll10 (strings/my_strtoll10.c) uses them.
  * ULONGLONG_MAX is `#define`d twice there, inside an #ifdef, so it is the one
  * constant find_define() cannot locate unambiguously; both spellings are the
- * platform's own limits, which is what <limits.h> already carries. [8.2] */
+ * platform's own limits, which is what <limits.h> already carries. */
 #include <limits.h>
 #define ULONGLONG_MAX ULLONG_MAX
 #define LONGLONG_MIN LLONG_MIN
@@ -394,7 +388,7 @@ extern int mdbp_charlen(CHARSET_INFO *cs, const uchar *s, const uchar *e);
 #endif /* MDBP_LEXSHIM_H */
 
 /* =========================================================================
- * PHASE 2.  Included a second time by build/lexer_extracted.cc, AFTER the
+ * PHASE 2.  Included a second time by generated/lexer_extracted.cc, AFTER the
  * sliced types, because MariaDB's %union holds `Lex_ident_cli_st` and
  * `Lex_string_with_metadata_st` BY VALUE and those are sliced out of
  * sql/lex_ident_cli.h -- they cannot exist before the slice does.  Nothing in
@@ -405,8 +399,7 @@ extern int mdbp_charlen(CHARSET_INFO *cs, const uchar *s, const uchar *e);
 
 /* The %union members the sliced lexer touches, and only those.  Each names the
  * sql_lex.cc site that reads it; the rest of sql_yacc.yy's %union is parser
- * business and is not modelled.  [round 1, with YYSTYPE::kwd and the other
- * members listed below] */
+ * business and is not modelled. */
 union YYSTYPE
 {
   int num;                                       /* scaffolding */
@@ -423,13 +416,13 @@ union YYSTYPE
 /* Now that the slice has defined Lex_input_stream, the parser state can hold
  * one by value.  MYSQLlex/ORAlex (sql_lex.cc:1879/1885) reach the lexer as
  * `thd->m_parser_state->m_lip`, which is the whole reason this type exists
- * here. [8.2] */
+ * here. */
 struct Parser_state
 {
   Lex_input_stream m_lip;
 };
 
-/* build/parser.h is P1/P2's own bison output: our 800 terminals, our
+/* parser.h is bison's output for generated/yy_stub.yy: our terminals, our
  * numbering, so sql/lex.h's SYM(A) resolves to OUR token values.  Declaring
  * YYSTYPE above stops parser.h's `typedef int YYSTYPE` fallback. */
 #include "parser.h"
