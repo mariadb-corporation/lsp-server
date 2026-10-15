@@ -96,6 +96,46 @@ TEST(Mariadbparser, accepts_valid_statements) {
   }
 }
 
+TEST(Mariadbparser, accepts_rest_sql) {
+  auto p = make_parser();
+  for (const char *sql : {
+           "CONFIGURE REST METADATA ENABLED UPDATE IF AVAILABLE",
+           "CREATE OR REPLACE REST SERVICE /myService COMMENT 'x'",
+           "CREATE OR REPLACE REST SERVICE mike,'a@b.c'@/myService",
+           "CREATE REST SCHEMA /sakila ON SERVICE /myService FROM sakila",
+           "SHOW REST SERVICES",
+           "SHOW CREATE REST SERVICE /myService",
+           "USE REST SERVICE /myService",
+           "GRANT REST ROLE 'admin' TO 'jane'@'MRS'",
+           "REVOKE REST ROLE 'admin' FROM jane@MRS",
+           "DROP REST SERVICE /myService",
+           "CLONE REST SERVICE /a NEW REQUEST PATH /b",
+       }) {
+    auto r = parse(p.get(), sql);
+    EXPECT_TRUE(r.accepted) << sql << " rejected at " << (r.error_token ? r.error_token : "?");
+  }
+}
+
+// The words REST SQL made keywords stay usable as names in server SQL.
+TEST(Mariadbparser, rest_keywords_are_still_names) {
+  auto p = make_parser();
+  for (const char *sql : {
+           "CREATE TABLE service (rest INT, content TEXT, app INT, metadata JSON,"
+           " files INT, users INT, roles INT, views INT, url TEXT, clone INT,"
+           " configure INT, enabled INT, published INT)",
+           "SELECT rest, service.content FROM service AS content WHERE app = 1",
+           "USE rest",
+           "GRANT rest TO jane",
+           "REVOKE rest FROM jane",
+           "SHOW CREATE TABLE service",
+           "CREATE PROCEDURE p() rest: LOOP LEAVE rest; END LOOP rest",
+           "SET @rest = 1",
+       }) {
+    auto r = parse(p.get(), sql);
+    EXPECT_TRUE(r.accepted) << sql << " rejected at " << (r.error_token ? r.error_token : "?");
+  }
+}
+
 TEST(Mariadbparser, rejection_reports_token_and_byte_position) {
   auto p = make_parser();
   auto r = parse(p.get(), "SELECT FROM WHERE");

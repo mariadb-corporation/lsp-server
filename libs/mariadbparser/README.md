@@ -21,8 +21,8 @@ include/mdbparse.h   the public C API, the only header a caller needs
 src/                 the runtime: API, lexer glue, parser glue, the CLI (mdbparse.cc)
 generated/           the stubbed grammar and the lexer slice; committed,
                      maintained by hand between re-extractions
-tools/               stub.py, lexslice.py, common.py: the one-shot extraction
-                     tools, not used by the build
+tools/               stub.py, lexslice.py, mrs_merge.py, common.py: the one-shot
+                     extraction and merge tools, not used by the build
 docs/thd.md          the ledger of server state the lexer shim models
 tests/lex-fixtures/  lexer cases with expected tokens, each citing sql_lex.cc
 UPSTREAM.md          pins, provenance of generated/, manual deviations

@@ -1220,6 +1220,67 @@
 %token    XML_SYM
 %token    YEAR_SYM                      /* SQL-2003-R */
 %token     ST_COLLECT_SYM
+%token  ALLOW_SYM  /* REST SQL keyword */
+%token  APPS_SYM  /* REST SQL keyword */
+%token  APP_SYM  /* REST SQL keyword */
+%token  AUTHENTICATION_SYM  /* REST SQL keyword */
+%token  AUTH_SYM  /* REST SQL keyword */
+%token  AUTODETECT_SYM  /* REST SQL keyword */
+%token  AVAILABLE_SYM  /* REST SQL keyword */
+%token  CLASS_SYM  /* REST SQL keyword */
+%token  CLONE_SYM  /* REST SQL keyword */
+%token  CONFIGURE_SYM  /* REST SQL keyword */
+%token  CONTENT_SYM  /* REST SQL keyword */
+%token  DAEMONS_SYM  /* REST SQL keyword */
+%token  DAEMON_SYM  /* REST SQL keyword */
+%token  DEVELOPMENT_SYM  /* REST SQL keyword */
+%token  DISABLED_SYM  /* REST SQL keyword */
+%token  ENABLED_SYM  /* REST SQL keyword */
+%token  ENDPOINTS_SYM  /* REST SQL keyword */
+%token  EXTENDS_SYM  /* REST SQL keyword */
+%token  FEED_SYM  /* REST SQL keyword */
+%token  FILES_SYM  /* REST SQL keyword */
+%token  FILTER_SYM  /* REST SQL keyword */
+%token  FUNCTIONS_SYM  /* REST SQL keyword */
+%token  HIERARCHY_SYM  /* REST SQL keyword */
+%token  HTTPS_SYM  /* REST SQL keyword */
+%token  HTTP_SYM  /* REST SQL keyword */
+%token  INCLUDING_SYM  /* REST SQL keyword */
+%token  ITEMS_SYM  /* REST SQL keyword */
+%token  ITEM_SYM  /* REST SQL keyword */
+%token  MANAGEMENT_SYM  /* REST SQL keyword */
+%token  MAPPING_SYM  /* REST SQL keyword */
+%token  MARIADB_SYM  /* REST SQL keyword */
+%token  MEDIA_SYM  /* REST SQL keyword */
+%token  METADATA_SYM  /* REST SQL keyword */
+%token  MRS_SYM  /* REST SQL keyword */
+%token  NEW_SYM  /* REST SQL keyword */
+%token  PARAMETERS_SYM  /* REST SQL keyword */
+%token  PER_SYM  /* REST SQL keyword */
+%token  PRIVATE_SYM  /* REST SQL keyword */
+%token  PROCEDURES_SYM  /* REST SQL keyword */
+%token  PROTOCOL_SYM  /* REST SQL keyword */
+%token  PUBLISHED_SYM  /* REST SQL keyword */
+%token  REDIRECTION_SYM  /* REST SQL keyword */
+%token  REGISTER_SYM  /* REST SQL keyword */
+%token  REQUEST_SYM  /* REST SQL keyword */
+%token  REQUIRED_SYM  /* REST SQL keyword */
+%token  REST_SYM  /* REST SQL keyword */
+%token  RESULT_SYM  /* REST SQL keyword */
+%token  ROLES_SYM  /* REST SQL keyword */
+%token  SCRIPTS_SYM  /* REST SQL keyword */
+%token  SECRET_SYM  /* REST SQL keyword */
+%token  SERVICES_SYM  /* REST SQL keyword */
+%token  SERVICE_SYM  /* REST SQL keyword */
+%token  SETS_SYM  /* REST SQL keyword */
+%token  STATIC_SYM  /* REST SQL keyword */
+%token  TYPESCRIPT_SYM  /* REST SQL keyword */
+%token  UNPUBLISHED_SYM  /* REST SQL keyword */
+%token  URL_SYM  /* REST SQL keyword */
+%token  USERS_SYM  /* REST SQL keyword */
+%token  VENDORS_SYM  /* REST SQL keyword */
+%token  VENDOR_SYM  /* REST SQL keyword */
+%token  VIEWS_SYM  /* REST SQL keyword */
 /* A dummy token to force the priority of table_ref production in a join. */
 %left   CONDITIONLESS_JOIN
 %left   JOIN_SYM INNER_SYM STRAIGHT_JOIN CROSS LEFT RIGHT ON_SYM USING
@@ -2182,6 +2243,7 @@ directly_executable_statement:
 /* Verb clauses, except begin and compound_statement */
 verb_clause:
           alter { MDBP_R(9); }
+        | mrs_statement { MDBP_R(5946); }
         | analyze { MDBP_R(10); }
         | analyze_stmt_command { MDBP_R(11); }
         | backup { MDBP_R(12); }
@@ -14936,6 +14998,33 @@ show:
 show_param:
            DATABASES wild_and_where
            { MDBP_R(2324); }
+        | mrs_show_rest_metadata_status_statement { MDBP_R(5919); }
+        | mrs_show_rest_metadata_schemas_statement { MDBP_R(5920); }
+        | mrs_show_rest_services_statement { MDBP_R(5921); }
+        | mrs_show_rest_daemons_statement { MDBP_R(5922); }
+        | mrs_show_rest_schemas_statement { MDBP_R(5923); }
+        | mrs_show_rest_views_statement { MDBP_R(5924); }
+        | mrs_show_rest_procedures_statement { MDBP_R(5925); }
+        | mrs_show_rest_functions_statement { MDBP_R(5926); }
+        | mrs_show_rest_scripts_statement { MDBP_R(5927); }
+        | mrs_show_rest_content_sets_statement { MDBP_R(5928); }
+        | mrs_show_rest_content_files_statement { MDBP_R(5929); }
+        | mrs_show_rest_auth_apps_statement { MDBP_R(5930); }
+        | mrs_show_rest_auth_vendors_statement { MDBP_R(5931); }
+        | mrs_show_rest_users_statement { MDBP_R(5932); }
+        | mrs_show_rest_columns_statement { MDBP_R(5933); }
+        | mrs_show_rest_roles_statement { MDBP_R(5934); }
+        | mrs_show_rest_grants_statement { MDBP_R(5935); }
+        | mrs_show_create_rest_service_statement { MDBP_R(5936); }
+        | mrs_show_create_rest_schema_statement { MDBP_R(5937); }
+        | mrs_show_create_rest_view_statement { MDBP_R(5938); }
+        | mrs_show_create_rest_procedure_statement { MDBP_R(5939); }
+        | mrs_show_create_rest_function_statement { MDBP_R(5940); }
+        | mrs_show_create_rest_content_set_statement { MDBP_R(5941); }
+        | mrs_show_create_rest_content_file_statement { MDBP_R(5942); }
+        | mrs_show_create_rest_auth_app_statement { MDBP_R(5943); }
+        | mrs_show_create_rest_role_statement { MDBP_R(5944); }
+        | mrs_show_create_rest_user_statement { MDBP_R(5945); }
 
 
 
@@ -16992,6 +17081,8 @@ keyword_sp_head:
 */
 keyword_verb_clause:
           CLOSE_SYM { MDBP_R(2793); }             /* Verb clause. Reserved in Oracle */
+        | CLONE_SYM { MDBP_R(5917); }
+        | CONFIGURE_SYM { MDBP_R(5918); }
         | COMMIT_SYM { MDBP_R(2794); }            /* Verb clause. Reserved in Oracle */
         | DO_SYM { MDBP_R(2795); }                /* Verb clause                     */
         | HANDLER_SYM { MDBP_R(2796); }           /* Verb clause                     */
@@ -17374,6 +17465,65 @@ keyword_func_sp_var_not_label:
 */
 keyword_sp_var_and_label:
         keyword_func_sp_var_and_label { MDBP_R(3137); }
+        | ALLOW_SYM { MDBP_R(5858); }
+        | APPS_SYM { MDBP_R(5859); }
+        | APP_SYM { MDBP_R(5860); }
+        | AUTHENTICATION_SYM { MDBP_R(5861); }
+        | AUTH_SYM { MDBP_R(5862); }
+        | AUTODETECT_SYM { MDBP_R(5863); }
+        | AVAILABLE_SYM { MDBP_R(5864); }
+        | CLASS_SYM { MDBP_R(5865); }
+        | CONTENT_SYM { MDBP_R(5866); }
+        | DAEMONS_SYM { MDBP_R(5867); }
+        | DAEMON_SYM { MDBP_R(5868); }
+        | DEVELOPMENT_SYM { MDBP_R(5869); }
+        | DISABLED_SYM { MDBP_R(5870); }
+        | ENABLED_SYM { MDBP_R(5871); }
+        | ENDPOINTS_SYM { MDBP_R(5872); }
+        | EXTENDS_SYM { MDBP_R(5873); }
+        | FEED_SYM { MDBP_R(5874); }
+        | FILES_SYM { MDBP_R(5875); }
+        | FILTER_SYM { MDBP_R(5876); }
+        | FUNCTIONS_SYM { MDBP_R(5877); }
+        | HIERARCHY_SYM { MDBP_R(5878); }
+        | HTTPS_SYM { MDBP_R(5879); }
+        | HTTP_SYM { MDBP_R(5880); }
+        | INCLUDING_SYM { MDBP_R(5881); }
+        | ITEMS_SYM { MDBP_R(5882); }
+        | ITEM_SYM { MDBP_R(5883); }
+        | MANAGEMENT_SYM { MDBP_R(5884); }
+        | MAPPING_SYM { MDBP_R(5885); }
+        | MARIADB_SYM { MDBP_R(5886); }
+        | MEDIA_SYM { MDBP_R(5887); }
+        | METADATA_SYM { MDBP_R(5888); }
+        | MRS_SYM { MDBP_R(5889); }
+        | NEW_SYM { MDBP_R(5890); }
+        | PARAMETERS_SYM { MDBP_R(5891); }
+        | PER_SYM { MDBP_R(5892); }
+        | PRIVATE_SYM { MDBP_R(5893); }
+        | PROCEDURES_SYM { MDBP_R(5894); }
+        | PROTOCOL_SYM { MDBP_R(5895); }
+        | PUBLISHED_SYM { MDBP_R(5896); }
+        | REDIRECTION_SYM { MDBP_R(5897); }
+        | REGISTER_SYM { MDBP_R(5898); }
+        | REQUEST_SYM { MDBP_R(5899); }
+        | REQUIRED_SYM { MDBP_R(5900); }
+        | REST_SYM { MDBP_R(5901); }
+        | RESULT_SYM { MDBP_R(5902); }
+        | ROLES_SYM { MDBP_R(5903); }
+        | SCRIPTS_SYM { MDBP_R(5904); }
+        | SECRET_SYM { MDBP_R(5905); }
+        | SERVICES_SYM { MDBP_R(5906); }
+        | SERVICE_SYM { MDBP_R(5907); }
+        | SETS_SYM { MDBP_R(5908); }
+        | STATIC_SYM { MDBP_R(5909); }
+        | TYPESCRIPT_SYM { MDBP_R(5910); }
+        | UNPUBLISHED_SYM { MDBP_R(5911); }
+        | URL_SYM { MDBP_R(5912); }
+        | USERS_SYM { MDBP_R(5913); }
+        | VENDORS_SYM { MDBP_R(5914); }
+        | VENDOR_SYM { MDBP_R(5915); }
+        | VIEWS_SYM { MDBP_R(5916); }
         | ADDDATE_SYM { MDBP_R(3138); }
         | ANY_SYM { MDBP_R(3139); }
         | AVG_SYM { MDBP_R(3140); }
@@ -21200,3 +21350,2536 @@ create_routine:
 /**
   @} (end of group Parser)
 */
+
+
+/* ---- MariaDB REST Service (REST SQL) statements ---------------------
+   Merged from MariaDB Shell's mysqlshdk/libs/mrs/parser.yy by
+   tools/mrs_merge.py; see UPSTREAM.md. */
+
+mrs_statement:
+          mrs_configure_rest_metadata_statement { MDBP_R(3927); }
+        | mrs_create_rest_service_statement { MDBP_R(3928); }
+        | mrs_create_rest_schema_statement { MDBP_R(3929); }
+        | mrs_create_rest_view_statement { MDBP_R(3930); }
+        | mrs_create_rest_procedure_statement { MDBP_R(3931); }
+        | mrs_create_rest_function_statement { MDBP_R(3932); }
+        | mrs_create_rest_content_set_statement { MDBP_R(3933); }
+        | mrs_create_rest_content_file_statement { MDBP_R(3934); }
+        | mrs_create_rest_auth_app_statement { MDBP_R(3935); }
+        | mrs_create_rest_role_statement { MDBP_R(3936); }
+        | mrs_create_rest_user_statement { MDBP_R(3937); }
+        | mrs_clone_rest_service_statement { MDBP_R(3938); }
+        | mrs_alter_rest_service_statement { MDBP_R(3939); }
+        | mrs_alter_rest_schema_statement { MDBP_R(3940); }
+        | mrs_alter_rest_view_statement { MDBP_R(3941); }
+        | mrs_alter_rest_procedure_statement { MDBP_R(3942); }
+        | mrs_alter_rest_function_statement { MDBP_R(3943); }
+        | mrs_alter_rest_content_set_statement { MDBP_R(3944); }
+        | mrs_alter_rest_auth_app_statement { MDBP_R(3945); }
+        | mrs_alter_rest_user_statement { MDBP_R(3946); }
+        | mrs_drop_rest_service_statement { MDBP_R(3947); }
+        | mrs_drop_rest_schema_statement { MDBP_R(3948); }
+        | mrs_drop_rest_view_statement { MDBP_R(3949); }
+        | mrs_drop_rest_procedure_statement { MDBP_R(3950); }
+        | mrs_drop_rest_function_statement { MDBP_R(3951); }
+        | mrs_drop_rest_content_set_statement { MDBP_R(3952); }
+        | mrs_drop_rest_content_file_statement { MDBP_R(3953); }
+        | mrs_drop_rest_auth_app_statement { MDBP_R(3954); }
+        | mrs_drop_rest_user_statement { MDBP_R(3955); }
+        | mrs_drop_rest_role_statement { MDBP_R(3956); }
+        | mrs_grant_rest_role_statement { MDBP_R(3957); }
+        | mrs_grant_rest_privilege_statement { MDBP_R(3958); }
+        | mrs_revoke_rest_privilege_statement { MDBP_R(3959); }
+        | mrs_revoke_rest_role_statement { MDBP_R(3960); }
+        | mrs_use_statement { MDBP_R(3961); }
+        | mrs_drop_rest_daemon_statement { MDBP_R(3962); }
+        ;
+
+mrs_enabled_disabled:
+          ENABLED_SYM { MDBP_R(3963); }
+        | DISABLED_SYM { MDBP_R(3964); }
+        ;
+
+mrs_enabled_disabled_private:
+          ENABLED_SYM { MDBP_R(3965); }
+        | DISABLED_SYM { MDBP_R(3966); }
+        | PRIVATE_SYM { MDBP_R(3967); }
+        ;
+
+mrs_quoted_text_or_default:
+          TEXT_STRING { MDBP_R(3968); }
+        | DEFAULT { MDBP_R(3969); }
+        ;
+
+mrs_json_options:
+          OPTIONS_SYM mrs_json_value { MDBP_R(3970); }
+        | MERGE_SYM OPTIONS_SYM mrs_json_value { MDBP_R(3971); }
+        ;
+
+mrs_metadata:
+          METADATA_SYM mrs_json_value { MDBP_R(3972); }
+        ;
+
+mrs_comments:
+          COMMENT_SYM TEXT_STRING { MDBP_R(3973); }
+        ;
+
+mrs_opt_comments:
+          /* empty */ { MDBP_R(3974); }
+        | mrs_comments { MDBP_R(3975); }
+        ;
+
+mrs_authentication_required:
+          AUTHENTICATION_SYM REQUIRED_SYM { MDBP_R(3976); }
+        | AUTHENTICATION_SYM NOT_SYM REQUIRED_SYM { MDBP_R(3977); }
+        ;
+
+mrs_items_per_page:
+          ITEMS_SYM PER_SYM PAGE_SYM mrs_int_number { MDBP_R(3978); }
+        ;
+
+mrs_service_schema_selector:
+          DATABASE mrs_schema_request_path { MDBP_R(3979); }
+        | SERVICE_SYM mrs_service_request_path DATABASE mrs_schema_request_path { MDBP_R(3980); }
+        ;
+
+mrs_opt_on_service_schema_selector:
+          /* empty */ { MDBP_R(3981); }
+        | ON mrs_service_schema_selector { MDBP_R(3982); }
+        ;
+
+mrs_opt_from_service_schema_selector:
+          /* empty */ { MDBP_R(3983); }
+        | FROM mrs_service_schema_selector { MDBP_R(3984); }
+        ;
+
+mrs_opt_on_from_service_schema_selector:
+          /* empty */ { MDBP_R(3985); }
+        | ON mrs_service_schema_selector { MDBP_R(3986); }
+        | FROM mrs_service_schema_selector { MDBP_R(3987); }
+        ;
+
+mrs_service_ref:
+          SERVICE_SYM mrs_service_request_path { MDBP_R(3988); }
+        | mrs_service_request_path { MDBP_R(3989); }
+        ;
+
+mrs_role_service:
+          ON ANY_SYM SERVICE_SYM { MDBP_R(3990); }
+        | ON mrs_service_ref { MDBP_R(3991); }
+        ;
+
+mrs_opt_role_service:
+          /* empty */ { MDBP_R(3992); }
+        | mrs_role_service { MDBP_R(3993); }
+        ;
+
+mrs_opt_on_from_role_service:
+          /* empty */ { MDBP_R(3994); }
+        | mrs_role_service { MDBP_R(3995); }
+        | FROM ANY_SYM SERVICE_SYM { MDBP_R(3996); }
+        | FROM mrs_service_ref { MDBP_R(3997); }
+        ;
+
+mrs_opt_on_service:
+          /* empty */ { MDBP_R(3998); }
+        | ON mrs_service_ref { MDBP_R(3999); }
+        ;
+
+mrs_opt_from_service:
+          /* empty */ { MDBP_R(4000); }
+        | FROM mrs_service_ref { MDBP_R(4001); }
+        ;
+
+mrs_opt_on_from_service:
+          /* empty */ { MDBP_R(4002); }
+        | mrs_on_or_from mrs_service_ref { MDBP_R(4003); }
+        ;
+
+mrs_opt_service_request_path:
+          /* empty */ { MDBP_R(4004); }
+        | mrs_service_ref { MDBP_R(4005); }
+        ;
+
+mrs_opt_if_not_exists:
+          /* empty */ { MDBP_R(4006); }
+        | IF_SYM NOT_SYM EXISTS { MDBP_R(4007); }
+        ;
+
+mrs_opt_if_exists:
+          /* empty */ { MDBP_R(4008); }
+        | IF_SYM EXISTS { MDBP_R(4009); }
+        ;
+
+mrs_configure_rest_metadata_statement:
+          CONFIGURE_SYM REST_SYM METADATA_SYM mrs_rest_metadata_options { MDBP_R(4010); }
+        ;
+
+mrs_rest_metadata_options:
+          /* empty */ { MDBP_R(4011); }
+        | mrs_rest_metadata_options mrs_metadata_schema { MDBP_R(4012); }
+        | mrs_rest_metadata_options mrs_enabled_disabled { MDBP_R(4013); }
+        | mrs_rest_metadata_options mrs_json_options { MDBP_R(4014); }
+        | mrs_rest_metadata_options UPDATE_SYM { MDBP_R(4015); }
+        | mrs_rest_metadata_options UPDATE_SYM IF_SYM AVAILABLE_SYM { MDBP_R(4016); }
+        ;
+
+mrs_create_rest_service_statement:
+          mrs_create_rest_service_prefix mrs_service_request_path mrs_rest_service_options { MDBP_R(4017); }
+        ;
+
+mrs_create_rest_service_prefix:
+          CREATE OR_SYM REPLACE REST_SYM SERVICE_SYM { MDBP_R(4018); }
+        | CREATE REST_SYM SERVICE_SYM mrs_opt_if_not_exists { MDBP_R(4019); }
+        ;
+
+mrs_rest_service_options:
+          /* empty */ { MDBP_R(4020); }
+        | mrs_rest_service_options mrs_enabled_disabled { MDBP_R(4021); }
+        | mrs_rest_service_options mrs_published_unpublished { MDBP_R(4022); }
+        | mrs_rest_service_options mrs_rest_protocol { MDBP_R(4023); }
+        | mrs_rest_service_options mrs_rest_authentication { MDBP_R(4024); }
+        | mrs_rest_service_options mrs_json_options { MDBP_R(4025); }
+        | mrs_rest_service_options mrs_comments { MDBP_R(4026); }
+        | mrs_rest_service_options mrs_metadata { MDBP_R(4027); }
+        | mrs_rest_service_options mrs_add_auth_app { MDBP_R(4028); }
+        | mrs_rest_service_options mrs_remove_auth_app { MDBP_R(4029); }
+        ;
+
+mrs_published_unpublished:
+          PUBLISHED_SYM { MDBP_R(4030); }
+        | UNPUBLISHED_SYM { MDBP_R(4031); }
+        ;
+
+mrs_rest_protocol:
+          PROTOCOL_SYM HTTP_SYM { MDBP_R(4032); }
+        | PROTOCOL_SYM HTTPS_SYM { MDBP_R(4033); }
+        ;
+
+mrs_rest_authentication:
+          AUTHENTICATION_SYM { MDBP_R(4034); }
+        | mrs_rest_authentication PATH_SYM mrs_quoted_text_or_default { MDBP_R(4035); }
+        | mrs_rest_authentication REDIRECTION_SYM mrs_quoted_text_or_default { MDBP_R(4036); }
+        | mrs_rest_authentication VALIDATION_SYM mrs_quoted_text_or_default { MDBP_R(4037); }
+        | mrs_rest_authentication PAGE_SYM CONTENT_SYM mrs_quoted_text_or_default { MDBP_R(4038); }
+        ;
+
+mrs_add_auth_app:
+          ADD AUTH_SYM APP_SYM mrs_auth_app_name mrs_opt_if_exists { MDBP_R(4039); }
+        ;
+
+mrs_remove_auth_app:
+          REMOVE_SYM AUTH_SYM APP_SYM mrs_auth_app_name mrs_opt_if_exists { MDBP_R(4040); }
+        ;
+
+mrs_create_rest_schema_statement:
+          mrs_create_rest_schema_prefix mrs_opt_schema_request_path mrs_opt_on_service FROM mrs_identifier mrs_rest_schema_options { MDBP_R(4041); }
+        ;
+
+mrs_create_rest_schema_prefix:
+          CREATE OR_SYM REPLACE REST_SYM DATABASE { MDBP_R(4042); }
+        | CREATE REST_SYM DATABASE mrs_opt_if_not_exists { MDBP_R(4043); }
+        ;
+
+mrs_opt_schema_request_path:
+          /* empty */ { MDBP_R(4044); }
+        | mrs_schema_request_path { MDBP_R(4045); }
+        ;
+
+mrs_rest_schema_options:
+          /* empty */ { MDBP_R(4046); }
+        | mrs_rest_schema_options mrs_enabled_disabled_private { MDBP_R(4047); }
+        | mrs_rest_schema_options mrs_authentication_required { MDBP_R(4048); }
+        | mrs_rest_schema_options mrs_items_per_page { MDBP_R(4049); }
+        | mrs_rest_schema_options mrs_json_options { MDBP_R(4050); }
+        | mrs_rest_schema_options mrs_comments { MDBP_R(4051); }
+        | mrs_rest_schema_options mrs_metadata { MDBP_R(4052); }
+        ;
+
+mrs_create_rest_view_statement:
+          mrs_create_rest_view_prefix mrs_view_request_path mrs_opt_on_service_schema_selector AS mrs_qualified_identifier mrs_opt_class mrs_opt_graphql_crud_options mrs_opt_graphql_obj mrs_rest_object_options { MDBP_R(4053); }
+        ;
+
+mrs_create_rest_view_prefix:
+          CREATE OR_SYM REPLACE REST_SYM mrs_opt_data_mapping VIEW_SYM { MDBP_R(4054); }
+        | CREATE REST_SYM mrs_opt_data_mapping VIEW_SYM mrs_opt_if_not_exists { MDBP_R(4055); }
+        ;
+
+mrs_opt_data_mapping:
+          /* empty */ { MDBP_R(4056); }
+        | DATA_SYM { MDBP_R(4057); }
+        | MAPPING_SYM { MDBP_R(4058); }
+        | DATA_SYM MAPPING_SYM { MDBP_R(4059); }
+        ;
+
+mrs_opt_class:
+          /* empty */ { MDBP_R(4060); }
+        | CLASS_SYM mrs_rest_object_name { MDBP_R(4061); }
+        ;
+
+mrs_rest_object_options:
+          /* empty */ { MDBP_R(4062); }
+        | mrs_rest_object_options mrs_enabled_disabled_private { MDBP_R(4063); }
+        | mrs_rest_object_options mrs_authentication_required { MDBP_R(4064); }
+        | mrs_rest_object_options mrs_items_per_page { MDBP_R(4065); }
+        | mrs_rest_object_options mrs_json_options { MDBP_R(4066); }
+        | mrs_rest_object_options mrs_comments { MDBP_R(4067); }
+        | mrs_rest_object_options mrs_metadata { MDBP_R(4068); }
+        | mrs_rest_object_options MEDIA_SYM TYPE_SYM TEXT_STRING { MDBP_R(4069); }
+        | mrs_rest_object_options MEDIA_SYM TYPE_SYM AUTODETECT_SYM { MDBP_R(4070); }
+        | mrs_rest_object_options mrs_rest_view_format { MDBP_R(4071); }
+        | mrs_rest_object_options AUTHENTICATION_SYM PROCEDURE_SYM mrs_qualified_identifier { MDBP_R(4072); }
+        ;
+
+mrs_rest_view_format:
+          FORMAT_SYM FEED_SYM { MDBP_R(4073); }
+        | FORMAT_SYM ITEM_SYM { MDBP_R(4074); }
+        | FORMAT_SYM MEDIA_SYM { MDBP_R(4075); }
+        ;
+
+mrs_create_rest_procedure_statement:
+          mrs_create_rest_procedure_prefix mrs_procedure_request_path mrs_opt_on_service_schema_selector AS mrs_qualified_identifier mrs_opt_force mrs_opt_rest_parameters mrs_rest_results mrs_rest_object_options { MDBP_R(4076); }
+        ;
+
+mrs_create_rest_procedure_prefix:
+          CREATE OR_SYM REPLACE REST_SYM PROCEDURE_SYM { MDBP_R(4077); }
+        | CREATE REST_SYM PROCEDURE_SYM mrs_opt_if_not_exists { MDBP_R(4078); }
+        ;
+
+mrs_opt_force:
+          /* empty */ { MDBP_R(4079); }
+        | FORCE_SYM { MDBP_R(4080); }
+        ;
+
+mrs_opt_rest_parameters:
+          /* empty */ { MDBP_R(4081); }
+        | PARAMETERS_SYM mrs_graphql_obj { MDBP_R(4082); }
+        | PARAMETERS_SYM mrs_rest_object_name mrs_graphql_obj { MDBP_R(4083); }
+        ;
+
+mrs_rest_results:
+          /* empty */ { MDBP_R(4084); }
+        | mrs_rest_results mrs_rest_result { MDBP_R(4085); }
+        ;
+
+mrs_rest_result:
+          RESULT_SYM mrs_graphql_obj { MDBP_R(4086); }
+        | RESULT_SYM mrs_rest_result_name mrs_graphql_obj { MDBP_R(4087); }
+        ;
+
+mrs_create_rest_function_statement:
+          mrs_create_rest_function_prefix mrs_function_request_path mrs_opt_on_service_schema_selector AS mrs_qualified_identifier mrs_opt_force mrs_opt_rest_parameters mrs_opt_rest_result mrs_rest_object_options { MDBP_R(4088); }
+        ;
+
+mrs_create_rest_function_prefix:
+          CREATE OR_SYM REPLACE REST_SYM FUNCTION_SYM { MDBP_R(4089); }
+        | CREATE REST_SYM FUNCTION_SYM mrs_opt_if_not_exists { MDBP_R(4090); }
+        ;
+
+mrs_opt_rest_result:
+          /* empty */ { MDBP_R(4091); }
+        | mrs_rest_result { MDBP_R(4092); }
+        ;
+
+mrs_create_rest_content_set_statement:
+          mrs_create_rest_content_set_prefix mrs_content_set_request_path mrs_opt_on_service mrs_rest_content_set_options { MDBP_R(4093); }
+        ;
+
+mrs_create_rest_content_set_prefix:
+          CREATE OR_SYM REPLACE REST_SYM CONTENT_SYM SET { MDBP_R(4094); }
+        | CREATE REST_SYM CONTENT_SYM SET mrs_opt_if_not_exists { MDBP_R(4095); }
+        ;
+
+mrs_rest_content_set_options:
+          /* empty */ { MDBP_R(4096); }
+        | mrs_rest_content_set_options mrs_enabled_disabled_private { MDBP_R(4097); }
+        | mrs_rest_content_set_options mrs_authentication_required { MDBP_R(4098); }
+        | mrs_rest_content_set_options mrs_json_options { MDBP_R(4099); }
+        | mrs_rest_content_set_options mrs_comments { MDBP_R(4100); }
+        ;
+
+mrs_alter_rest_content_set_options:
+          /* empty */ { MDBP_R(4101); }
+        | mrs_alter_rest_content_set_options mrs_enabled_disabled_private { MDBP_R(4102); }
+        | mrs_alter_rest_content_set_options mrs_authentication_required { MDBP_R(4103); }
+        | mrs_alter_rest_content_set_options mrs_json_options { MDBP_R(4104); }
+        | mrs_alter_rest_content_set_options mrs_comments { MDBP_R(4105); }
+        | mrs_alter_rest_content_set_options LOAD SCRIPTS_SYM { MDBP_R(4106); }
+        | mrs_alter_rest_content_set_options LOAD TYPESCRIPT_SYM SCRIPTS_SYM { MDBP_R(4107); }
+        ;
+
+mrs_create_rest_content_file_statement:
+          mrs_create_rest_content_file_prefix mrs_content_file_request_path ON mrs_opt_service_request_path CONTENT_SYM SET mrs_content_set_request_path mrs_opt_binary CONTENT_SYM TEXT_STRING mrs_rest_content_file_options { MDBP_R(4108); }
+        ;
+
+mrs_opt_binary:
+          /* empty */ { MDBP_R(4109); }
+        | BINARY { MDBP_R(4110); }
+        ;
+
+mrs_create_rest_content_file_prefix:
+          CREATE OR_SYM REPLACE REST_SYM CONTENT_SYM FILE_SYM { MDBP_R(4111); }
+        | CREATE REST_SYM CONTENT_SYM FILE_SYM mrs_opt_if_not_exists { MDBP_R(4112); }
+        ;
+
+mrs_rest_content_file_options:
+          /* empty */ { MDBP_R(4113); }
+        | mrs_rest_content_file_options mrs_enabled_disabled_private { MDBP_R(4114); }
+        | mrs_rest_content_file_options mrs_authentication_required { MDBP_R(4115); }
+        | mrs_rest_content_file_options mrs_json_options { MDBP_R(4116); }
+        ;
+
+mrs_create_rest_auth_app_statement:
+          mrs_create_rest_auth_app_prefix mrs_auth_app_name VENDOR_SYM mrs_vendor mrs_rest_auth_app_options { MDBP_R(4117); }
+        ;
+
+mrs_create_rest_auth_app_prefix:
+          CREATE OR_SYM REPLACE REST_SYM mrs_auth_or_authentication APP_SYM { MDBP_R(4118); }
+        | CREATE REST_SYM mrs_auth_or_authentication APP_SYM mrs_opt_if_not_exists { MDBP_R(4119); }
+        ;
+
+mrs_auth_or_authentication:
+          AUTH_SYM { MDBP_R(4120); }
+        | AUTHENTICATION_SYM { MDBP_R(4121); }
+        ;
+
+mrs_vendor:
+          MRS_SYM { MDBP_R(4122); }
+        | MARIADB_SYM { MDBP_R(4123); }
+        | mrs_vendor_name { MDBP_R(4124); }
+        ;
+
+mrs_auth_app_name:
+          mrs_text_or_identifier { MDBP_R(4125); }
+        ;
+
+mrs_vendor_name:
+          mrs_text_or_identifier { MDBP_R(4126); }
+        ;
+
+mrs_rest_auth_app_options:
+          /* empty */ { MDBP_R(4127); }
+        | mrs_rest_auth_app_options mrs_enabled_disabled { MDBP_R(4128); }
+        | mrs_rest_auth_app_options mrs_comments { MDBP_R(4129); }
+        | mrs_rest_auth_app_options mrs_allow_new_users_to_register { MDBP_R(4130); }
+        | mrs_rest_auth_app_options DEFAULT ROLE_SYM mrs_text_or_identifier { MDBP_R(4131); }
+        | mrs_rest_auth_app_options mrs_app_or_client ID_SYM TEXT_STRING { MDBP_R(4132); }
+        | mrs_rest_auth_app_options mrs_app_or_client SECRET_SYM TEXT_STRING { MDBP_R(4133); }
+        | mrs_rest_auth_app_options URL_SYM TEXT_STRING { MDBP_R(4134); }
+        ;
+
+mrs_app_or_client:
+          APP_SYM { MDBP_R(4135); }
+        | CLIENT_SYM { MDBP_R(4136); }
+        ;
+
+mrs_allow_new_users_to_register:
+          ALLOW_SYM NEW_SYM USERS_SYM mrs_opt_to_register { MDBP_R(4137); }
+        | DO_SYM NOT_SYM ALLOW_SYM NEW_SYM USERS_SYM mrs_opt_to_register { MDBP_R(4138); }
+        ;
+
+mrs_opt_to_register:
+          /* empty */ { MDBP_R(4139); }
+        | TO_SYM REGISTER_SYM { MDBP_R(4140); }
+        ;
+
+mrs_create_rest_user_statement:
+          mrs_create_rest_user_prefix mrs_user_name '@' mrs_auth_app_name mrs_opt_identified_by mrs_user_options { MDBP_R(4141); }
+        ;
+
+mrs_create_rest_user_prefix:
+          CREATE OR_SYM REPLACE REST_SYM USER_SYM { MDBP_R(4142); }
+        | CREATE REST_SYM USER_SYM mrs_opt_if_not_exists { MDBP_R(4143); }
+        ;
+
+mrs_opt_identified_by:
+          /* empty */ { MDBP_R(4144); }
+        | IDENTIFIED_SYM BY mrs_user_password { MDBP_R(4145); }
+        ;
+
+mrs_user_name:
+          mrs_text_or_identifier { MDBP_R(4146); }
+        ;
+
+mrs_user_password:
+          TEXT_STRING { MDBP_R(4147); }
+        ;
+
+mrs_user_options:
+          /* empty */ { MDBP_R(4148); }
+        | mrs_user_options ACCOUNT_SYM LOCK_SYM { MDBP_R(4149); }
+        | mrs_user_options ACCOUNT_SYM UNLOCK_SYM { MDBP_R(4150); }
+        | mrs_user_options APP_SYM OPTIONS_SYM mrs_json_value { MDBP_R(4151); }
+        | mrs_user_options mrs_json_options { MDBP_R(4152); }
+        ;
+
+mrs_create_rest_role_statement:
+          mrs_create_rest_role_prefix mrs_role_name mrs_opt_extends mrs_opt_role_service mrs_rest_role_options { MDBP_R(4153); }
+        ;
+
+mrs_create_rest_role_prefix:
+          CREATE OR_SYM REPLACE REST_SYM ROLE_SYM { MDBP_R(4154); }
+        | CREATE REST_SYM ROLE_SYM mrs_opt_if_not_exists { MDBP_R(4155); }
+        ;
+
+mrs_opt_extends:
+          /* empty */ { MDBP_R(4156); }
+        | EXTENDS_SYM mrs_parent_role_name { MDBP_R(4157); }
+        ;
+
+mrs_rest_role_options:
+          /* empty */ { MDBP_R(4158); }
+        | mrs_rest_role_options mrs_json_options { MDBP_R(4159); }
+        | mrs_rest_role_options mrs_comments { MDBP_R(4160); }
+        ;
+
+mrs_parent_role_name:
+          mrs_text_or_identifier { MDBP_R(4161); }
+        ;
+
+mrs_role_name:
+          mrs_text_or_identifier { MDBP_R(4162); }
+        ;
+
+mrs_clone_rest_service_statement:
+          CLONE_SYM REST_SYM SERVICE_SYM mrs_service_request_path NEW_SYM REQUEST_SYM PATH_SYM mrs_new_service_request_path { MDBP_R(4163); }
+        ;
+
+mrs_alter_rest_service_statement:
+          ALTER REST_SYM SERVICE_SYM mrs_service_request_path mrs_rest_service_options { MDBP_R(4164); }
+        | ALTER REST_SYM SERVICE_SYM mrs_service_request_path NEW_SYM REQUEST_SYM PATH_SYM mrs_new_service_request_path mrs_rest_service_options { MDBP_R(4165); }
+        ;
+
+mrs_alter_rest_schema_statement:
+          ALTER REST_SYM DATABASE mrs_opt_schema_request_path mrs_opt_on_service mrs_opt_new_request_path mrs_opt_from_schema_name mrs_rest_schema_options { MDBP_R(4166); }
+        ;
+
+mrs_opt_new_request_path:
+          /* empty */ { MDBP_R(4167); }
+        | NEW_SYM REQUEST_SYM PATH_SYM mrs_request_path_identifier { MDBP_R(4168); }
+        ;
+
+mrs_opt_from_schema_name:
+          /* empty */ { MDBP_R(4169); }
+        | FROM mrs_identifier { MDBP_R(4170); }
+        ;
+
+mrs_alter_rest_view_statement:
+          ALTER REST_SYM mrs_opt_data_mapping VIEW_SYM mrs_view_request_path mrs_opt_on_service_schema_selector mrs_opt_new_request_path mrs_opt_alter_view_class mrs_rest_object_options { MDBP_R(4171); }
+        ;
+
+mrs_opt_alter_view_class:
+          /* empty */ { MDBP_R(4172); }
+        | CLASS_SYM mrs_rest_object_name mrs_opt_graphql_crud_options mrs_opt_graphql_obj { MDBP_R(4173); }
+        ;
+
+mrs_alter_rest_procedure_statement:
+          ALTER REST_SYM PROCEDURE_SYM mrs_procedure_request_path mrs_opt_on_service_schema_selector mrs_opt_new_request_path mrs_opt_rest_parameters mrs_rest_results mrs_rest_object_options { MDBP_R(4174); }
+        ;
+
+mrs_alter_rest_function_statement:
+          ALTER REST_SYM FUNCTION_SYM mrs_function_request_path mrs_opt_on_service_schema_selector mrs_opt_new_request_path mrs_opt_rest_parameters mrs_rest_results mrs_rest_object_options { MDBP_R(4175); }
+        ;
+
+mrs_alter_rest_content_set_statement:
+          ALTER REST_SYM CONTENT_SYM SET mrs_content_set_request_path mrs_opt_on_service mrs_opt_new_request_path mrs_alter_rest_content_set_options { MDBP_R(4176); }
+        ;
+
+mrs_alter_rest_auth_app_statement:
+          ALTER REST_SYM mrs_auth_or_authentication APP_SYM mrs_auth_app_name mrs_opt_new_service_name mrs_rest_auth_app_options { MDBP_R(4177); }
+        ;
+
+mrs_opt_new_service_name:
+          /* empty */ { MDBP_R(4178); }
+        | NEW_SYM NAME_SYM mrs_new_auth_app_name { MDBP_R(4179); }
+        ;
+
+mrs_new_auth_app_name:
+          mrs_text_or_identifier { MDBP_R(4180); }
+        ;
+
+mrs_alter_rest_user_statement:
+          ALTER REST_SYM USER_SYM mrs_user_name '@' mrs_auth_app_name mrs_opt_identified_by mrs_user_options { MDBP_R(4181); }
+        ;
+
+mrs_drop_rest_service_statement:
+          DROP REST_SYM SERVICE_SYM mrs_opt_if_exists mrs_service_request_path { MDBP_R(4182); }
+        ;
+
+mrs_drop_rest_schema_statement:
+          DROP REST_SYM DATABASE mrs_opt_if_exists mrs_schema_request_path mrs_opt_from_service { MDBP_R(4183); }
+        ;
+
+mrs_drop_rest_view_statement:
+          DROP REST_SYM mrs_opt_data_mapping VIEW_SYM mrs_opt_if_exists mrs_view_request_path mrs_opt_from_service_schema_selector { MDBP_R(4184); }
+        ;
+
+mrs_drop_rest_procedure_statement:
+          DROP REST_SYM PROCEDURE_SYM mrs_opt_if_exists mrs_procedure_request_path mrs_opt_from_service_schema_selector { MDBP_R(4185); }
+        ;
+
+mrs_drop_rest_function_statement:
+          DROP REST_SYM FUNCTION_SYM mrs_opt_if_exists mrs_function_request_path mrs_opt_from_service_schema_selector { MDBP_R(4186); }
+        ;
+
+mrs_drop_rest_content_set_statement:
+          DROP REST_SYM CONTENT_SYM SET mrs_opt_if_exists mrs_content_set_request_path mrs_opt_from_service { MDBP_R(4187); }
+        ;
+
+mrs_drop_rest_content_file_statement:
+          DROP REST_SYM CONTENT_SYM FILE_SYM mrs_opt_if_exists mrs_content_file_request_path FROM mrs_opt_service_request_path CONTENT_SYM SET mrs_content_set_request_path { MDBP_R(4188); }
+        ;
+
+mrs_drop_rest_auth_app_statement:
+          DROP REST_SYM mrs_auth_or_authentication APP_SYM mrs_opt_if_exists mrs_auth_app_name { MDBP_R(4189); }
+        ;
+
+mrs_drop_rest_user_statement:
+          DROP REST_SYM USER_SYM mrs_opt_if_exists mrs_user_name '@' mrs_auth_app_name { MDBP_R(4190); }
+        ;
+
+mrs_drop_rest_role_statement:
+          DROP REST_SYM ROLE_SYM mrs_opt_if_exists mrs_role_name mrs_opt_role_service { MDBP_R(4191); }
+        ;
+
+mrs_grant_rest_privilege_statement:
+          GRANT clear_privileges REST_SYM mrs_privilege_list mrs_privilege_target TO_SYM mrs_role_name mrs_opt_role_service { MDBP_R(4192); }
+        ;
+
+mrs_privilege_target:
+          /* empty */ { MDBP_R(4193); }
+        | ON mrs_service_request_path_wildcard { MDBP_R(4194); }
+        | ON SERVICE_SYM mrs_service_request_path_wildcard { MDBP_R(4195); }
+        | ON SERVICE_SYM mrs_service_request_path_wildcard DATABASE mrs_schema_request_path_wildcard mrs_opt_object_wildcard { MDBP_R(4196); }
+        | ON DATABASE mrs_schema_request_path_wildcard mrs_opt_object_wildcard { MDBP_R(4197); }
+        ;
+
+mrs_opt_object_wildcard:
+          /* empty */ { MDBP_R(4198); }
+        | OBJECT_SYM mrs_object_request_path_wildcard { MDBP_R(4199); }
+        ;
+
+mrs_privilege_list:
+          mrs_privilege_name { MDBP_R(4200); }
+        | mrs_privilege_list ',' mrs_privilege_name { MDBP_R(4201); }
+        ;
+
+mrs_privilege_name:
+          CREATE { MDBP_R(4202); }
+        | READ_SYM { MDBP_R(4203); }
+        | UPDATE_SYM { MDBP_R(4204); }
+        | DELETE_SYM { MDBP_R(4205); }
+        ;
+
+mrs_grant_rest_role_statement:
+          GRANT clear_privileges REST_SYM ROLE_SYM mrs_role_name mrs_opt_role_service TO_SYM mrs_user_name '@' mrs_auth_app_name mrs_opt_comments { MDBP_R(4206); }
+        ;
+
+mrs_revoke_rest_privilege_statement:
+          REVOKE clear_privileges REST_SYM mrs_privilege_list mrs_privilege_target FROM mrs_role_name mrs_opt_role_service { MDBP_R(4207); }
+        ;
+
+mrs_revoke_rest_role_statement:
+          REVOKE clear_privileges REST_SYM ROLE_SYM mrs_role_name mrs_opt_role_service FROM mrs_user_name '@' mrs_auth_app_name { MDBP_R(4208); }
+        ;
+
+mrs_use_statement:
+          USE_SYM REST_SYM mrs_service_and_schema_request_paths { MDBP_R(4209); }
+        | USE_SYM REST_SYM METADATA_SYM mrs_metadata_schema { MDBP_R(4210); }
+        ;
+
+mrs_metadata_schema:
+          DATABASE mrs_identifier { MDBP_R(4211); }
+        ;
+
+mrs_service_and_schema_request_paths:
+          SERVICE_SYM mrs_service_request_path { MDBP_R(4212); }
+        | mrs_service_schema_selector { MDBP_R(4213); }
+        ;
+
+mrs_show_rest_metadata_status_statement:
+          REST_SYM METADATA_SYM STATUS_SYM mrs_opt_output_format { MDBP_R(4214); }
+        | REST_SYM STATUS_SYM mrs_opt_output_format { MDBP_R(4215); }
+        ;
+
+mrs_show_rest_metadata_schemas_statement:
+          REST_SYM METADATA_SYM DATABASES mrs_opt_output_format { MDBP_R(4216); }
+        ;
+
+mrs_show_rest_services_statement:
+          REST_SYM SERVICES_SYM mrs_opt_for_auth_app mrs_opt_output_format { MDBP_R(4217); }
+        | REST_SYM SERVICES_SYM FOR_SYM DAEMON_SYM mrs_daemon_id mrs_opt_output_format { MDBP_R(4218); }
+        ;
+
+mrs_show_rest_daemons_statement:
+          REST_SYM DAEMONS_SYM mrs_opt_output_format { MDBP_R(4219); }
+        ;
+
+mrs_drop_rest_daemon_statement:
+          DROP REST_SYM DAEMON_SYM mrs_opt_if_exists mrs_daemon_id { MDBP_R(4220); }
+        ;
+
+mrs_daemon_id:
+          TEXT_STRING { MDBP_R(4221); }
+        ;
+
+mrs_opt_for_auth_app:
+          /* empty */ { MDBP_R(4222); }
+        | FOR_SYM AUTH_SYM APP_SYM mrs_auth_app_name { MDBP_R(4223); }
+        ;
+
+mrs_show_rest_schemas_statement:
+          REST_SYM DATABASES mrs_opt_on_from_service mrs_opt_output_format { MDBP_R(4224); }
+        ;
+
+mrs_show_rest_views_statement:
+          REST_SYM mrs_opt_data_mapping VIEWS_SYM mrs_opt_on_from_service_schema_selector mrs_opt_output_format { MDBP_R(4225); }
+        ;
+
+mrs_show_rest_procedures_statement:
+          REST_SYM PROCEDURES_SYM mrs_opt_on_from_service_schema_selector mrs_opt_output_format { MDBP_R(4226); }
+        ;
+
+mrs_show_rest_functions_statement:
+          REST_SYM FUNCTIONS_SYM mrs_opt_on_from_service_schema_selector mrs_opt_output_format { MDBP_R(4227); }
+        ;
+
+mrs_show_rest_scripts_statement:
+          REST_SYM SCRIPTS_SYM mrs_opt_on_from_service_schema_selector mrs_opt_output_format { MDBP_R(4228); }
+        ;
+
+mrs_show_rest_content_sets_statement:
+          REST_SYM CONTENT_SYM SETS_SYM mrs_opt_on_from_service mrs_opt_output_format { MDBP_R(4229); }
+        ;
+
+mrs_show_rest_content_files_statement:
+          REST_SYM CONTENT_SYM FILES_SYM mrs_on_or_from mrs_opt_service_request_path CONTENT_SYM SET mrs_content_set_request_path mrs_opt_output_format { MDBP_R(4230); }
+        ;
+
+mrs_on_or_from:
+          ON { MDBP_R(4231); }
+        | FROM { MDBP_R(4232); }
+        ;
+
+mrs_show_rest_auth_apps_statement:
+          REST_SYM AUTH_SYM APPS_SYM mrs_opt_on_from_role_service mrs_opt_output_format { MDBP_R(4233); }
+        ;
+
+mrs_show_rest_auth_vendors_statement:
+          REST_SYM AUTH_SYM VENDORS_SYM mrs_opt_output_format { MDBP_R(4234); }
+        ;
+
+mrs_show_rest_users_statement:
+          REST_SYM USERS_SYM mrs_opt_on_from_service mrs_opt_for_auth_app mrs_opt_output_format { MDBP_R(4235); }
+        ;
+
+mrs_show_rest_columns_statement:
+          REST_SYM COLUMNS mrs_from_or_in mrs_opt_columns_source mrs_qualified_identifier mrs_opt_output_format { MDBP_R(4236); }
+        ;
+
+mrs_from_or_in:
+          FROM { MDBP_R(4237); }
+        | IN_SYM { MDBP_R(4238); }
+        ;
+
+mrs_opt_columns_source:
+          /* empty */ { MDBP_R(4239); }
+        | TABLE_SYM { MDBP_R(4240); }
+        | VIEW_SYM { MDBP_R(4241); }
+        | PROCEDURE_SYM { MDBP_R(4242); }
+        | FUNCTION_SYM { MDBP_R(4243); }
+        ;
+
+mrs_show_rest_roles_statement:
+          REST_SYM ROLES_SYM mrs_opt_on_from_role_service mrs_opt_output_format { MDBP_R(4244); }
+        | REST_SYM ROLES_SYM mrs_opt_on_from_role_service FOR_SYM '@' mrs_auth_app_name mrs_opt_output_format { MDBP_R(4245); }
+        | REST_SYM ROLES_SYM mrs_opt_on_from_role_service FOR_SYM mrs_user_name '@' mrs_auth_app_name mrs_opt_output_format { MDBP_R(4246); }
+        ;
+
+mrs_show_rest_grants_statement:
+          REST_SYM GRANTS FOR_SYM mrs_role_name mrs_opt_on_from_role_service { MDBP_R(4247); }
+        ;
+
+mrs_show_create_rest_service_statement:
+          CREATE REST_SYM SERVICE_SYM mrs_opt_including_endpoints mrs_opt_output_format { MDBP_R(4248); }
+        | CREATE REST_SYM SERVICE_SYM mrs_service_request_path mrs_opt_including_endpoints mrs_opt_output_format { MDBP_R(4249); }
+        ;
+
+mrs_opt_including_endpoints:
+          /* empty */ { MDBP_R(4250); }
+        | INCLUDING_SYM mrs_endpoint_selection ENDPOINTS_SYM { MDBP_R(4251); }
+        ;
+
+mrs_opt_output_format:
+          /* empty */ { MDBP_R(4252); }
+        | FORMAT_SYM '=' JSON_SYM { MDBP_R(4253); }
+        | FORMAT_SYM '=' mrs_text_or_identifier { MDBP_R(4254); }
+        ;
+
+mrs_show_create_rest_schema_statement:
+          CREATE REST_SYM DATABASE mrs_opt_schema_request_path mrs_opt_on_from_service mrs_opt_output_format { MDBP_R(4255); }
+        ;
+
+mrs_show_create_rest_view_statement:
+          CREATE REST_SYM mrs_opt_data_mapping VIEW_SYM mrs_view_request_path mrs_opt_on_from_service_schema_selector mrs_opt_output_format { MDBP_R(4256); }
+        ;
+
+mrs_show_create_rest_procedure_statement:
+          CREATE REST_SYM PROCEDURE_SYM mrs_procedure_request_path mrs_opt_on_from_service_schema_selector mrs_opt_output_format { MDBP_R(4257); }
+        ;
+
+mrs_show_create_rest_function_statement:
+          CREATE REST_SYM FUNCTION_SYM mrs_function_request_path mrs_opt_on_from_service_schema_selector mrs_opt_output_format { MDBP_R(4258); }
+        ;
+
+mrs_show_create_rest_content_set_statement:
+          CREATE REST_SYM CONTENT_SYM SET mrs_content_set_request_path mrs_opt_on_from_service mrs_opt_output_format { MDBP_R(4259); }
+        ;
+
+mrs_show_create_rest_content_file_statement:
+          CREATE REST_SYM CONTENT_SYM FILE_SYM mrs_content_file_request_path mrs_on_or_from mrs_opt_service_request_path CONTENT_SYM SET mrs_content_set_request_path mrs_opt_output_format { MDBP_R(4260); }
+        ;
+
+mrs_show_create_rest_auth_app_statement:
+          CREATE REST_SYM AUTH_SYM APP_SYM mrs_auth_app_name mrs_opt_output_format { MDBP_R(4261); }
+        ;
+
+mrs_show_create_rest_role_statement:
+          CREATE REST_SYM ROLE_SYM mrs_role_name mrs_opt_role_service mrs_opt_output_format { MDBP_R(4262); }
+        ;
+
+mrs_show_create_rest_user_statement:
+          CREATE REST_SYM USER_SYM mrs_user_name '@' mrs_auth_app_name mrs_opt_output_format { MDBP_R(4263); }
+        ;
+
+mrs_endpoint_selection:
+          DATABASE { MDBP_R(4264); }
+        | DATABASE AND_SYM STATIC_SYM { MDBP_R(4265); }
+        | DATABASE AND_SYM STATIC_SYM AND_SYM DYNAMIC_SYM { MDBP_R(4266); }
+        | ALL { MDBP_R(4267); }
+        ;
+
+mrs_service_request_path:
+          mrs_request_path_identifier { MDBP_R(4268); }
+        | mrs_service_developers_identifier mrs_request_path_identifier { MDBP_R(4269); }
+        ;
+
+mrs_new_service_request_path:
+          mrs_service_request_path { MDBP_R(4270); }
+        ;
+
+mrs_service_request_path_wildcard:
+          mrs_request_path_identifier_with_wildcard { MDBP_R(4271); }
+        ;
+
+mrs_schema_request_path:
+          mrs_request_path_identifier { MDBP_R(4272); }
+        ;
+
+mrs_schema_request_path_wildcard:
+          mrs_request_path_identifier_with_wildcard { MDBP_R(4273); }
+        ;
+
+mrs_view_request_path:
+          mrs_request_path_identifier { MDBP_R(4274); }
+        ;
+
+mrs_rest_object_name:
+          mrs_identifier { MDBP_R(4275); }
+        ;
+
+mrs_rest_result_name:
+          mrs_identifier { MDBP_R(4276); }
+        ;
+
+mrs_object_request_path_wildcard:
+          mrs_request_path_identifier_with_wildcard { MDBP_R(4277); }
+        ;
+
+mrs_procedure_request_path:
+          mrs_request_path_identifier { MDBP_R(4278); }
+        ;
+
+mrs_function_request_path:
+          mrs_request_path_identifier { MDBP_R(4279); }
+        ;
+
+mrs_content_set_request_path:
+          mrs_request_path_identifier { MDBP_R(4280); }
+        ;
+
+mrs_content_file_request_path:
+          mrs_request_path_identifier { MDBP_R(4281); }
+        ;
+
+mrs_service_developer_identifier:
+          mrs_text_or_identifier { MDBP_R(4282); }
+        ;
+
+mrs_service_developers_identifier:
+          mrs_service_developer_list '@' LEX_HOSTNAME { MDBP_R(4283); }
+        ;
+
+mrs_service_developer_list:
+          mrs_service_developer_identifier { MDBP_R(4284); }
+        | mrs_service_developer_list ',' mrs_service_developer_identifier { MDBP_R(4285); }
+        ;
+
+mrs_request_path_identifier:
+          mrs_request_path { MDBP_R(4286); }
+        | IDENT_QUOTED { MDBP_R(4287); }
+        | TEXT_STRING { MDBP_R(4288); }
+        ;
+
+mrs_request_path_identifier_with_wildcard:
+          mrs_request_path { MDBP_R(4289); }
+        | IDENT_QUOTED { MDBP_R(4290); }
+        | TEXT_STRING { MDBP_R(4291); }
+        ;
+
+mrs_json_obj:
+          '{' mrs_json_pairs '}' { MDBP_R(4292); }
+        | '{' '}' { MDBP_R(4293); }
+        ;
+
+mrs_json_pairs:
+          mrs_json_pair { MDBP_R(4294); }
+        | mrs_json_pairs ',' mrs_json_pair { MDBP_R(4295); }
+        ;
+
+mrs_json_pair:
+          TEXT_STRING ':' mrs_json_value { MDBP_R(4296); }
+        ;
+
+mrs_json_arr:
+          '[' mrs_json_values ']' { MDBP_R(4297); }
+        | '[' ']' { MDBP_R(4298); }
+        ;
+
+mrs_json_values:
+          mrs_json_value { MDBP_R(4299); }
+        | mrs_json_values ',' mrs_json_value { MDBP_R(4300); }
+        ;
+
+mrs_json_value:
+          TEXT_STRING { MDBP_R(4301); }
+        | mrs_json_number { MDBP_R(4302); }
+        | '-' mrs_json_number { MDBP_R(4303); }
+        | '+' mrs_json_number { MDBP_R(4304); }
+        | mrs_json_obj { MDBP_R(4305); }
+        | mrs_json_arr { MDBP_R(4306); }
+        | TRUE_SYM { MDBP_R(4307); }
+        | FALSE_SYM { MDBP_R(4308); }
+        | NULL_SYM { MDBP_R(4309); }
+        ;
+
+mrs_json_number:
+          mrs_int_number { MDBP_R(4310); }
+        | DECIMAL_NUM { MDBP_R(4311); }
+        | FLOAT_NUM { MDBP_R(4312); }
+        ;
+
+mrs_graphql_obj:
+          '{' mrs_graphql_pairs '}' { MDBP_R(4313); }
+        | '{' '}' { MDBP_R(4314); }
+        ;
+
+mrs_opt_graphql_obj:
+          /* empty */ { MDBP_R(4315); }
+        | mrs_graphql_obj { MDBP_R(4316); }
+        ;
+
+mrs_graphql_pairs:
+          mrs_graphql_pair { MDBP_R(4317); }
+        | mrs_graphql_pairs ',' mrs_graphql_pair { MDBP_R(4318); }
+        ;
+
+mrs_graphql_crud_options:
+          mrs_annotation { MDBP_R(4319); }
+        | mrs_graphql_crud_options mrs_annotation { MDBP_R(4320); }
+        ;
+
+mrs_opt_graphql_crud_options:
+          /* empty */ { MDBP_R(4321); }
+        | mrs_graphql_crud_options { MDBP_R(4322); }
+        ;
+
+mrs_graphql_pair:
+          mrs_graphql_pair_key ':' mrs_graphql_pair_value mrs_graphql_annotations mrs_opt_graphql_value_json_schema mrs_opt_graphql_obj { MDBP_R(4323); }
+        ;
+
+mrs_graphql_datatype_text:
+          TEXT_STRING { MDBP_R(4324); }
+        | mrs_identifier { MDBP_R(4325); }
+        ;
+
+mrs_opt_graphql_value_json_schema:
+          /* empty */ { MDBP_R(4326); }
+        | JSON_SYM DATABASE mrs_json_value { MDBP_R(4327); }
+        ;
+
+mrs_graphql_allowed_keyword:
+          CREATE { MDBP_R(4328); }
+        | OR_SYM { MDBP_R(4329); }
+        | REPLACE { MDBP_R(4330); }
+        | ALTER { MDBP_R(4331); }
+        | SHOW { MDBP_R(4332); }
+        | STATUS_SYM { MDBP_R(4333); }
+        | NEW_SYM { MDBP_R(4334); }
+        | ON { MDBP_R(4335); }
+        | FROM { MDBP_R(4336); }
+        | IN_SYM { MDBP_R(4337); }
+        | DATABASES { MDBP_R(4338); }
+        | DATABASE { MDBP_R(4339); }
+        | JSON_SYM { MDBP_R(4340); }
+        | VIEW_SYM { MDBP_R(4341); }
+        | PROCEDURE_SYM { MDBP_R(4342); }
+        | FUNCTION_SYM { MDBP_R(4343); }
+        | DROP { MDBP_R(4344); }
+        | USE_SYM { MDBP_R(4345); }
+        | AS { MDBP_R(4346); }
+        | FILTER_SYM { MDBP_R(4347); }
+        | AUTHENTICATION_SYM { MDBP_R(4348); }
+        | PATH_SYM { MDBP_R(4349); }
+        | VALIDATION_SYM { MDBP_R(4350); }
+        | DEFAULT { MDBP_R(4351); }
+        | USER_SYM { MDBP_R(4352); }
+        | OPTIONS_SYM { MDBP_R(4353); }
+        | IF_SYM { MDBP_R(4354); }
+        | NOT_SYM { MDBP_R(4355); }
+        | EXISTS { MDBP_R(4356); }
+        | PAGE_SYM { MDBP_R(4357); }
+        | HOST_SYM { MDBP_R(4358); }
+        | TYPE_SYM { MDBP_R(4359); }
+        | FORMAT_SYM { MDBP_R(4360); }
+        | UPDATE_SYM { MDBP_R(4361); }
+        | NULL_SYM { MDBP_R(4362); }
+        | TRUE_SYM { MDBP_R(4363); }
+        | FALSE_SYM { MDBP_R(4364); }
+        | SET { MDBP_R(4365); }
+        | IDENTIFIED_SYM { MDBP_R(4366); }
+        | BY { MDBP_R(4367); }
+        | ROLE_SYM { MDBP_R(4368); }
+        | TO_SYM { MDBP_R(4369); }
+        | CLONE_SYM { MDBP_R(4370); }
+        | FILE_SYM { MDBP_R(4371); }
+        | BINARY { MDBP_R(4372); }
+        | DATA_SYM { MDBP_R(4373); }
+        | LOAD { MDBP_R(4374); }
+        | GRANT { MDBP_R(4375); }
+        | READ_SYM { MDBP_R(4376); }
+        | DELETE_SYM { MDBP_R(4377); }
+        | GROUP_SYM { MDBP_R(4378); }
+        | REVOKE { MDBP_R(4379); }
+        | ACCOUNT_SYM { MDBP_R(4380); }
+        | LOCK_SYM { MDBP_R(4381); }
+        | UNLOCK_SYM { MDBP_R(4382); }
+        | GRANTS { MDBP_R(4383); }
+        | FOR_SYM { MDBP_R(4384); }
+        | LEVEL_SYM { MDBP_R(4385); }
+        | ANY_SYM { MDBP_R(4386); }
+        | CLIENT_SYM { MDBP_R(4387); }
+        | URL_SYM { MDBP_R(4388); }
+        | NAME_SYM { MDBP_R(4389); }
+        | DO_SYM { MDBP_R(4390); }
+        | CONFIGURE_SYM { MDBP_R(4391); }
+        | REST_SYM { MDBP_R(4392); }
+        | METADATA_SYM { MDBP_R(4393); }
+        | SERVICES_SYM { MDBP_R(4394); }
+        | SERVICE_SYM { MDBP_R(4395); }
+        | VIEWS_SYM { MDBP_R(4396); }
+        | PROCEDURES_SYM { MDBP_R(4397); }
+        | PARAMETERS_SYM { MDBP_R(4398); }
+        | FUNCTIONS_SYM { MDBP_R(4399); }
+        | RESULT_SYM { MDBP_R(4400); }
+        | ENABLED_SYM { MDBP_R(4401); }
+        | PUBLISHED_SYM { MDBP_R(4402); }
+        | DISABLED_SYM { MDBP_R(4403); }
+        | PRIVATE_SYM { MDBP_R(4404); }
+        | UNPUBLISHED_SYM { MDBP_R(4405); }
+        | PROTOCOL_SYM { MDBP_R(4406); }
+        | HTTP_SYM { MDBP_R(4407); }
+        | HTTPS_SYM { MDBP_R(4408); }
+        | COMMENT_SYM { MDBP_R(4409); }
+        | REQUEST_SYM { MDBP_R(4410); }
+        | REDIRECTION_SYM { MDBP_R(4411); }
+        | MANAGEMENT_SYM { MDBP_R(4412); }
+        | AVAILABLE_SYM { MDBP_R(4413); }
+        | REQUIRED_SYM { MDBP_R(4414); }
+        | ITEMS_SYM { MDBP_R(4415); }
+        | PER_SYM { MDBP_R(4416); }
+        | CONTENT_SYM { MDBP_R(4417); }
+        | MEDIA_SYM { MDBP_R(4418); }
+        | AUTODETECT_SYM { MDBP_R(4419); }
+        | FEED_SYM { MDBP_R(4420); }
+        | ITEM_SYM { MDBP_R(4421); }
+        | SETS_SYM { MDBP_R(4422); }
+        | AUTH_SYM { MDBP_R(4423); }
+        | APPS_SYM { MDBP_R(4424); }
+        | APP_SYM { MDBP_R(4425); }
+        | ID_SYM { MDBP_R(4426); }
+        | SECRET_SYM { MDBP_R(4427); }
+        | VENDOR_SYM { MDBP_R(4428); }
+        | MRS_SYM { MDBP_R(4429); }
+        | MARIADB_SYM { MDBP_R(4430); }
+        | USERS_SYM { MDBP_R(4431); }
+        | ALLOW_SYM { MDBP_R(4432); }
+        | REGISTER_SYM { MDBP_R(4433); }
+        | CLASS_SYM { MDBP_R(4434); }
+        | DEVELOPMENT_SYM { MDBP_R(4435); }
+        | SCRIPTS_SYM { MDBP_R(4436); }
+        | MAPPING_SYM { MDBP_R(4437); }
+        | TYPESCRIPT_SYM { MDBP_R(4438); }
+        | ROLES_SYM { MDBP_R(4439); }
+        | EXTENDS_SYM { MDBP_R(4440); }
+        | OBJECT_SYM { MDBP_R(4441); }
+        | HIERARCHY_SYM { MDBP_R(4442); }
+        | TABLE_SYM { MDBP_R(4443); }
+        ;
+
+mrs_graphql_pair_key:
+          TEXT_STRING { MDBP_R(4444); }
+        | mrs_identifier { MDBP_R(4445); }
+        | mrs_graphql_allowed_keyword { MDBP_R(4446); }
+        ;
+
+mrs_graphql_pair_value:
+          mrs_qualified_identifier { MDBP_R(4447); }
+        | mrs_graphql_allowed_keyword { MDBP_R(4448); }
+        ;
+
+mrs_graphql_annotations:
+          /* empty */ { MDBP_R(4449); }
+        | mrs_graphql_annotations mrs_graphql_annotation { MDBP_R(4450); }
+        ;
+
+mrs_graphql_annotation:
+          mrs_annotation { MDBP_R(4451); }
+        | mrs_annotation '(' mrs_graphql_datatype_text ')' { MDBP_R(4452); }
+        ;
+
+mrs_identifier:
+          IDENT_sys { MDBP_R(4453); }
+        | ACTION { MDBP_R(4454); }
+        | ADDDATE_SYM { MDBP_R(4455); }
+        | ADMIN_SYM { MDBP_R(4456); }
+        | AFTER_SYM { MDBP_R(4457); }
+        | AGAINST { MDBP_R(4458); }
+        | AGGREGATE_SYM { MDBP_R(4459); }
+        | ALGORITHM_SYM { MDBP_R(4460); }
+        | ALWAYS_SYM { MDBP_R(4461); }
+        | ANALYZE_SYM { MDBP_R(4462); }
+        | ARRAY_SYM { MDBP_R(4463); }
+        | ASC { MDBP_R(4464); }
+        | ASCII_SYM { MDBP_R(4465); }
+        | ASENSITIVE_SYM { MDBP_R(4466); }
+        | ATOMIC_SYM { MDBP_R(4467); }
+        | AT_SYM { MDBP_R(4468); }
+        | AUTHORIZATION_SYM { MDBP_R(4469); }
+        | AUTHORS_SYM { MDBP_R(4470); }
+        | AUTO_INC { MDBP_R(4471); }
+        | AUTO_SYM { MDBP_R(4472); }
+        | AVG_ROW_LENGTH { MDBP_R(4473); }
+        | AVG_SYM { MDBP_R(4474); }
+        | BACKUP_SYM { MDBP_R(4475); }
+        | BEFORE_SYM { MDBP_R(4476); }
+        | BEGIN_MARIADB_SYM { MDBP_R(4477); }
+        | BETWEEN_SYM { MDBP_R(4478); }
+        | BIGINT { MDBP_R(4479); }
+        | BINLOG_SYM { MDBP_R(4480); }
+        | BIT_AND { MDBP_R(4481); }
+        | BIT_OR { MDBP_R(4482); }
+        | BIT_SYM { MDBP_R(4483); }
+        | BIT_XOR { MDBP_R(4484); }
+        | BLOB_MARIADB_SYM { MDBP_R(4485); }
+        | BLOCK_SYM { MDBP_R(4486); }
+        | BODY_MARIADB_SYM { MDBP_R(4487); }
+        | BOOLEAN_SYM { MDBP_R(4488); }
+        | BOOL_SYM { MDBP_R(4489); }
+        | BOTH { MDBP_R(4490); }
+        | BTREE_SYM { MDBP_R(4491); }
+        | BYTE_SYM { MDBP_R(4492); }
+        | CACHE_SYM { MDBP_R(4493); }
+        | CALL_SYM { MDBP_R(4494); }
+        | CASCADE { MDBP_R(4495); }
+        | CASCADED { MDBP_R(4496); }
+        | CASE_SYM { MDBP_R(4497); }
+        | CAST_SYM { MDBP_R(4498); }
+        | CATALOG_NAME_SYM { MDBP_R(4499); }
+        | CHAIN_SYM { MDBP_R(4500); }
+        | CHANGE { MDBP_R(4501); }
+        | CHANGED { MDBP_R(4502); }
+        | CHANNEL_SYM { MDBP_R(4503); }
+        | CHARSET { MDBP_R(4504); }
+        | CHAR_SYM { MDBP_R(4505); }
+        | CHECKPOINT_SYM { MDBP_R(4506); }
+        | CHECKSUM_SYM { MDBP_R(4507); }
+        | CHECK_SYM { MDBP_R(4508); }
+        | CIPHER_SYM { MDBP_R(4509); }
+        | CLASS_ORIGIN_SYM { MDBP_R(4510); }
+        | CLOB_MARIADB_SYM { MDBP_R(4511); }
+        | CLOSE_SYM { MDBP_R(4512); }
+        | COALESCE { MDBP_R(4513); }
+        | CODE_SYM { MDBP_R(4514); }
+        | COLLATE_SYM { MDBP_R(4515); }
+        | COLLATION_SYM { MDBP_R(4516); }
+        | COLUMNS { MDBP_R(4517); }
+        | COLUMN_ADD_SYM { MDBP_R(4518); }
+        | COLUMN_CHECK_SYM { MDBP_R(4519); }
+        | COLUMN_CREATE_SYM { MDBP_R(4520); }
+        | COLUMN_DELETE_SYM { MDBP_R(4521); }
+        | COLUMN_GET_SYM { MDBP_R(4522); }
+        | COLUMN_NAME_SYM { MDBP_R(4523); }
+        | COLUMN_SYM { MDBP_R(4524); }
+        | COMMITTED_SYM { MDBP_R(4525); }
+        | COMMIT_SYM { MDBP_R(4526); }
+        | COMPACT_SYM { MDBP_R(4527); }
+        | COMPLETION_SYM { MDBP_R(4528); }
+        | COMPRESSED_SYM { MDBP_R(4529); }
+        | CONCURRENT { MDBP_R(4530); }
+        | CONDITION_SYM { MDBP_R(4531); }
+        | CONNECTION_SYM { MDBP_R(4532); }
+        | CONSISTENT_SYM { MDBP_R(4533); }
+        | CONSTRAINT { MDBP_R(4534); }
+        | CONSTRAINT_CATALOG_SYM { MDBP_R(4535); }
+        | CONSTRAINT_NAME_SYM { MDBP_R(4536); }
+        | CONSTRAINT_SCHEMA_SYM { MDBP_R(4537); }
+        | CONTAINS_SYM { MDBP_R(4538); }
+        | CONTEXT_SYM { MDBP_R(4539); }
+        | CONTINUE_MARIADB_SYM { MDBP_R(4540); }
+        | CONTRIBUTORS_SYM { MDBP_R(4541); }
+        | CONVERSION_SYM { MDBP_R(4542); }
+        | CONVERT_SYM { MDBP_R(4543); }
+        | COUNT_SYM { MDBP_R(4544); }
+        | CPU_SYM { MDBP_R(4545); }
+        | CROSS { MDBP_R(4546); }
+        | CUBE_SYM { MDBP_R(4547); }
+        | CUME_DIST_SYM { MDBP_R(4548); }
+        | CURDATE { MDBP_R(4549); }
+        | CURRENT_PATH { MDBP_R(4550); }
+        | CURRENT_POS_SYM { MDBP_R(4551); }
+        | CURRENT_ROLE { MDBP_R(4552); }
+        | CURRENT_SYM { MDBP_R(4553); }
+        | CURRENT_USER { MDBP_R(4554); }
+        | CURSOR_NAME_SYM { MDBP_R(4555); }
+        | CURSOR_SYM { MDBP_R(4556); }
+        | CURTIME { MDBP_R(4557); }
+        | CYCLE_SYM { MDBP_R(4558); }
+        | DAEMONS_SYM { MDBP_R(4559); }
+        | DAEMON_SYM { MDBP_R(4560); }
+        | DATETIME { MDBP_R(4561); }
+        | DATE_ADD_INTERVAL { MDBP_R(4562); }
+        | DATE_SUB_INTERVAL { MDBP_R(4563); }
+        | DATE_SYM { MDBP_R(4564); }
+        | DAY_HOUR_SYM { MDBP_R(4565); }
+        | DAY_MICROSECOND_SYM { MDBP_R(4566); }
+        | DAY_MINUTE_SYM { MDBP_R(4567); }
+        | DAY_SECOND_SYM { MDBP_R(4568); }
+        | DAY_SYM { MDBP_R(4569); }
+        | DEALLOCATE_SYM { MDBP_R(4570); }
+        | DECIMAL_SYM { MDBP_R(4571); }
+        | DECLARE_MARIADB_SYM { MDBP_R(4572); }
+        | DEFINER_SYM { MDBP_R(4573); }
+        | DELAYED_SYM { MDBP_R(4574); }
+        | DELAY_KEY_WRITE_SYM { MDBP_R(4575); }
+        | DELETE_DOMAIN_ID_SYM { MDBP_R(4576); }
+        | DENSE_RANK_SYM { MDBP_R(4577); }
+        | DENY { MDBP_R(4578); }
+        | DESC { MDBP_R(4579); }
+        | DESCRIBE { MDBP_R(4580); }
+        | DETERMINISTIC_SYM { MDBP_R(4581); }
+        | DIAGNOSTICS_SYM { MDBP_R(4582); }
+        | DIRECTORY_SYM { MDBP_R(4583); }
+        | DISABLE_SYM { MDBP_R(4584); }
+        | DISCARD { MDBP_R(4585); }
+        | DISK_SYM { MDBP_R(4586); }
+        | DISTINCT { MDBP_R(4587); }
+        | DIV_SYM { MDBP_R(4588); }
+        | DOUBLE_SYM { MDBP_R(4589); }
+        | DO_DOMAIN_IDS_SYM { MDBP_R(4590); }
+        | DUAL_SYM { MDBP_R(4591); }
+        | DUMPFILE { MDBP_R(4592); }
+        | DUPLICATE_SYM { MDBP_R(4593); }
+        | EACH_SYM { MDBP_R(4594); }
+        | ELSE { MDBP_R(4595); }
+        | ELSEIF_MARIADB_SYM { MDBP_R(4596); }
+        | ELSIF_MARIADB_SYM { MDBP_R(4597); }
+        | EMPTY_SYM { MDBP_R(4598); }
+        | ENABLE_SYM { MDBP_R(4599); }
+        | ENCLOSED { MDBP_R(4600); }
+        | END { MDBP_R(4601); }
+        | ENDS_SYM { MDBP_R(4602); }
+        | ENGINES_SYM { MDBP_R(4603); }
+        | ENGINE_SYM { MDBP_R(4604); }
+        | ENUM { MDBP_R(4605); }
+        | ERRORS { MDBP_R(4606); }
+        | ERROR_SYM { MDBP_R(4607); }
+        | ESCAPED { MDBP_R(4608); }
+        | ESCAPE_SYM { MDBP_R(4609); }
+        | EVENTS_SYM { MDBP_R(4610); }
+        | EVENT_SYM { MDBP_R(4611); }
+        | EVERY_SYM { MDBP_R(4612); }
+        | EXAMINED_SYM { MDBP_R(4613); }
+        | EXCEPTION_MARIADB_SYM { MDBP_R(4614); }
+        | EXCEPT_SYM { MDBP_R(4615); }
+        | EXCHANGE_SYM { MDBP_R(4616); }
+        | EXCLUDE_SYM { MDBP_R(4617); }
+        | EXECUTE_SYM { MDBP_R(4618); }
+        | EXIT_MARIADB_SYM { MDBP_R(4619); }
+        | EXPANSION_SYM { MDBP_R(4620); }
+        | EXPIRE_SYM { MDBP_R(4621); }
+        | EXPORT_SYM { MDBP_R(4622); }
+        | EXTENDED_SYM { MDBP_R(4623); }
+        | EXTENT_SIZE_SYM { MDBP_R(4624); }
+        | EXTRACT_SYM { MDBP_R(4625); }
+        | FAST_SYM { MDBP_R(4626); }
+        | FAULTS_SYM { MDBP_R(4627); }
+        | FEDERATED_SYM { MDBP_R(4628); }
+        | FETCH_SYM { MDBP_R(4629); }
+        | FILES_SYM { MDBP_R(4630); }
+        | FIRST_SYM { MDBP_R(4631); }
+        | FIRST_VALUE_SYM { MDBP_R(4632); }
+        | FIXED_SYM { MDBP_R(4633); }
+        | FLOAT_SYM { MDBP_R(4634); }
+        | FLUSH_SYM { MDBP_R(4635); }
+        | FOLLOWING_SYM { MDBP_R(4636); }
+        | FOLLOWS_SYM { MDBP_R(4637); }
+        | FOREIGN { MDBP_R(4638); }
+        | FOUND_SYM { MDBP_R(4639); }
+        | FULL { MDBP_R(4640); }
+        | FULLTEXT_SYM { MDBP_R(4641); }
+        | GENERAL { MDBP_R(4642); }
+        | GENERATED_SYM { MDBP_R(4643); }
+        | GET_FORMAT { MDBP_R(4644); }
+        | GET_SYM { MDBP_R(4645); }
+        | GLOBAL_SYM { MDBP_R(4646); }
+        | GOTO_MARIADB_SYM { MDBP_R(4647); }
+        | GROUP_CONCAT_SYM { MDBP_R(4648); }
+        | HANDLER_SYM { MDBP_R(4649); }
+        | HARD_SYM { MDBP_R(4650); }
+        | HASH_SYM { MDBP_R(4651); }
+        | HAVING { MDBP_R(4652); }
+        | HELP_SYM { MDBP_R(4653); }
+        | HIGH_PRIORITY { MDBP_R(4654); }
+        | HISTORY_SYM { MDBP_R(4655); }
+        | HOSTS_SYM { MDBP_R(4656); }
+        | HOUR_MICROSECOND_SYM { MDBP_R(4657); }
+        | HOUR_MINUTE_SYM { MDBP_R(4658); }
+        | HOUR_SECOND_SYM { MDBP_R(4659); }
+        | HOUR_SYM { MDBP_R(4660); }
+        | IGNORED_SYM { MDBP_R(4661); }
+        | IGNORE_DOMAIN_IDS_SYM { MDBP_R(4662); }
+        | IGNORE_SERVER_IDS_SYM { MDBP_R(4663); }
+        | IGNORE_SYM { MDBP_R(4664); }
+        | IMMEDIATE_SYM { MDBP_R(4665); }
+        | IMPORT { MDBP_R(4666); }
+        | INCREMENT_SYM { MDBP_R(4667); }
+        | INDEXES { MDBP_R(4668); }
+        | INDEX_SYM { MDBP_R(4669); }
+        | INFILE { MDBP_R(4670); }
+        | INNER_SYM { MDBP_R(4671); }
+        | INOUT_SYM { MDBP_R(4672); }
+        | INSENSITIVE_SYM { MDBP_R(4673); }
+        | INSERT { MDBP_R(4674); }
+        | INSERT_METHOD { MDBP_R(4675); }
+        | INSTALL_SYM { MDBP_R(4676); }
+        | INTERSECT_SYM { MDBP_R(4677); }
+        | INTERVAL_SYM { MDBP_R(4678); }
+        | INTO { MDBP_R(4679); }
+        | INT_SYM { MDBP_R(4680); }
+        | INVISIBLE_SYM { MDBP_R(4681); }
+        | INVOKER_SYM { MDBP_R(4682); }
+        | IO_SYM { MDBP_R(4683); }
+        | IPC_SYM { MDBP_R(4684); }
+        | IS { MDBP_R(4685); }
+        | ISOLATION { MDBP_R(4686); }
+        | ISOPEN_SYM { MDBP_R(4687); }
+        | ISSUER_SYM { MDBP_R(4688); }
+        | ITERATE_SYM { MDBP_R(4689); }
+        | JOIN_SYM { MDBP_R(4690); }
+        | JSON_ARRAYAGG_SYM { MDBP_R(4691); }
+        | JSON_OBJECTAGG_SYM { MDBP_R(4692); }
+        | JSON_TABLE_SYM { MDBP_R(4693); }
+        | KEYS { MDBP_R(4694); }
+        | KEY_BLOCK_SIZE { MDBP_R(4695); }
+        | KEY_SYM { MDBP_R(4696); }
+        | KILL_SYM { MDBP_R(4697); }
+        | LAG_SYM { MDBP_R(4698); }
+        | LANGUAGE_SYM { MDBP_R(4699); }
+        | LASTVAL_SYM { MDBP_R(4700); }
+        | LAST_SYM { MDBP_R(4701); }
+        | LAST_VALUE { MDBP_R(4702); }
+        | LEADING { MDBP_R(4703); }
+        | LEAD_SYM { MDBP_R(4704); }
+        | LEAVES { MDBP_R(4705); }
+        | LEAVE_SYM { MDBP_R(4706); }
+        | LEFT { MDBP_R(4707); }
+        | LESS_SYM { MDBP_R(4708); }
+        | LIKE { MDBP_R(4709); }
+        | LIMIT { MDBP_R(4710); }
+        | LINEAR_SYM { MDBP_R(4711); }
+        | LINES { MDBP_R(4712); }
+        | LIST_SYM { MDBP_R(4713); }
+        | LOCALTIMESTAMP { MDBP_R(4714); }
+        | LOCAL_SYM { MDBP_R(4715); }
+        | LOCKED_SYM { MDBP_R(4716); }
+        | LOCKS_SYM { MDBP_R(4717); }
+        | LOGS_SYM { MDBP_R(4718); }
+        | LOG_SYM { MDBP_R(4719); }
+        | LONGBLOB { MDBP_R(4720); }
+        | LONGTEXT { MDBP_R(4721); }
+        | LONG_SYM { MDBP_R(4722); }
+        | LOOP_SYM { MDBP_R(4723); }
+        | LOW_PRIORITY { MDBP_R(4724); }
+        | MASTER_CONNECT_RETRY_SYM { MDBP_R(4725); }
+        | MASTER_DELAY_SYM { MDBP_R(4726); }
+        | MASTER_DEMOTE_TO_SLAVE_SYM { MDBP_R(4727); }
+        | MASTER_GTID_POS_SYM { MDBP_R(4728); }
+        | MASTER_HEARTBEAT_PERIOD_SYM { MDBP_R(4729); }
+        | MASTER_HOST_SYM { MDBP_R(4730); }
+        | MASTER_LOG_FILE_SYM { MDBP_R(4731); }
+        | MASTER_LOG_POS_SYM { MDBP_R(4732); }
+        | MASTER_PASSWORD_SYM { MDBP_R(4733); }
+        | MASTER_PORT_SYM { MDBP_R(4734); }
+        | MASTER_RETRY_COUNT_SYM { MDBP_R(4735); }
+        | MASTER_SERVER_ID_SYM { MDBP_R(4736); }
+        | MASTER_SSL_CAPATH_SYM { MDBP_R(4737); }
+        | MASTER_SSL_CA_SYM { MDBP_R(4738); }
+        | MASTER_SSL_CERT_SYM { MDBP_R(4739); }
+        | MASTER_SSL_CIPHER_SYM { MDBP_R(4740); }
+        | MASTER_SSL_CRLPATH_SYM { MDBP_R(4741); }
+        | MASTER_SSL_CRL_SYM { MDBP_R(4742); }
+        | MASTER_SSL_KEY_SYM { MDBP_R(4743); }
+        | MASTER_SSL_SYM { MDBP_R(4744); }
+        | MASTER_SSL_VERIFY_SERVER_CERT_SYM { MDBP_R(4745); }
+        | MASTER_SYM { MDBP_R(4746); }
+        | MASTER_USER_SYM { MDBP_R(4747); }
+        | MASTER_USE_GTID_SYM { MDBP_R(4748); }
+        | MATCH { MDBP_R(4749); }
+        | MAXVALUE_SYM { MDBP_R(4750); }
+        | MAX_CONNECTIONS_PER_HOUR { MDBP_R(4751); }
+        | MAX_QUERIES_PER_HOUR { MDBP_R(4752); }
+        | MAX_ROWS { MDBP_R(4753); }
+        | MAX_STATEMENT_TIME_SYM { MDBP_R(4754); }
+        | MAX_SYM { MDBP_R(4755); }
+        | MAX_UPDATES_PER_HOUR { MDBP_R(4756); }
+        | MAX_USER_CONNECTIONS_SYM { MDBP_R(4757); }
+        | MEDIAN_SYM { MDBP_R(4758); }
+        | MEDIUMBLOB { MDBP_R(4759); }
+        | MEDIUMINT { MDBP_R(4760); }
+        | MEDIUMTEXT { MDBP_R(4761); }
+        | MEDIUM_SYM { MDBP_R(4762); }
+        | MEMORY_SYM { MDBP_R(4763); }
+        | MESSAGE_TEXT_SYM { MDBP_R(4764); }
+        | MICROSECOND_SYM { MDBP_R(4765); }
+        | MIGRATE_SYM { MDBP_R(4766); }
+        | MINUS_ORACLE_SYM { MDBP_R(4767); }
+        | MINUTE_MICROSECOND_SYM { MDBP_R(4768); }
+        | MINUTE_SECOND_SYM { MDBP_R(4769); }
+        | MINUTE_SYM { MDBP_R(4770); }
+        | MINVALUE_SYM { MDBP_R(4771); }
+        | MIN_ROWS { MDBP_R(4772); }
+        | MIN_SYM { MDBP_R(4773); }
+        | MODE_SYM { MDBP_R(4774); }
+        | MODIFIES_SYM { MDBP_R(4775); }
+        | MODIFY_SYM { MDBP_R(4776); }
+        | MOD_SYM { MDBP_R(4777); }
+        | MONITOR_SYM { MDBP_R(4778); }
+        | MONTH_SYM { MDBP_R(4779); }
+        | MUTEX_SYM { MDBP_R(4780); }
+        | MYSQL_ERRNO_SYM { MDBP_R(4781); }
+        | MYSQL_SYM { MDBP_R(4782); }
+        | NAMES_SYM { MDBP_R(4783); }
+        | NATIONAL_SYM { MDBP_R(4784); }
+        | NATURAL { MDBP_R(4785); }
+        | NCHAR_SYM { MDBP_R(4786); }
+        | NESTED_SYM { MDBP_R(4787); }
+        | NEVER_SYM { MDBP_R(4788); }
+        | NEXTVAL_SYM { MDBP_R(4789); }
+        | NEXT_SYM { MDBP_R(4790); }
+        | NOCACHE_SYM { MDBP_R(4791); }
+        | NOCOPY_SYM { MDBP_R(4792); }
+        | NOCYCLE_SYM { MDBP_R(4793); }
+        | NODEGROUP_SYM { MDBP_R(4794); }
+        | NOMAXVALUE_SYM { MDBP_R(4795); }
+        | NOMINVALUE_SYM { MDBP_R(4796); }
+        | NONE_SYM { MDBP_R(4797); }
+        | NOTFOUND_SYM { MDBP_R(4798); }
+        | NOWAIT_SYM { MDBP_R(4799); }
+        | NOW_SYM { MDBP_R(4800); }
+        | NO_SYM { MDBP_R(4801); }
+        | NO_WRITE_TO_BINLOG { MDBP_R(4802); }
+        | NTH_VALUE_SYM { MDBP_R(4803); }
+        | NTILE_SYM { MDBP_R(4804); }
+        | NUMBER_MARIADB_SYM { MDBP_R(4805); }
+        | NUMERIC_SYM { MDBP_R(4806); }
+        | NUMTODSINTERVAL_SYM { MDBP_R(4807); }
+        | NUMTOYMINTERVAL_SYM { MDBP_R(4808); }
+        | NVARCHAR_SYM { MDBP_R(4809); }
+        | OFFSET_SYM { MDBP_R(4810); }
+        | OF_SYM { MDBP_R(4811); }
+        | OLD_PASSWORD_SYM { MDBP_R(4812); }
+        | OLD_VALUE_SYM { MDBP_R(4813); }
+        | ONE_SYM { MDBP_R(4814); }
+        | ONLINE_SYM { MDBP_R(4815); }
+        | ONLY_SYM { MDBP_R(4816); }
+        | OPEN_SYM { MDBP_R(4817); }
+        | OPTIMIZE { MDBP_R(4818); }
+        | OPTION { MDBP_R(4819); }
+        | OPTIONALLY { MDBP_R(4820); }
+        | ORDER_SYM { MDBP_R(4821); }
+        | ORDINALITY_SYM { MDBP_R(4822); }
+        | OTHERS_MARIADB_SYM { MDBP_R(4823); }
+        | OUTER { MDBP_R(4824); }
+        | OUTFILE { MDBP_R(4825); }
+        | OUT_SYM { MDBP_R(4826); }
+        | OVERLAPS_SYM { MDBP_R(4827); }
+        | OVER_SYM { MDBP_R(4828); }
+        | OWNER_SYM { MDBP_R(4829); }
+        | PACKAGE_MARIADB_SYM { MDBP_R(4830); }
+        | PACK_KEYS_SYM { MDBP_R(4831); }
+        | PAGE_CHECKSUM_SYM { MDBP_R(4832); }
+        | PARSER_SYM { MDBP_R(4833); }
+        | PARSE_VCOL_EXPR_SYM { MDBP_R(4834); }
+        | PARTIAL { MDBP_R(4835); }
+        | PARTITIONING_SYM { MDBP_R(4836); }
+        | PARTITIONS_SYM { MDBP_R(4837); }
+        | PARTITION_SYM { MDBP_R(4838); }
+        | PASSWORD_SYM { MDBP_R(4839); }
+        | PERCENTILE_CONT_SYM { MDBP_R(4840); }
+        | PERCENTILE_DISC_SYM { MDBP_R(4841); }
+        | PERCENT_RANK_SYM { MDBP_R(4842); }
+        | PERIOD_SYM { MDBP_R(4843); }
+        | PERSISTENT_SYM { MDBP_R(4844); }
+        | PHASE_SYM { MDBP_R(4845); }
+        | PLUGINS_SYM { MDBP_R(4846); }
+        | PLUGIN_SYM { MDBP_R(4847); }
+        | PORTION_SYM { MDBP_R(4848); }
+        | PORT_SYM { MDBP_R(4849); }
+        | POSITION_SYM { MDBP_R(4850); }
+        | PRECEDES_SYM { MDBP_R(4851); }
+        | PRECEDING_SYM { MDBP_R(4852); }
+        | PRECISION { MDBP_R(4853); }
+        | PREPARE_SYM { MDBP_R(4854); }
+        | PRESERVE_SYM { MDBP_R(4855); }
+        | PREVIOUS_SYM { MDBP_R(4856); }
+        | PREV_SYM { MDBP_R(4857); }
+        | PRIMARY_SYM { MDBP_R(4858); }
+        | PRIVILEGES { MDBP_R(4859); }
+        | PROCESSLIST_SYM { MDBP_R(4860); }
+        | PROFILES_SYM { MDBP_R(4861); }
+        | PROFILE_SYM { MDBP_R(4862); }
+        | PROXY_SYM { MDBP_R(4863); }
+        | PURGE { MDBP_R(4864); }
+        | QUARTER_SYM { MDBP_R(4865); }
+        | QUERY_SYM { MDBP_R(4866); }
+        | QUICK { MDBP_R(4867); }
+        | RAISE_MARIADB_SYM { MDBP_R(4868); }
+        | RANGE_SYM { MDBP_R(4869); }
+        | RANK_SYM { MDBP_R(4870); }
+        | RAW_MARIADB_SYM { MDBP_R(4871); }
+        | READS_SYM { MDBP_R(4872); }
+        | READ_ONLY_SYM { MDBP_R(4873); }
+        | READ_WRITE_SYM { MDBP_R(4874); }
+        | REAL { MDBP_R(4875); }
+        | REBUILD_SYM { MDBP_R(4876); }
+        | RECORD_SYM { MDBP_R(4877); }
+        | RECOVER_SYM { MDBP_R(4878); }
+        | RECURSIVE_SYM { MDBP_R(4879); }
+        | REDUNDANT_SYM { MDBP_R(4880); }
+        | REFERENCES { MDBP_R(4881); }
+        | REF_SYM { MDBP_R(4882); }
+        | REF_SYSTEM_ID_SYM { MDBP_R(4883); }
+        | REGEXP { MDBP_R(4884); }
+        | RELAY { MDBP_R(4885); }
+        | RELAYLOG_SYM { MDBP_R(4886); }
+        | RELAY_LOG_FILE_SYM { MDBP_R(4887); }
+        | RELAY_LOG_POS_SYM { MDBP_R(4888); }
+        | RELAY_THREAD { MDBP_R(4889); }
+        | RELEASE_SYM { MDBP_R(4890); }
+        | RELOAD { MDBP_R(4891); }
+        | RENAME { MDBP_R(4892); }
+        | REORGANIZE_SYM { MDBP_R(4893); }
+        | REPAIR { MDBP_R(4894); }
+        | REPEATABLE_SYM { MDBP_R(4895); }
+        | REPEAT_SYM { MDBP_R(4896); }
+        | REPLAY_SYM { MDBP_R(4897); }
+        | REPLICATION { MDBP_R(4898); }
+        | REQUIRE_SYM { MDBP_R(4899); }
+        | RESET_SYM { MDBP_R(4900); }
+        | RESIGNAL_SYM { MDBP_R(4901); }
+        | RESOURCES { MDBP_R(4902); }
+        | RESTART_SYM { MDBP_R(4903); }
+        | RESTRICT { MDBP_R(4904); }
+        | RESUME_SYM { MDBP_R(4905); }
+        | RETURNED_SQLSTATE_SYM { MDBP_R(4906); }
+        | RETURNING_SYM { MDBP_R(4907); }
+        | RETURNS_SYM { MDBP_R(4908); }
+        | RETURN_MARIADB_SYM { MDBP_R(4909); }
+        | REUSE_SYM { MDBP_R(4910); }
+        | REVERSE_SYM { MDBP_R(4911); }
+        | RIGHT { MDBP_R(4912); }
+        | ROLLBACK_SYM { MDBP_R(4913); }
+        | ROLLUP_SYM { MDBP_R(4914); }
+        | ROUTINE_SYM { MDBP_R(4915); }
+        | ROWCOUNT_SYM { MDBP_R(4916); }
+        | ROWNUM_SYM { MDBP_R(4917); }
+        | ROWS_SYM { MDBP_R(4918); }
+        | ROWTYPE_MARIADB_SYM { MDBP_R(4919); }
+        | ROW_COUNT_SYM { MDBP_R(4920); }
+        | ROW_FORMAT_SYM { MDBP_R(4921); }
+        | ROW_NUMBER_SYM { MDBP_R(4922); }
+        | ROW_SYM { MDBP_R(4923); }
+        | RTREE_SYM { MDBP_R(4924); }
+        | SAVEPOINT_SYM { MDBP_R(4925); }
+        | SCALAR_SYM { MDBP_R(4926); }
+        | SCHEDULE_SYM { MDBP_R(4927); }
+        | SCHEMA_NAME_SYM { MDBP_R(4928); }
+        | SECOND_MICROSECOND_SYM { MDBP_R(4929); }
+        | SECOND_SYM { MDBP_R(4930); }
+        | SECURITY_SYM { MDBP_R(4931); }
+        | SELECT_SYM { MDBP_R(4932); }
+        | SENSITIVE_SYM { MDBP_R(4933); }
+        | SEPARATOR_SYM { MDBP_R(4934); }
+        | SEQUENCE_SYM { MDBP_R(4935); }
+        | SERIALIZABLE_SYM { MDBP_R(4936); }
+        | SERIAL_SYM { MDBP_R(4937); }
+        | SERVER_SYM { MDBP_R(4938); }
+        | SESSION_SYM { MDBP_R(4939); }
+        | SESSION_USER_SYM { MDBP_R(4940); }
+        | SETVAL_SYM { MDBP_R(4941); }
+        | SHARE_SYM { MDBP_R(4942); }
+        | SHUTDOWN { MDBP_R(4943); }
+        | SIGNAL_SYM { MDBP_R(4944); }
+        | SIGNED_SYM { MDBP_R(4945); }
+        | SIMPLE_SYM { MDBP_R(4946); }
+        | SKIP_SYM { MDBP_R(4947); }
+        | SLAVE { MDBP_R(4948); }
+        | SLAVES { MDBP_R(4949); }
+        | SLAVE_POS_SYM { MDBP_R(4950); }
+        | SLOW { MDBP_R(4951); }
+        | SMALLINT { MDBP_R(4952); }
+        | SNAPSHOT_SYM { MDBP_R(4953); }
+        | SOCKET_SYM { MDBP_R(4954); }
+        | SOFT_SYM { MDBP_R(4955); }
+        | SONAME_SYM { MDBP_R(4956); }
+        | SOUNDS_SYM { MDBP_R(4957); }
+        | SOURCE_SYM { MDBP_R(4958); }
+        | SPATIAL_SYM { MDBP_R(4959); }
+        | SPECIFIC_SYM { MDBP_R(4960); }
+        | SQLEXCEPTION_SYM { MDBP_R(4961); }
+        | SQLSTATE_SYM { MDBP_R(4962); }
+        | SQLWARNING_SYM { MDBP_R(4963); }
+        | SQL_AFTER_GTIDS_SYM { MDBP_R(4964); }
+        | SQL_BEFORE_GTIDS_SYM { MDBP_R(4965); }
+        | SQL_BIG_RESULT { MDBP_R(4966); }
+        | SQL_BUFFER_RESULT { MDBP_R(4967); }
+        | SQL_CACHE_SYM { MDBP_R(4968); }
+        | SQL_CALC_FOUND_ROWS { MDBP_R(4969); }
+        | SQL_NO_CACHE_SYM { MDBP_R(4970); }
+        | SQL_SMALL_RESULT { MDBP_R(4971); }
+        | SQL_SYM { MDBP_R(4972); }
+        | SQL_THREAD { MDBP_R(4973); }
+        | SSL_SYM { MDBP_R(4974); }
+        | STAGE_SYM { MDBP_R(4975); }
+        | STARTING { MDBP_R(4976); }
+        | STARTS_SYM { MDBP_R(4977); }
+        | START_SYM { MDBP_R(4978); }
+        | STATEMENT_SYM { MDBP_R(4979); }
+        | STATS_AUTO_RECALC_SYM { MDBP_R(4980); }
+        | STATS_PERSISTENT_SYM { MDBP_R(4981); }
+        | STATS_SAMPLE_PAGES_SYM { MDBP_R(4982); }
+        | STDDEV_SAMP_SYM { MDBP_R(4983); }
+        | STD_SYM { MDBP_R(4984); }
+        | STOP_SYM { MDBP_R(4985); }
+        | STORAGE_SYM { MDBP_R(4986); }
+        | STORED_SYM { MDBP_R(4987); }
+        | STRAIGHT_JOIN { MDBP_R(4988); }
+        | STRING_SYM { MDBP_R(4989); }
+        | ST_COLLECT_SYM { MDBP_R(4990); }
+        | SUBCLASS_ORIGIN_SYM { MDBP_R(4991); }
+        | SUBDATE_SYM { MDBP_R(4992); }
+        | SUBJECT_SYM { MDBP_R(4993); }
+        | SUBPARTITIONS_SYM { MDBP_R(4994); }
+        | SUBPARTITION_SYM { MDBP_R(4995); }
+        | SUBSTRING { MDBP_R(4996); }
+        | SUM_SYM { MDBP_R(4997); }
+        | SUPER_SYM { MDBP_R(4998); }
+        | SUSPEND_SYM { MDBP_R(4999); }
+        | SWAPS_SYM { MDBP_R(5000); }
+        | SWITCHES_SYM { MDBP_R(5001); }
+        | SYSDATE { MDBP_R(5002); }
+        | SYSTEM { MDBP_R(5003); }
+        | SYSTEM_TIME_SYM { MDBP_R(5004); }
+        | TABLES { MDBP_R(5005); }
+        | TABLESPACE { MDBP_R(5006); }
+        | TABLE_CHECKSUM_SYM { MDBP_R(5007); }
+        | TABLE_NAME_SYM { MDBP_R(5008); }
+        | TEMPORARY { MDBP_R(5009); }
+        | TEMPTABLE_SYM { MDBP_R(5010); }
+        | TERMINATED { MDBP_R(5011); }
+        | TEXT_SYM { MDBP_R(5012); }
+        | THAN_SYM { MDBP_R(5013); }
+        | THEN_SYM { MDBP_R(5014); }
+        | THREADS_SYM { MDBP_R(5015); }
+        | TIES_SYM { MDBP_R(5016); }
+        | TIMESTAMP { MDBP_R(5017); }
+        | TIMESTAMP_ADD { MDBP_R(5018); }
+        | TIMESTAMP_DIFF { MDBP_R(5019); }
+        | TIME_SYM { MDBP_R(5020); }
+        | TINYBLOB { MDBP_R(5021); }
+        | TINYINT { MDBP_R(5022); }
+        | TINYTEXT { MDBP_R(5023); }
+        | TO_DATE { MDBP_R(5024); }
+        | TRAILING { MDBP_R(5025); }
+        | TRANSACTIONAL_SYM { MDBP_R(5026); }
+        | TRANSACTION_SYM { MDBP_R(5027); }
+        | TRIGGERS_SYM { MDBP_R(5028); }
+        | TRIGGER_SYM { MDBP_R(5029); }
+        | TRIM { MDBP_R(5030); }
+        | TRIM_ORACLE { MDBP_R(5031); }
+        | TRUNCATE_SYM { MDBP_R(5032); }
+        | UNBOUNDED_SYM { MDBP_R(5033); }
+        | UNCOMMITTED_SYM { MDBP_R(5034); }
+        | UNDEFINED_SYM { MDBP_R(5035); }
+        | UNDO_SYM { MDBP_R(5036); }
+        | UNICODE_SYM { MDBP_R(5037); }
+        | UNINSTALL_SYM { MDBP_R(5038); }
+        | UNION_SYM { MDBP_R(5039); }
+        | UNIQUE_SYM { MDBP_R(5040); }
+        | UNKNOWN_SYM { MDBP_R(5041); }
+        | UNSIGNED { MDBP_R(5042); }
+        | UNTIL_SYM { MDBP_R(5043); }
+        | UPGRADE_SYM { MDBP_R(5044); }
+        | USAGE { MDBP_R(5045); }
+        | USE_FRM { MDBP_R(5046); }
+        | USING { MDBP_R(5047); }
+        | UTC_DATE_SYM { MDBP_R(5048); }
+        | UTC_TIMESTAMP_SYM { MDBP_R(5049); }
+        | UTC_TIME_SYM { MDBP_R(5050); }
+        | VALUES { MDBP_R(5051); }
+        | VALUE_SYM { MDBP_R(5052); }
+        | VARBINARY { MDBP_R(5053); }
+        | VARCHAR { MDBP_R(5054); }
+        | VARCHAR2_MARIADB_SYM { MDBP_R(5055); }
+        | VARIABLES { MDBP_R(5056); }
+        | VARIANCE_SYM { MDBP_R(5057); }
+        | VARYING { MDBP_R(5058); }
+        | VAR_SAMP_SYM { MDBP_R(5059); }
+        | VECTOR_SYM { MDBP_R(5060); }
+        | VENDORS_SYM { MDBP_R(5061); }
+        | VERSIONING_SYM { MDBP_R(5062); }
+        | VIA_SYM { MDBP_R(5063); }
+        | VIRTUAL_SYM { MDBP_R(5064); }
+        | VISIBLE_SYM { MDBP_R(5065); }
+        | WAIT_SYM { MDBP_R(5066); }
+        | WARNINGS { MDBP_R(5067); }
+        | WEEK_SYM { MDBP_R(5068); }
+        | WEIGHT_STRING_SYM { MDBP_R(5069); }
+        | WHEN_SYM { MDBP_R(5070); }
+        | WHERE { MDBP_R(5071); }
+        | WHILE_SYM { MDBP_R(5072); }
+        | WINDOW_SYM { MDBP_R(5073); }
+        | WITH { MDBP_R(5074); }
+        | WITHIN { MDBP_R(5075); }
+        | WITHOUT { MDBP_R(5076); }
+        | WORK_SYM { MDBP_R(5077); }
+        | WRAPPER_SYM { MDBP_R(5078); }
+        | WRITE_SYM { MDBP_R(5079); }
+        | X509_SYM { MDBP_R(5080); }
+        | XA_SYM { MDBP_R(5081); }
+        | XML_SYM { MDBP_R(5082); }
+        | XOR { MDBP_R(5083); }
+        | YEAR_MONTH_SYM { MDBP_R(5084); }
+        | YEAR_SYM { MDBP_R(5085); }
+        | ZEROFILL { MDBP_R(5086); }
+        ;
+
+mrs_qualified_identifier:
+          mrs_identifier { MDBP_R(5087); }
+        | mrs_identifier '.' mrs_identifier { MDBP_R(5088); }
+        ;
+
+mrs_text_or_identifier:
+          mrs_identifier { MDBP_R(5089); }
+        | TEXT_STRING { MDBP_R(5090); }
+        | LEX_HOSTNAME { MDBP_R(5091); }
+        ;
+
+mrs_int_number:
+          NUM { MDBP_R(5092); }
+        | LONG_NUM { MDBP_R(5093); }
+        | ULONGLONG_NUM { MDBP_R(5094); }
+        ;
+
+mrs_request_path:
+          '/' mrs_path_segment { MDBP_R(5095); }
+        | mrs_request_path '/' mrs_path_segment { MDBP_R(5096); }
+        ;
+
+mrs_path_segment:
+          IDENT_sys { MDBP_R(5097); }
+        | ACCOUNT_SYM { MDBP_R(5098); }
+        | ACTION { MDBP_R(5099); }
+        | ADD { MDBP_R(5100); }
+        | ADDDATE_SYM { MDBP_R(5101); }
+        | ADMIN_SYM { MDBP_R(5102); }
+        | AFTER_SYM { MDBP_R(5103); }
+        | AGAINST { MDBP_R(5104); }
+        | AGGREGATE_SYM { MDBP_R(5105); }
+        | ALGORITHM_SYM { MDBP_R(5106); }
+        | ALL { MDBP_R(5107); }
+        | ALLOW_SYM { MDBP_R(5108); }
+        | ALTER { MDBP_R(5109); }
+        | ALWAYS_SYM { MDBP_R(5110); }
+        | ANALYZE_SYM { MDBP_R(5111); }
+        | AND_SYM { MDBP_R(5112); }
+        | ANY_SYM { MDBP_R(5113); }
+        | APPS_SYM { MDBP_R(5114); }
+        | APP_SYM { MDBP_R(5115); }
+        | ARRAY_SYM { MDBP_R(5116); }
+        | AS { MDBP_R(5117); }
+        | ASC { MDBP_R(5118); }
+        | ASCII_SYM { MDBP_R(5119); }
+        | ASENSITIVE_SYM { MDBP_R(5120); }
+        | ATOMIC_SYM { MDBP_R(5121); }
+        | AT_SYM { MDBP_R(5122); }
+        | AUTHENTICATION_SYM { MDBP_R(5123); }
+        | AUTHORIZATION_SYM { MDBP_R(5124); }
+        | AUTHORS_SYM { MDBP_R(5125); }
+        | AUTH_SYM { MDBP_R(5126); }
+        | AUTODETECT_SYM { MDBP_R(5127); }
+        | AUTO_INC { MDBP_R(5128); }
+        | AUTO_SYM { MDBP_R(5129); }
+        | AVAILABLE_SYM { MDBP_R(5130); }
+        | AVG_ROW_LENGTH { MDBP_R(5131); }
+        | AVG_SYM { MDBP_R(5132); }
+        | BACKUP_SYM { MDBP_R(5133); }
+        | BEFORE_SYM { MDBP_R(5134); }
+        | BEGIN_MARIADB_SYM { MDBP_R(5135); }
+        | BETWEEN_SYM { MDBP_R(5136); }
+        | BIGINT { MDBP_R(5137); }
+        | BINARY { MDBP_R(5138); }
+        | BINLOG_SYM { MDBP_R(5139); }
+        | BIT_AND { MDBP_R(5140); }
+        | BIT_OR { MDBP_R(5141); }
+        | BIT_SYM { MDBP_R(5142); }
+        | BIT_XOR { MDBP_R(5143); }
+        | BLOB_MARIADB_SYM { MDBP_R(5144); }
+        | BLOCK_SYM { MDBP_R(5145); }
+        | BODY_MARIADB_SYM { MDBP_R(5146); }
+        | BOOLEAN_SYM { MDBP_R(5147); }
+        | BOOL_SYM { MDBP_R(5148); }
+        | BOTH { MDBP_R(5149); }
+        | BTREE_SYM { MDBP_R(5150); }
+        | BY { MDBP_R(5151); }
+        | BYTE_SYM { MDBP_R(5152); }
+        | CACHE_SYM { MDBP_R(5153); }
+        | CALL_SYM { MDBP_R(5154); }
+        | CASCADE { MDBP_R(5155); }
+        | CASCADED { MDBP_R(5156); }
+        | CASE_SYM { MDBP_R(5157); }
+        | CAST_SYM { MDBP_R(5158); }
+        | CATALOG_NAME_SYM { MDBP_R(5159); }
+        | CHAIN_SYM { MDBP_R(5160); }
+        | CHANGE { MDBP_R(5161); }
+        | CHANGED { MDBP_R(5162); }
+        | CHANNEL_SYM { MDBP_R(5163); }
+        | CHARSET { MDBP_R(5164); }
+        | CHAR_SYM { MDBP_R(5165); }
+        | CHECKPOINT_SYM { MDBP_R(5166); }
+        | CHECKSUM_SYM { MDBP_R(5167); }
+        | CHECK_SYM { MDBP_R(5168); }
+        | CIPHER_SYM { MDBP_R(5169); }
+        | CLASS_ORIGIN_SYM { MDBP_R(5170); }
+        | CLASS_SYM { MDBP_R(5171); }
+        | CLIENT_SYM { MDBP_R(5172); }
+        | CLOB_MARIADB_SYM { MDBP_R(5173); }
+        | CLONE_SYM { MDBP_R(5174); }
+        | CLOSE_SYM { MDBP_R(5175); }
+        | COALESCE { MDBP_R(5176); }
+        | CODE_SYM { MDBP_R(5177); }
+        | COLLATE_SYM { MDBP_R(5178); }
+        | COLLATION_SYM { MDBP_R(5179); }
+        | COLUMNS { MDBP_R(5180); }
+        | COLUMN_ADD_SYM { MDBP_R(5181); }
+        | COLUMN_CHECK_SYM { MDBP_R(5182); }
+        | COLUMN_CREATE_SYM { MDBP_R(5183); }
+        | COLUMN_DELETE_SYM { MDBP_R(5184); }
+        | COLUMN_GET_SYM { MDBP_R(5185); }
+        | COLUMN_NAME_SYM { MDBP_R(5186); }
+        | COLUMN_SYM { MDBP_R(5187); }
+        | COMMENT_SYM { MDBP_R(5188); }
+        | COMMITTED_SYM { MDBP_R(5189); }
+        | COMMIT_SYM { MDBP_R(5190); }
+        | COMPACT_SYM { MDBP_R(5191); }
+        | COMPLETION_SYM { MDBP_R(5192); }
+        | COMPRESSED_SYM { MDBP_R(5193); }
+        | CONCURRENT { MDBP_R(5194); }
+        | CONDITION_SYM { MDBP_R(5195); }
+        | CONFIGURE_SYM { MDBP_R(5196); }
+        | CONNECTION_SYM { MDBP_R(5197); }
+        | CONSISTENT_SYM { MDBP_R(5198); }
+        | CONSTRAINT { MDBP_R(5199); }
+        | CONSTRAINT_CATALOG_SYM { MDBP_R(5200); }
+        | CONSTRAINT_NAME_SYM { MDBP_R(5201); }
+        | CONSTRAINT_SCHEMA_SYM { MDBP_R(5202); }
+        | CONTAINS_SYM { MDBP_R(5203); }
+        | CONTENT_SYM { MDBP_R(5204); }
+        | CONTEXT_SYM { MDBP_R(5205); }
+        | CONTINUE_MARIADB_SYM { MDBP_R(5206); }
+        | CONTRIBUTORS_SYM { MDBP_R(5207); }
+        | CONVERSION_SYM { MDBP_R(5208); }
+        | CONVERT_SYM { MDBP_R(5209); }
+        | COUNT_SYM { MDBP_R(5210); }
+        | CPU_SYM { MDBP_R(5211); }
+        | CREATE { MDBP_R(5212); }
+        | CROSS { MDBP_R(5213); }
+        | CUBE_SYM { MDBP_R(5214); }
+        | CUME_DIST_SYM { MDBP_R(5215); }
+        | CURDATE { MDBP_R(5216); }
+        | CURRENT_PATH { MDBP_R(5217); }
+        | CURRENT_POS_SYM { MDBP_R(5218); }
+        | CURRENT_ROLE { MDBP_R(5219); }
+        | CURRENT_SYM { MDBP_R(5220); }
+        | CURRENT_USER { MDBP_R(5221); }
+        | CURSOR_NAME_SYM { MDBP_R(5222); }
+        | CURSOR_SYM { MDBP_R(5223); }
+        | CURTIME { MDBP_R(5224); }
+        | CYCLE_SYM { MDBP_R(5225); }
+        | DAEMONS_SYM { MDBP_R(5226); }
+        | DAEMON_SYM { MDBP_R(5227); }
+        | DATABASE { MDBP_R(5228); }
+        | DATABASES { MDBP_R(5229); }
+        | DATA_SYM { MDBP_R(5230); }
+        | DATETIME { MDBP_R(5231); }
+        | DATE_ADD_INTERVAL { MDBP_R(5232); }
+        | DATE_SUB_INTERVAL { MDBP_R(5233); }
+        | DATE_SYM { MDBP_R(5234); }
+        | DAY_HOUR_SYM { MDBP_R(5235); }
+        | DAY_MICROSECOND_SYM { MDBP_R(5236); }
+        | DAY_MINUTE_SYM { MDBP_R(5237); }
+        | DAY_SECOND_SYM { MDBP_R(5238); }
+        | DAY_SYM { MDBP_R(5239); }
+        | DEALLOCATE_SYM { MDBP_R(5240); }
+        | DECIMAL_SYM { MDBP_R(5241); }
+        | DECLARE_MARIADB_SYM { MDBP_R(5242); }
+        | DEFAULT { MDBP_R(5243); }
+        | DEFINER_SYM { MDBP_R(5244); }
+        | DELAYED_SYM { MDBP_R(5245); }
+        | DELAY_KEY_WRITE_SYM { MDBP_R(5246); }
+        | DELETE_DOMAIN_ID_SYM { MDBP_R(5247); }
+        | DELETE_SYM { MDBP_R(5248); }
+        | DENSE_RANK_SYM { MDBP_R(5249); }
+        | DENY { MDBP_R(5250); }
+        | DESC { MDBP_R(5251); }
+        | DESCRIBE { MDBP_R(5252); }
+        | DETERMINISTIC_SYM { MDBP_R(5253); }
+        | DEVELOPMENT_SYM { MDBP_R(5254); }
+        | DIAGNOSTICS_SYM { MDBP_R(5255); }
+        | DIRECTORY_SYM { MDBP_R(5256); }
+        | DISABLED_SYM { MDBP_R(5257); }
+        | DISABLE_SYM { MDBP_R(5258); }
+        | DISCARD { MDBP_R(5259); }
+        | DISK_SYM { MDBP_R(5260); }
+        | DISTINCT { MDBP_R(5261); }
+        | DIV_SYM { MDBP_R(5262); }
+        | DOUBLE_SYM { MDBP_R(5263); }
+        | DO_DOMAIN_IDS_SYM { MDBP_R(5264); }
+        | DO_SYM { MDBP_R(5265); }
+        | DROP { MDBP_R(5266); }
+        | DUAL_SYM { MDBP_R(5267); }
+        | DUMPFILE { MDBP_R(5268); }
+        | DUPLICATE_SYM { MDBP_R(5269); }
+        | DYNAMIC_SYM { MDBP_R(5270); }
+        | EACH_SYM { MDBP_R(5271); }
+        | ELSE { MDBP_R(5272); }
+        | ELSEIF_MARIADB_SYM { MDBP_R(5273); }
+        | ELSIF_MARIADB_SYM { MDBP_R(5274); }
+        | EMPTY_SYM { MDBP_R(5275); }
+        | ENABLED_SYM { MDBP_R(5276); }
+        | ENABLE_SYM { MDBP_R(5277); }
+        | ENCLOSED { MDBP_R(5278); }
+        | END { MDBP_R(5279); }
+        | ENDPOINTS_SYM { MDBP_R(5280); }
+        | ENDS_SYM { MDBP_R(5281); }
+        | ENGINES_SYM { MDBP_R(5282); }
+        | ENGINE_SYM { MDBP_R(5283); }
+        | ENUM { MDBP_R(5284); }
+        | ERRORS { MDBP_R(5285); }
+        | ERROR_SYM { MDBP_R(5286); }
+        | ESCAPED { MDBP_R(5287); }
+        | ESCAPE_SYM { MDBP_R(5288); }
+        | EVENTS_SYM { MDBP_R(5289); }
+        | EVENT_SYM { MDBP_R(5290); }
+        | EVERY_SYM { MDBP_R(5291); }
+        | EXAMINED_SYM { MDBP_R(5292); }
+        | EXCEPTION_MARIADB_SYM { MDBP_R(5293); }
+        | EXCEPT_SYM { MDBP_R(5294); }
+        | EXCHANGE_SYM { MDBP_R(5295); }
+        | EXCLUDE_SYM { MDBP_R(5296); }
+        | EXECUTE_SYM { MDBP_R(5297); }
+        | EXISTS { MDBP_R(5298); }
+        | EXIT_MARIADB_SYM { MDBP_R(5299); }
+        | EXPANSION_SYM { MDBP_R(5300); }
+        | EXPIRE_SYM { MDBP_R(5301); }
+        | EXPORT_SYM { MDBP_R(5302); }
+        | EXTENDED_SYM { MDBP_R(5303); }
+        | EXTENDS_SYM { MDBP_R(5304); }
+        | EXTENT_SIZE_SYM { MDBP_R(5305); }
+        | EXTRACT_SYM { MDBP_R(5306); }
+        | FALSE_SYM { MDBP_R(5307); }
+        | FAST_SYM { MDBP_R(5308); }
+        | FAULTS_SYM { MDBP_R(5309); }
+        | FEDERATED_SYM { MDBP_R(5310); }
+        | FEED_SYM { MDBP_R(5311); }
+        | FETCH_SYM { MDBP_R(5312); }
+        | FILES_SYM { MDBP_R(5313); }
+        | FILE_SYM { MDBP_R(5314); }
+        | FILTER_SYM { MDBP_R(5315); }
+        | FIRST_SYM { MDBP_R(5316); }
+        | FIRST_VALUE_SYM { MDBP_R(5317); }
+        | FIXED_SYM { MDBP_R(5318); }
+        | FLOAT_SYM { MDBP_R(5319); }
+        | FLUSH_SYM { MDBP_R(5320); }
+        | FOLLOWING_SYM { MDBP_R(5321); }
+        | FOLLOWS_SYM { MDBP_R(5322); }
+        | FORCE_SYM { MDBP_R(5323); }
+        | FOREIGN { MDBP_R(5324); }
+        | FORMAT_SYM { MDBP_R(5325); }
+        | FOR_SYM { MDBP_R(5326); }
+        | FOUND_SYM { MDBP_R(5327); }
+        | FROM { MDBP_R(5328); }
+        | FULL { MDBP_R(5329); }
+        | FULLTEXT_SYM { MDBP_R(5330); }
+        | FUNCTIONS_SYM { MDBP_R(5331); }
+        | FUNCTION_SYM { MDBP_R(5332); }
+        | GENERAL { MDBP_R(5333); }
+        | GENERATED_SYM { MDBP_R(5334); }
+        | GET_FORMAT { MDBP_R(5335); }
+        | GET_SYM { MDBP_R(5336); }
+        | GLOBAL_SYM { MDBP_R(5337); }
+        | GOTO_MARIADB_SYM { MDBP_R(5338); }
+        | GRANT { MDBP_R(5339); }
+        | GRANTS { MDBP_R(5340); }
+        | GROUP_CONCAT_SYM { MDBP_R(5341); }
+        | GROUP_SYM { MDBP_R(5342); }
+        | HANDLER_SYM { MDBP_R(5343); }
+        | HARD_SYM { MDBP_R(5344); }
+        | HASH_SYM { MDBP_R(5345); }
+        | HAVING { MDBP_R(5346); }
+        | HELP_SYM { MDBP_R(5347); }
+        | HIERARCHY_SYM { MDBP_R(5348); }
+        | HIGH_PRIORITY { MDBP_R(5349); }
+        | HISTORY_SYM { MDBP_R(5350); }
+        | HOSTS_SYM { MDBP_R(5351); }
+        | HOST_SYM { MDBP_R(5352); }
+        | HOUR_MICROSECOND_SYM { MDBP_R(5353); }
+        | HOUR_MINUTE_SYM { MDBP_R(5354); }
+        | HOUR_SECOND_SYM { MDBP_R(5355); }
+        | HOUR_SYM { MDBP_R(5356); }
+        | HTTPS_SYM { MDBP_R(5357); }
+        | HTTP_SYM { MDBP_R(5358); }
+        | IDENTIFIED_SYM { MDBP_R(5359); }
+        | ID_SYM { MDBP_R(5360); }
+        | IF_SYM { MDBP_R(5361); }
+        | IGNORED_SYM { MDBP_R(5362); }
+        | IGNORE_DOMAIN_IDS_SYM { MDBP_R(5363); }
+        | IGNORE_SERVER_IDS_SYM { MDBP_R(5364); }
+        | IGNORE_SYM { MDBP_R(5365); }
+        | IMMEDIATE_SYM { MDBP_R(5366); }
+        | IMPORT { MDBP_R(5367); }
+        | INCLUDING_SYM { MDBP_R(5368); }
+        | INCREMENT_SYM { MDBP_R(5369); }
+        | INDEXES { MDBP_R(5370); }
+        | INDEX_SYM { MDBP_R(5371); }
+        | INFILE { MDBP_R(5372); }
+        | INNER_SYM { MDBP_R(5373); }
+        | INOUT_SYM { MDBP_R(5374); }
+        | INSENSITIVE_SYM { MDBP_R(5375); }
+        | INSERT { MDBP_R(5376); }
+        | INSERT_METHOD { MDBP_R(5377); }
+        | INSTALL_SYM { MDBP_R(5378); }
+        | INTERSECT_SYM { MDBP_R(5379); }
+        | INTERVAL_SYM { MDBP_R(5380); }
+        | INTO { MDBP_R(5381); }
+        | INT_SYM { MDBP_R(5382); }
+        | INVISIBLE_SYM { MDBP_R(5383); }
+        | INVOKER_SYM { MDBP_R(5384); }
+        | IN_SYM { MDBP_R(5385); }
+        | IO_SYM { MDBP_R(5386); }
+        | IPC_SYM { MDBP_R(5387); }
+        | IS { MDBP_R(5388); }
+        | ISOLATION { MDBP_R(5389); }
+        | ISOPEN_SYM { MDBP_R(5390); }
+        | ISSUER_SYM { MDBP_R(5391); }
+        | ITEMS_SYM { MDBP_R(5392); }
+        | ITEM_SYM { MDBP_R(5393); }
+        | ITERATE_SYM { MDBP_R(5394); }
+        | JOIN_SYM { MDBP_R(5395); }
+        | JSON_ARRAYAGG_SYM { MDBP_R(5396); }
+        | JSON_OBJECTAGG_SYM { MDBP_R(5397); }
+        | JSON_SYM { MDBP_R(5398); }
+        | JSON_TABLE_SYM { MDBP_R(5399); }
+        | KEYS { MDBP_R(5400); }
+        | KEY_BLOCK_SIZE { MDBP_R(5401); }
+        | KEY_SYM { MDBP_R(5402); }
+        | KILL_SYM { MDBP_R(5403); }
+        | LAG_SYM { MDBP_R(5404); }
+        | LANGUAGE_SYM { MDBP_R(5405); }
+        | LASTVAL_SYM { MDBP_R(5406); }
+        | LAST_SYM { MDBP_R(5407); }
+        | LAST_VALUE { MDBP_R(5408); }
+        | LEADING { MDBP_R(5409); }
+        | LEAD_SYM { MDBP_R(5410); }
+        | LEAVES { MDBP_R(5411); }
+        | LEAVE_SYM { MDBP_R(5412); }
+        | LEFT { MDBP_R(5413); }
+        | LESS_SYM { MDBP_R(5414); }
+        | LEVEL_SYM { MDBP_R(5415); }
+        | LIKE { MDBP_R(5416); }
+        | LIMIT { MDBP_R(5417); }
+        | LINEAR_SYM { MDBP_R(5418); }
+        | LINES { MDBP_R(5419); }
+        | LIST_SYM { MDBP_R(5420); }
+        | LOAD { MDBP_R(5421); }
+        | LOCALTIMESTAMP { MDBP_R(5422); }
+        | LOCAL_SYM { MDBP_R(5423); }
+        | LOCKED_SYM { MDBP_R(5424); }
+        | LOCKS_SYM { MDBP_R(5425); }
+        | LOCK_SYM { MDBP_R(5426); }
+        | LOGS_SYM { MDBP_R(5427); }
+        | LOG_SYM { MDBP_R(5428); }
+        | LONGBLOB { MDBP_R(5429); }
+        | LONGTEXT { MDBP_R(5430); }
+        | LONG_SYM { MDBP_R(5431); }
+        | LOOP_SYM { MDBP_R(5432); }
+        | LOW_PRIORITY { MDBP_R(5433); }
+        | MANAGEMENT_SYM { MDBP_R(5434); }
+        | MAPPING_SYM { MDBP_R(5435); }
+        | MARIADB_SYM { MDBP_R(5436); }
+        | MASTER_CONNECT_RETRY_SYM { MDBP_R(5437); }
+        | MASTER_DELAY_SYM { MDBP_R(5438); }
+        | MASTER_DEMOTE_TO_SLAVE_SYM { MDBP_R(5439); }
+        | MASTER_GTID_POS_SYM { MDBP_R(5440); }
+        | MASTER_HEARTBEAT_PERIOD_SYM { MDBP_R(5441); }
+        | MASTER_HOST_SYM { MDBP_R(5442); }
+        | MASTER_LOG_FILE_SYM { MDBP_R(5443); }
+        | MASTER_LOG_POS_SYM { MDBP_R(5444); }
+        | MASTER_PASSWORD_SYM { MDBP_R(5445); }
+        | MASTER_PORT_SYM { MDBP_R(5446); }
+        | MASTER_RETRY_COUNT_SYM { MDBP_R(5447); }
+        | MASTER_SERVER_ID_SYM { MDBP_R(5448); }
+        | MASTER_SSL_CAPATH_SYM { MDBP_R(5449); }
+        | MASTER_SSL_CA_SYM { MDBP_R(5450); }
+        | MASTER_SSL_CERT_SYM { MDBP_R(5451); }
+        | MASTER_SSL_CIPHER_SYM { MDBP_R(5452); }
+        | MASTER_SSL_CRLPATH_SYM { MDBP_R(5453); }
+        | MASTER_SSL_CRL_SYM { MDBP_R(5454); }
+        | MASTER_SSL_KEY_SYM { MDBP_R(5455); }
+        | MASTER_SSL_SYM { MDBP_R(5456); }
+        | MASTER_SSL_VERIFY_SERVER_CERT_SYM { MDBP_R(5457); }
+        | MASTER_SYM { MDBP_R(5458); }
+        | MASTER_USER_SYM { MDBP_R(5459); }
+        | MASTER_USE_GTID_SYM { MDBP_R(5460); }
+        | MATCH { MDBP_R(5461); }
+        | MAXVALUE_SYM { MDBP_R(5462); }
+        | MAX_CONNECTIONS_PER_HOUR { MDBP_R(5463); }
+        | MAX_QUERIES_PER_HOUR { MDBP_R(5464); }
+        | MAX_ROWS { MDBP_R(5465); }
+        | MAX_STATEMENT_TIME_SYM { MDBP_R(5466); }
+        | MAX_SYM { MDBP_R(5467); }
+        | MAX_UPDATES_PER_HOUR { MDBP_R(5468); }
+        | MAX_USER_CONNECTIONS_SYM { MDBP_R(5469); }
+        | MEDIAN_SYM { MDBP_R(5470); }
+        | MEDIA_SYM { MDBP_R(5471); }
+        | MEDIUMBLOB { MDBP_R(5472); }
+        | MEDIUMINT { MDBP_R(5473); }
+        | MEDIUMTEXT { MDBP_R(5474); }
+        | MEDIUM_SYM { MDBP_R(5475); }
+        | MEMORY_SYM { MDBP_R(5476); }
+        | MERGE_SYM { MDBP_R(5477); }
+        | MESSAGE_TEXT_SYM { MDBP_R(5478); }
+        | METADATA_SYM { MDBP_R(5479); }
+        | MICROSECOND_SYM { MDBP_R(5480); }
+        | MIGRATE_SYM { MDBP_R(5481); }
+        | MINUS_ORACLE_SYM { MDBP_R(5482); }
+        | MINUTE_MICROSECOND_SYM { MDBP_R(5483); }
+        | MINUTE_SECOND_SYM { MDBP_R(5484); }
+        | MINUTE_SYM { MDBP_R(5485); }
+        | MINVALUE_SYM { MDBP_R(5486); }
+        | MIN_ROWS { MDBP_R(5487); }
+        | MIN_SYM { MDBP_R(5488); }
+        | MODE_SYM { MDBP_R(5489); }
+        | MODIFIES_SYM { MDBP_R(5490); }
+        | MODIFY_SYM { MDBP_R(5491); }
+        | MOD_SYM { MDBP_R(5492); }
+        | MONITOR_SYM { MDBP_R(5493); }
+        | MONTH_SYM { MDBP_R(5494); }
+        | MRS_SYM { MDBP_R(5495); }
+        | MUTEX_SYM { MDBP_R(5496); }
+        | MYSQL_ERRNO_SYM { MDBP_R(5497); }
+        | MYSQL_SYM { MDBP_R(5498); }
+        | NAMES_SYM { MDBP_R(5499); }
+        | NAME_SYM { MDBP_R(5500); }
+        | NATIONAL_SYM { MDBP_R(5501); }
+        | NATURAL { MDBP_R(5502); }
+        | NCHAR_SYM { MDBP_R(5503); }
+        | NESTED_SYM { MDBP_R(5504); }
+        | NEVER_SYM { MDBP_R(5505); }
+        | NEW_SYM { MDBP_R(5506); }
+        | NEXTVAL_SYM { MDBP_R(5507); }
+        | NEXT_SYM { MDBP_R(5508); }
+        | NOCACHE_SYM { MDBP_R(5509); }
+        | NOCOPY_SYM { MDBP_R(5510); }
+        | NOCYCLE_SYM { MDBP_R(5511); }
+        | NODEGROUP_SYM { MDBP_R(5512); }
+        | NOMAXVALUE_SYM { MDBP_R(5513); }
+        | NOMINVALUE_SYM { MDBP_R(5514); }
+        | NONE_SYM { MDBP_R(5515); }
+        | NOTFOUND_SYM { MDBP_R(5516); }
+        | NOT_SYM { MDBP_R(5517); }
+        | NOWAIT_SYM { MDBP_R(5518); }
+        | NOW_SYM { MDBP_R(5519); }
+        | NO_SYM { MDBP_R(5520); }
+        | NO_WRITE_TO_BINLOG { MDBP_R(5521); }
+        | NTH_VALUE_SYM { MDBP_R(5522); }
+        | NTILE_SYM { MDBP_R(5523); }
+        | NULL_SYM { MDBP_R(5524); }
+        | NUMBER_MARIADB_SYM { MDBP_R(5525); }
+        | NUMERIC_SYM { MDBP_R(5526); }
+        | NUMTODSINTERVAL_SYM { MDBP_R(5527); }
+        | NUMTOYMINTERVAL_SYM { MDBP_R(5528); }
+        | NVARCHAR_SYM { MDBP_R(5529); }
+        | OBJECT_SYM { MDBP_R(5530); }
+        | OFFSET_SYM { MDBP_R(5531); }
+        | OF_SYM { MDBP_R(5532); }
+        | OLD_PASSWORD_SYM { MDBP_R(5533); }
+        | OLD_VALUE_SYM { MDBP_R(5534); }
+        | ON { MDBP_R(5535); }
+        | ONE_SYM { MDBP_R(5536); }
+        | ONLINE_SYM { MDBP_R(5537); }
+        | ONLY_SYM { MDBP_R(5538); }
+        | OPEN_SYM { MDBP_R(5539); }
+        | OPTIMIZE { MDBP_R(5540); }
+        | OPTION { MDBP_R(5541); }
+        | OPTIONALLY { MDBP_R(5542); }
+        | OPTIONS_SYM { MDBP_R(5543); }
+        | ORDER_SYM { MDBP_R(5544); }
+        | ORDINALITY_SYM { MDBP_R(5545); }
+        | OR_SYM { MDBP_R(5546); }
+        | OTHERS_MARIADB_SYM { MDBP_R(5547); }
+        | OUTER { MDBP_R(5548); }
+        | OUTFILE { MDBP_R(5549); }
+        | OUT_SYM { MDBP_R(5550); }
+        | OVERLAPS_SYM { MDBP_R(5551); }
+        | OVER_SYM { MDBP_R(5552); }
+        | OWNER_SYM { MDBP_R(5553); }
+        | PACKAGE_MARIADB_SYM { MDBP_R(5554); }
+        | PACK_KEYS_SYM { MDBP_R(5555); }
+        | PAGE_CHECKSUM_SYM { MDBP_R(5556); }
+        | PAGE_SYM { MDBP_R(5557); }
+        | PARAMETERS_SYM { MDBP_R(5558); }
+        | PARSER_SYM { MDBP_R(5559); }
+        | PARSE_VCOL_EXPR_SYM { MDBP_R(5560); }
+        | PARTIAL { MDBP_R(5561); }
+        | PARTITIONING_SYM { MDBP_R(5562); }
+        | PARTITIONS_SYM { MDBP_R(5563); }
+        | PARTITION_SYM { MDBP_R(5564); }
+        | PASSWORD_SYM { MDBP_R(5565); }
+        | PATH_SYM { MDBP_R(5566); }
+        | PERCENTILE_CONT_SYM { MDBP_R(5567); }
+        | PERCENTILE_DISC_SYM { MDBP_R(5568); }
+        | PERCENT_RANK_SYM { MDBP_R(5569); }
+        | PERIOD_SYM { MDBP_R(5570); }
+        | PERSISTENT_SYM { MDBP_R(5571); }
+        | PER_SYM { MDBP_R(5572); }
+        | PHASE_SYM { MDBP_R(5573); }
+        | PLUGINS_SYM { MDBP_R(5574); }
+        | PLUGIN_SYM { MDBP_R(5575); }
+        | PORTION_SYM { MDBP_R(5576); }
+        | PORT_SYM { MDBP_R(5577); }
+        | POSITION_SYM { MDBP_R(5578); }
+        | PRECEDES_SYM { MDBP_R(5579); }
+        | PRECEDING_SYM { MDBP_R(5580); }
+        | PRECISION { MDBP_R(5581); }
+        | PREPARE_SYM { MDBP_R(5582); }
+        | PRESERVE_SYM { MDBP_R(5583); }
+        | PREVIOUS_SYM { MDBP_R(5584); }
+        | PREV_SYM { MDBP_R(5585); }
+        | PRIMARY_SYM { MDBP_R(5586); }
+        | PRIVATE_SYM { MDBP_R(5587); }
+        | PRIVILEGES { MDBP_R(5588); }
+        | PROCEDURES_SYM { MDBP_R(5589); }
+        | PROCEDURE_SYM { MDBP_R(5590); }
+        | PROCESSLIST_SYM { MDBP_R(5591); }
+        | PROFILES_SYM { MDBP_R(5592); }
+        | PROFILE_SYM { MDBP_R(5593); }
+        | PROTOCOL_SYM { MDBP_R(5594); }
+        | PROXY_SYM { MDBP_R(5595); }
+        | PUBLISHED_SYM { MDBP_R(5596); }
+        | PURGE { MDBP_R(5597); }
+        | QUARTER_SYM { MDBP_R(5598); }
+        | QUERY_SYM { MDBP_R(5599); }
+        | QUICK { MDBP_R(5600); }
+        | RAISE_MARIADB_SYM { MDBP_R(5601); }
+        | RANGE_SYM { MDBP_R(5602); }
+        | RANK_SYM { MDBP_R(5603); }
+        | RAW_MARIADB_SYM { MDBP_R(5604); }
+        | READS_SYM { MDBP_R(5605); }
+        | READ_ONLY_SYM { MDBP_R(5606); }
+        | READ_SYM { MDBP_R(5607); }
+        | READ_WRITE_SYM { MDBP_R(5608); }
+        | REAL { MDBP_R(5609); }
+        | REBUILD_SYM { MDBP_R(5610); }
+        | RECORD_SYM { MDBP_R(5611); }
+        | RECOVER_SYM { MDBP_R(5612); }
+        | RECURSIVE_SYM { MDBP_R(5613); }
+        | REDIRECTION_SYM { MDBP_R(5614); }
+        | REDUNDANT_SYM { MDBP_R(5615); }
+        | REFERENCES { MDBP_R(5616); }
+        | REF_SYM { MDBP_R(5617); }
+        | REF_SYSTEM_ID_SYM { MDBP_R(5618); }
+        | REGEXP { MDBP_R(5619); }
+        | REGISTER_SYM { MDBP_R(5620); }
+        | RELAY { MDBP_R(5621); }
+        | RELAYLOG_SYM { MDBP_R(5622); }
+        | RELAY_LOG_FILE_SYM { MDBP_R(5623); }
+        | RELAY_LOG_POS_SYM { MDBP_R(5624); }
+        | RELAY_THREAD { MDBP_R(5625); }
+        | RELEASE_SYM { MDBP_R(5626); }
+        | RELOAD { MDBP_R(5627); }
+        | REMOVE_SYM { MDBP_R(5628); }
+        | RENAME { MDBP_R(5629); }
+        | REORGANIZE_SYM { MDBP_R(5630); }
+        | REPAIR { MDBP_R(5631); }
+        | REPEATABLE_SYM { MDBP_R(5632); }
+        | REPEAT_SYM { MDBP_R(5633); }
+        | REPLACE { MDBP_R(5634); }
+        | REPLAY_SYM { MDBP_R(5635); }
+        | REPLICATION { MDBP_R(5636); }
+        | REQUEST_SYM { MDBP_R(5637); }
+        | REQUIRED_SYM { MDBP_R(5638); }
+        | REQUIRE_SYM { MDBP_R(5639); }
+        | RESET_SYM { MDBP_R(5640); }
+        | RESIGNAL_SYM { MDBP_R(5641); }
+        | RESOURCES { MDBP_R(5642); }
+        | RESTART_SYM { MDBP_R(5643); }
+        | RESTRICT { MDBP_R(5644); }
+        | REST_SYM { MDBP_R(5645); }
+        | RESULT_SYM { MDBP_R(5646); }
+        | RESUME_SYM { MDBP_R(5647); }
+        | RETURNED_SQLSTATE_SYM { MDBP_R(5648); }
+        | RETURNING_SYM { MDBP_R(5649); }
+        | RETURNS_SYM { MDBP_R(5650); }
+        | RETURN_MARIADB_SYM { MDBP_R(5651); }
+        | REUSE_SYM { MDBP_R(5652); }
+        | REVERSE_SYM { MDBP_R(5653); }
+        | REVOKE { MDBP_R(5654); }
+        | RIGHT { MDBP_R(5655); }
+        | ROLES_SYM { MDBP_R(5656); }
+        | ROLE_SYM { MDBP_R(5657); }
+        | ROLLBACK_SYM { MDBP_R(5658); }
+        | ROLLUP_SYM { MDBP_R(5659); }
+        | ROUTINE_SYM { MDBP_R(5660); }
+        | ROWCOUNT_SYM { MDBP_R(5661); }
+        | ROWNUM_SYM { MDBP_R(5662); }
+        | ROWS_SYM { MDBP_R(5663); }
+        | ROWTYPE_MARIADB_SYM { MDBP_R(5664); }
+        | ROW_COUNT_SYM { MDBP_R(5665); }
+        | ROW_FORMAT_SYM { MDBP_R(5666); }
+        | ROW_NUMBER_SYM { MDBP_R(5667); }
+        | ROW_SYM { MDBP_R(5668); }
+        | RTREE_SYM { MDBP_R(5669); }
+        | SAVEPOINT_SYM { MDBP_R(5670); }
+        | SCALAR_SYM { MDBP_R(5671); }
+        | SCHEDULE_SYM { MDBP_R(5672); }
+        | SCHEMA_NAME_SYM { MDBP_R(5673); }
+        | SCRIPTS_SYM { MDBP_R(5674); }
+        | SECOND_MICROSECOND_SYM { MDBP_R(5675); }
+        | SECOND_SYM { MDBP_R(5676); }
+        | SECRET_SYM { MDBP_R(5677); }
+        | SECURITY_SYM { MDBP_R(5678); }
+        | SELECT_SYM { MDBP_R(5679); }
+        | SENSITIVE_SYM { MDBP_R(5680); }
+        | SEPARATOR_SYM { MDBP_R(5681); }
+        | SEQUENCE_SYM { MDBP_R(5682); }
+        | SERIALIZABLE_SYM { MDBP_R(5683); }
+        | SERIAL_SYM { MDBP_R(5684); }
+        | SERVER_SYM { MDBP_R(5685); }
+        | SERVICES_SYM { MDBP_R(5686); }
+        | SERVICE_SYM { MDBP_R(5687); }
+        | SESSION_SYM { MDBP_R(5688); }
+        | SESSION_USER_SYM { MDBP_R(5689); }
+        | SET { MDBP_R(5690); }
+        | SETS_SYM { MDBP_R(5691); }
+        | SETVAL_SYM { MDBP_R(5692); }
+        | SHARE_SYM { MDBP_R(5693); }
+        | SHOW { MDBP_R(5694); }
+        | SHUTDOWN { MDBP_R(5695); }
+        | SIGNAL_SYM { MDBP_R(5696); }
+        | SIGNED_SYM { MDBP_R(5697); }
+        | SIMPLE_SYM { MDBP_R(5698); }
+        | SKIP_SYM { MDBP_R(5699); }
+        | SLAVE { MDBP_R(5700); }
+        | SLAVES { MDBP_R(5701); }
+        | SLAVE_POS_SYM { MDBP_R(5702); }
+        | SLOW { MDBP_R(5703); }
+        | SMALLINT { MDBP_R(5704); }
+        | SNAPSHOT_SYM { MDBP_R(5705); }
+        | SOCKET_SYM { MDBP_R(5706); }
+        | SOFT_SYM { MDBP_R(5707); }
+        | SONAME_SYM { MDBP_R(5708); }
+        | SOUNDS_SYM { MDBP_R(5709); }
+        | SOURCE_SYM { MDBP_R(5710); }
+        | SPATIAL_SYM { MDBP_R(5711); }
+        | SPECIFIC_SYM { MDBP_R(5712); }
+        | SQLEXCEPTION_SYM { MDBP_R(5713); }
+        | SQLSTATE_SYM { MDBP_R(5714); }
+        | SQLWARNING_SYM { MDBP_R(5715); }
+        | SQL_AFTER_GTIDS_SYM { MDBP_R(5716); }
+        | SQL_BEFORE_GTIDS_SYM { MDBP_R(5717); }
+        | SQL_BIG_RESULT { MDBP_R(5718); }
+        | SQL_BUFFER_RESULT { MDBP_R(5719); }
+        | SQL_CACHE_SYM { MDBP_R(5720); }
+        | SQL_CALC_FOUND_ROWS { MDBP_R(5721); }
+        | SQL_NO_CACHE_SYM { MDBP_R(5722); }
+        | SQL_SMALL_RESULT { MDBP_R(5723); }
+        | SQL_SYM { MDBP_R(5724); }
+        | SQL_THREAD { MDBP_R(5725); }
+        | SSL_SYM { MDBP_R(5726); }
+        | STAGE_SYM { MDBP_R(5727); }
+        | STARTING { MDBP_R(5728); }
+        | STARTS_SYM { MDBP_R(5729); }
+        | START_SYM { MDBP_R(5730); }
+        | STATEMENT_SYM { MDBP_R(5731); }
+        | STATIC_SYM { MDBP_R(5732); }
+        | STATS_AUTO_RECALC_SYM { MDBP_R(5733); }
+        | STATS_PERSISTENT_SYM { MDBP_R(5734); }
+        | STATS_SAMPLE_PAGES_SYM { MDBP_R(5735); }
+        | STATUS_SYM { MDBP_R(5736); }
+        | STDDEV_SAMP_SYM { MDBP_R(5737); }
+        | STD_SYM { MDBP_R(5738); }
+        | STOP_SYM { MDBP_R(5739); }
+        | STORAGE_SYM { MDBP_R(5740); }
+        | STORED_SYM { MDBP_R(5741); }
+        | STRAIGHT_JOIN { MDBP_R(5742); }
+        | STRING_SYM { MDBP_R(5743); }
+        | ST_COLLECT_SYM { MDBP_R(5744); }
+        | SUBCLASS_ORIGIN_SYM { MDBP_R(5745); }
+        | SUBDATE_SYM { MDBP_R(5746); }
+        | SUBJECT_SYM { MDBP_R(5747); }
+        | SUBPARTITIONS_SYM { MDBP_R(5748); }
+        | SUBPARTITION_SYM { MDBP_R(5749); }
+        | SUBSTRING { MDBP_R(5750); }
+        | SUM_SYM { MDBP_R(5751); }
+        | SUPER_SYM { MDBP_R(5752); }
+        | SUSPEND_SYM { MDBP_R(5753); }
+        | SWAPS_SYM { MDBP_R(5754); }
+        | SWITCHES_SYM { MDBP_R(5755); }
+        | SYSDATE { MDBP_R(5756); }
+        | SYSTEM { MDBP_R(5757); }
+        | SYSTEM_TIME_SYM { MDBP_R(5758); }
+        | TABLES { MDBP_R(5759); }
+        | TABLESPACE { MDBP_R(5760); }
+        | TABLE_CHECKSUM_SYM { MDBP_R(5761); }
+        | TABLE_NAME_SYM { MDBP_R(5762); }
+        | TABLE_SYM { MDBP_R(5763); }
+        | TEMPORARY { MDBP_R(5764); }
+        | TEMPTABLE_SYM { MDBP_R(5765); }
+        | TERMINATED { MDBP_R(5766); }
+        | TEXT_SYM { MDBP_R(5767); }
+        | THAN_SYM { MDBP_R(5768); }
+        | THEN_SYM { MDBP_R(5769); }
+        | THREADS_SYM { MDBP_R(5770); }
+        | TIES_SYM { MDBP_R(5771); }
+        | TIMESTAMP { MDBP_R(5772); }
+        | TIMESTAMP_ADD { MDBP_R(5773); }
+        | TIMESTAMP_DIFF { MDBP_R(5774); }
+        | TIME_SYM { MDBP_R(5775); }
+        | TINYBLOB { MDBP_R(5776); }
+        | TINYINT { MDBP_R(5777); }
+        | TINYTEXT { MDBP_R(5778); }
+        | TO_DATE { MDBP_R(5779); }
+        | TO_SYM { MDBP_R(5780); }
+        | TRAILING { MDBP_R(5781); }
+        | TRANSACTIONAL_SYM { MDBP_R(5782); }
+        | TRANSACTION_SYM { MDBP_R(5783); }
+        | TRIGGERS_SYM { MDBP_R(5784); }
+        | TRIGGER_SYM { MDBP_R(5785); }
+        | TRIM { MDBP_R(5786); }
+        | TRIM_ORACLE { MDBP_R(5787); }
+        | TRUE_SYM { MDBP_R(5788); }
+        | TRUNCATE_SYM { MDBP_R(5789); }
+        | TYPESCRIPT_SYM { MDBP_R(5790); }
+        | TYPE_SYM { MDBP_R(5791); }
+        | UNBOUNDED_SYM { MDBP_R(5792); }
+        | UNCOMMITTED_SYM { MDBP_R(5793); }
+        | UNDEFINED_SYM { MDBP_R(5794); }
+        | UNDO_SYM { MDBP_R(5795); }
+        | UNICODE_SYM { MDBP_R(5796); }
+        | UNINSTALL_SYM { MDBP_R(5797); }
+        | UNION_SYM { MDBP_R(5798); }
+        | UNIQUE_SYM { MDBP_R(5799); }
+        | UNKNOWN_SYM { MDBP_R(5800); }
+        | UNLOCK_SYM { MDBP_R(5801); }
+        | UNPUBLISHED_SYM { MDBP_R(5802); }
+        | UNSIGNED { MDBP_R(5803); }
+        | UNTIL_SYM { MDBP_R(5804); }
+        | UPDATE_SYM { MDBP_R(5805); }
+        | UPGRADE_SYM { MDBP_R(5806); }
+        | URL_SYM { MDBP_R(5807); }
+        | USAGE { MDBP_R(5808); }
+        | USERS_SYM { MDBP_R(5809); }
+        | USER_SYM { MDBP_R(5810); }
+        | USE_FRM { MDBP_R(5811); }
+        | USE_SYM { MDBP_R(5812); }
+        | USING { MDBP_R(5813); }
+        | UTC_DATE_SYM { MDBP_R(5814); }
+        | UTC_TIMESTAMP_SYM { MDBP_R(5815); }
+        | UTC_TIME_SYM { MDBP_R(5816); }
+        | VALIDATION_SYM { MDBP_R(5817); }
+        | VALUES { MDBP_R(5818); }
+        | VALUE_SYM { MDBP_R(5819); }
+        | VARBINARY { MDBP_R(5820); }
+        | VARCHAR { MDBP_R(5821); }
+        | VARCHAR2_MARIADB_SYM { MDBP_R(5822); }
+        | VARIABLES { MDBP_R(5823); }
+        | VARIANCE_SYM { MDBP_R(5824); }
+        | VARYING { MDBP_R(5825); }
+        | VAR_SAMP_SYM { MDBP_R(5826); }
+        | VECTOR_SYM { MDBP_R(5827); }
+        | VENDORS_SYM { MDBP_R(5828); }
+        | VENDOR_SYM { MDBP_R(5829); }
+        | VERSIONING_SYM { MDBP_R(5830); }
+        | VIA_SYM { MDBP_R(5831); }
+        | VIEWS_SYM { MDBP_R(5832); }
+        | VIEW_SYM { MDBP_R(5833); }
+        | VIRTUAL_SYM { MDBP_R(5834); }
+        | VISIBLE_SYM { MDBP_R(5835); }
+        | WAIT_SYM { MDBP_R(5836); }
+        | WARNINGS { MDBP_R(5837); }
+        | WEEK_SYM { MDBP_R(5838); }
+        | WEIGHT_STRING_SYM { MDBP_R(5839); }
+        | WHEN_SYM { MDBP_R(5840); }
+        | WHERE { MDBP_R(5841); }
+        | WHILE_SYM { MDBP_R(5842); }
+        | WINDOW_SYM { MDBP_R(5843); }
+        | WITH { MDBP_R(5844); }
+        | WITHIN { MDBP_R(5845); }
+        | WITHOUT { MDBP_R(5846); }
+        | WORK_SYM { MDBP_R(5847); }
+        | WRAPPER_SYM { MDBP_R(5848); }
+        | WRITE_SYM { MDBP_R(5849); }
+        | X509_SYM { MDBP_R(5850); }
+        | XA_SYM { MDBP_R(5851); }
+        | XML_SYM { MDBP_R(5852); }
+        | XOR { MDBP_R(5853); }
+        | YEAR_MONTH_SYM { MDBP_R(5854); }
+        | YEAR_SYM { MDBP_R(5855); }
+        | ZEROFILL { MDBP_R(5856); }
+        ;
+
+mrs_annotation:
+          '@' LEX_HOSTNAME { MDBP_R(5857); }
+        ;

@@ -640,6 +640,12 @@ takes 5.4 s. Not done: a separate differential run against a `mariadb-shell` bin
 
 ### P2 — REST SQL merge, parallel parsing pipeline and `check` (2–3 weeks)
 
+**Status 2026-10-15: the REST SQL merge is done** (`libs/mariadbparser/UPSTREAM.md`, "The
+REST SQL merge"): no new conflicts, the shell's 233-statement grammar test parses, server
+verdicts unchanged over 212,332 recorded statements. The `MDBP_WITH_MRS` switch was not
+built: bison has no conditional sections, and the merged rules cost nothing when unused.
+Thread pool and `check` follow.
+
 - **Merge spike first (2–3 days):** merge the `MERGE PART` rules into
   `generated/yy_stub.yy` by hand to the point where bison accepts the grammar; the
   deliverable is the conflict count and the list of conflicts with the construct behind
@@ -741,9 +747,9 @@ order.
 
 ## 5. Decisions needed from you
 
-1. **REST as a keyword.** With the merged grammar, `REST` is read as a keyword after
-   `USE`, `GRANT` and `REVOKE`, so a schema or role literally named `rest` needs backticks
-   in those three positions; everywhere else it stays a plain identifier. Acceptable?
+1. ~~**REST as a keyword.**~~ Resolved by the merge (2026-10-15): all 61 new REST SQL
+   keywords are non-reserved, including after `USE`, `GRANT` and `REVOKE`; no backticks
+   are needed anywhere.
 2. **Tree construction.** Offline from the derivation plus a small rule-info API (§2.4a),
    not inside the grammar actions. Agree?
 3. **MariaDB pin.** The build fetches the server at the parser's pin (`bab03b0f`,
