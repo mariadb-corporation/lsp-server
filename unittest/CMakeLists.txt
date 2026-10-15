@@ -30,12 +30,15 @@ add_executable(run_unit_tests ${_unit_test_sources})
 mdbls_target_warnings(run_unit_tests)
 target_link_libraries(run_unit_tests PRIVATE
   mariadbparser
+  sqlsplitter
+  mariadblanguageserver
   GTest::gtest
   GTest::gtest_main
   rapidjson
   $<$<BOOL:${WITH_MARIADB_CLIENT}>:mariadb::client>)
 target_compile_definitions(run_unit_tests PRIVATE
-  MDBP_LEX_FIXTURE_DIR="${PROJECT_SOURCE_DIR}/libs/mariadbparser/tests/lex-fixtures")
+  MDBP_LEX_FIXTURE_DIR="${PROJECT_SOURCE_DIR}/libs/mariadbparser/tests/lex-fixtures"
+  MDBLS_SQL_FIXTURE_DIR="${PROJECT_SOURCE_DIR}/tests/fixtures/sql")
 set_target_properties(run_unit_tests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 

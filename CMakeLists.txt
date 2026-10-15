@@ -88,6 +88,8 @@ endif()
 enable_testing()
 
 add_subdirectory(libs/mariadbparser)
+add_subdirectory(libs/sqlsplitter)
+add_subdirectory(libs/mariadblanguageserver)
 
 if(WITH_TESTS)
   add_subdirectory(unittest)
