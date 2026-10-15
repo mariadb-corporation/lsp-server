@@ -5,7 +5,9 @@
  * This library is MariaDB's own LALR grammar, extracted from
  * sql/sql_yacc.yy BY SCRIPT, together with MariaDB's own lexer, sliced from
  * sql/sql_lex.cc by the same route.  Nothing here is a hand port, which is
- * the whole point: when MariaDB moves, the extraction is re-run.
+ * the whole point: the grammar and the lexer are MariaDB's own text.
+ * libs/mariadbparser/UPSTREAM.md records the pinned MariaDB commit, how
+ * generated/ was produced from it, and how upstream changes are applied.
  *
  * ---------------------------------------------------------------------------
  * 1.  WHAT AN ACCEPTANCE MEANS: A SUPERSET, NOT SQL VALIDATION
@@ -51,10 +53,9 @@
  * mdbp_parse_sql()/mdbp_parse_tokens() on them AT THE SAME TIME, with no
  * lock of yours between them.  Distinct parser objects are independent: no
  * verdict, derivation, token stream or error record of one is affected by
- * what another is doing.  This is measured, not asserted -- see
- * evidence/P7/concurrency.json, whose differential run compares every field
- * of every threaded result against the single-threaded answer for the same
- * statement.
+ * what another is doing.  unittest/mariadbparser/parser_t.cc
+ * (parsers_on_many_threads_agree) checks this by comparing every threaded
+ * result against the single-threaded answer for the same statement.
  *
  * WHAT YOU MAY NOT DO.  ONE mdbp_parser MUST NEVER BE USED BY TWO THREADS AT
  * THE SAME TIME.  A parser owns the buffers every result points into (see
@@ -87,7 +88,7 @@
  * Both are WRITTEN ONCE AND READ-ONLY THEREAFTER.  The first call that needs
  * one may initialise it lazily, but does so EXACTLY ONCE however many
  * threads arrive together: each initialisation sits behind a once-guard
- * (C11 call_once() / pthread_once()), so every thread that proceeds sees the
+ * (pthread_once() / InitOnceExecuteOnce()), so every thread that proceeds sees the
  * finished table rather than a half-written one.  There is no init entry
  * point for you to call and none is needed; correct first use is the
  * library's problem, not yours.
@@ -101,8 +102,8 @@
  * ---------------------------------------------------------------------------
  * v1 returns no parse tree.  It returns the DERIVATION: bison rule numbers in
  * reduce order, exactly as the automaton reduced them.  That is not a
- * consolation prize -- a derivation plus the grammar model (the rule table
- * this same extraction produces) reconstructs the parse tree offline, so
+ * consolation prize -- a derivation plus the grammar's rule table (bison's
+ * own, built from generated/yy_stub.yy) reconstructs the parse tree, so
  * nothing is lost, and the shape of a future tree API is not prejudged by
  * this one.  A tree can therefore be ADDED later without breaking anything
  * declared in this header.
@@ -124,8 +125,8 @@ extern "C" {
  *
  * VERSION 2 IS AN ABI BREAK, and there are two of them in one:
  *
- *   - mdbp_options GREW A FIELD (`charset`, appended -- never inserted, per
- *     PLAN.md D-10).  A caller that hand-transcribes this struct, or that
+ *   - mdbp_options GREW A FIELD (`charset`, appended -- never inserted).
+ *     A caller that hand-transcribes this struct, or that
  *     passes a v1-sized object, hands mdbp_parser_new() something shorter
  *     than it reads.
  *   - THE THREAD-SAFETY CONTRACT CHANGED (section 3 above): distinct parser
@@ -266,11 +267,11 @@ typedef struct mdbp_token {
  *                   every other name is REFUSED (mdbp_parser_new() answers
  *                   NULL), including utf8, utf8mb3 and latin1: an alias
  *                   silently treated as utf8mb4 would lex differently while
- *                   looking honoured, which is the failure mode PLAN.md D-8
+ *                   looking honoured, which is the failure mode this refusal
  *                   exists to prevent.  Copied by mdbp_parser_new(), so it
  *                   need not outlive the call.
  *
- *                   PLAN.md D-9: a second charset, when this library ever
+ *                   A second charset, when this library ever
  *                   grows one, is added by GENERATING that charset's own
  *                   state_map, ident_map and ctype tables and SELECTING them
  *                   per parse -- never by converting the input into utf8mb4
@@ -282,9 +283,9 @@ typedef struct mdbp_token {
  *                   library exists to reproduce; (2) transcoded bytes would
  *                   always run utf8mb4's lexing rules, never the requested
  *                   charset's, while looking like that charset had been
- *                   honoured -- exactly the D-8 failure mode above, just
- *                   moved from the name to the bytes; (3) this project
- *                   extracts MariaDB's own tables by script (PLAN.md S2.3) so
+ *                   honoured -- exactly the failure mode above, just
+ *                   moved from the name to the bytes; (3) this library
+ *                   extracts MariaDB's own tables by script so
  *                   that a charset's lexing behaviour is MariaDB's, never a
  *                   reimplementation -- a converter would be exactly the
  *                   hand-written logic the whole extraction exists to avoid.
@@ -294,7 +295,7 @@ typedef struct mdbp_options {
     int prepare_mode;
     mdbp_variant variant;
     int want_derivation;
-    const char *charset;      /* PLAN.md D-10: appended, never inserted */
+    const char *charset;      /* since 2.0: appended, never inserted */
 } mdbp_options;
 
 /* Writes the defaults: sql_mode NULL, prepare_mode 1,
@@ -340,7 +341,7 @@ void mdbp_options_init(mdbp_options *opts);
  *                       "ABORT_SYM" when the lexer aborted on broken input.
  *                       Always "$end" on the mdbp_parse_tokens() path.  NULL
  *                       on an mdbp_lex_sql_prefix() result whose stream was
- *                       cut (`*more` 1, task P1.1 D-5): nothing ended it.
+ *                       cut (`*more` 1): nothing ended it.
  *   error_seen          1 iff the error record below is meaningful: a
  *                       rejection (MDBP_OK, accepted == 0) or a refused token
  *                       (MDBP_UNSUPPORTED).  0 for MDBP_INTERNAL.
@@ -477,8 +478,7 @@ mdbp_status mdbp_parse_sql(mdbp_parser *p, const char *sql, size_t len,
  * "can the parser shift this?" question is answered no, and parsing_place --
  * the field MariaDB's grammar actions write and its lexer reads -- is
  * NO_MATTER from the first byte to the last, because no action ever runs.
- * This is exactly the stream the CLI prints for `mdbparse --valid none` with
- * its default parsing place.
+ * This is exactly the stream `mdbparse --lex-only` prints.
  *
  * WHERE THE STREAM CAN DIFFER FROM mdbp_parse_sql()'s for the same bytes.
  * Two mechanisms, and no other:
@@ -495,8 +495,6 @@ mdbp_status mdbp_parse_sql(mdbp_parser *p, const char *sql, size_t len,
  *     spelled LEFT_PAREN_LIKE, LEFT_PAREN_WITH or LEFT_PAREN_ALT is kept only
  *     when the parser can shift it, and is otherwise a plain '('.  With no
  *     parser the answer is always no.
- * How often each difference occurs is measured, not stated here: see
- * evidence/P11/lex-only.json, which `make lex-only-diff` writes.
  *
  * IT NEVER REFUSES A TOKEN NAME.  A lexed token this grammar has no
  * terminal for (MariaDB's lexer can emit character tokens the grammar never
@@ -531,12 +529,12 @@ mdbp_status mdbp_lex_sql(mdbp_parser *p, const char *sql, size_t len,
 
 /* At most `max_tokens` counted tokens of what mdbp_lex_sql() returns for the
  * same parser and bytes, or all of them; it does not parse either.  Since
- * 2.2, task P1.1, plan `lex-sql-prefix.md`.
+ * 2.2.
  *
- * THE RULE (D-4).  Let `L` be mdbp_lex_sql(p, sql, len)'s tokens for the same
+ * THE RULE.  Let `L` be mdbp_lex_sql(p, sql, len)'s tokens for the same
  * parser `p` and bytes, and `C` be `L` without a final END_OF_INPUT -- the
- * COUNTED tokens: every token but END_OF_INPUT counts, and ABORT_SYM counts
- * (D-3), because it carries text and a span an editor colours; END_OF_INPUT
+ * COUNTED tokens: every token but END_OF_INPUT counts, and ABORT_SYM counts,
+ * because it carries text and a span an editor colours; END_OF_INPUT
  * is added on top only when the stream really ends within the limit.  If `C`
  * has `max_tokens` elements or fewer, this returns all of `L` (its
  * END_OF_INPUT included, when it has one) and `*more` is 0.  Otherwise it
@@ -551,21 +549,21 @@ mdbp_status mdbp_lex_sql(mdbp_parser *p, const char *sql, size_t len,
  * sql_mode, and the same "-1 for a name that is not a terminal" rule --
  * because the tokens are the same tokens (the rule above).
  *
- * THE WHOLE INPUT IS UTF-8-CHECKED AND COPIED; ONLY THE LEXING STOPS EARLY
- * (D-7).  A document with an invalid byte anywhere is MDBP_UNSUPPORTED with
+ * THE WHOLE INPUT IS UTF-8-CHECKED AND COPIED; ONLY THE LEXING STOPS EARLY.
+ * A document with an invalid byte anywhere is MDBP_UNSUPPORTED with
  * `tokens` NULL, even when the first `max_tokens` tokens are valid: the two
  * calls agree on every input.  The lexer itself stops after the first
  * counted token beyond the limit (one token of look-ahead, needed to answer
  * `*more`), which is where the saving is.
  *
- * `*more` (when `more` is not NULL, D-6): 1 or 0 by the rule above on
+ * `*more` (when `more` is not NULL): 1 or 0 by the rule above on
  * MDBP_OK, 0 on every other status -- written on every return, so a caller
  * that presets it to a sentinel can tell a call that never wrote it.  `more`
  * may be NULL; it is then not written.
  *
  * The result, field by field: as mdbp_lex_sql()'s above, except `tokens`/
  * `ntokens` are the prefix the rule above gives, and `eof_token` is NULL
- * exactly when `*more` is 1 (D-5) -- nothing ended the stream.  `tokens` is
+ * exactly when `*more` is 1 -- nothing ended the stream.  `tokens` is
  * non-NULL on MDBP_OK, including when `ntokens` is 0.  Statuses: MDBP_OK;
  * MDBP_UNSUPPORTED for invalid UTF-8 anywhere in the `len` bytes (`tokens`
  * NULL); MDBP_INTERNAL for a NULL parser, a NULL `out` (returned, `out` not

@@ -2,8 +2,8 @@
  * the token tables built once from bison's own yytname[]/yytranslate[].
  *
  * Nothing here knows anything about bison's internals (that is
- * src/parser_glue.c's job) and nothing here knows anything about the CLI
- * (src/mdbparse.c's job).
+ * src/parser_glue.c's job) and nothing here knows anything about the public
+ * API (src/mdbp_api.c's job).
  */
 #include <stdlib.h>
 #include <string.h>
@@ -134,8 +134,8 @@ void mdbp_ctx_init(mdbp_ctx *ctx, const mdbp_token *tokens, size_t ntokens,
                    int want_derivation)
 {
     memset(ctx, 0, sizeof *ctx);
-    /* The lifted grammar actions (task P1.1) reach the field through five
-     * spellings, two of them via `thd->lex`, which build/yy_stub.yy's
+    /* The lifted grammar actions reach the field through five
+     * spellings, two of them via `thd->lex`, which generated/yy_stub.yy's
      * prologue resolves to `ctx->ctx`.  Set it HERE, once, where the struct
      * is made: an mdbp_ctx with a NULL self-pointer would segfault in the
      * first action that runs, not at some later boundary. */
@@ -159,9 +159,9 @@ void mdbp_ctx_reset(mdbp_ctx *ctx, const mdbp_token *tokens, size_t ntokens)
     ctx->current_select = &ctx->own_select;
     ctx->own_select.parsing_place = NO_MATTER;
     ctx->own_select.save_parsing_place = NO_MATTER;
-    /* Cleared, not kept: a batch run mixes records that carry SQL (the pull
-     * path) with records that carry a token vector, and a stale source from
-     * the previous line would make this one ignore its own tokens.  The
+    /* Cleared, not kept: one parser serves both mdbp_parse_sql() (the pull
+     * path) and mdbp_parse_tokens() (a token vector), and a stale source
+     * from the previous call would make this one ignore its own tokens.  The
      * caller re-arms it with mdbp_ctx_set_source() after every reset. */
     ctx->source = NULL;
     ctx->source_user = NULL;
@@ -174,7 +174,7 @@ void mdbp_ctx_reset(mdbp_ctx *ctx, const mdbp_token *tokens, size_t ntokens)
     ctx->error_state = -1;
     ctx->error_message = NULL;
     /* parser_glue.c mallocs this per rejected parse: hand it back now or the
-     * batch run leaks monotonically over the corpus's rejections. */
+     * parser leaks once per rejection for as long as it lives. */
     free((void *) ctx->expected);
     ctx->expected = NULL;
     ctx->nexpected = 0;
@@ -233,7 +233,7 @@ int yylex(int *lvalp, mdbp_ctx *ctx)
     *lvalp = 0;
 
     if (ctx->source != NULL) {
-        /* THE PULL PATH (`--valid live`): the parser drives the lexer, so the
+        /* THE PULL PATH (mdbp_parse_sql()): the parser drives the lexer, so the
          * token does not exist until this call asks for it.  This is the only
          * way valid(T) can be answered from the live LR stack -- the lexer's
          * decision and the parser's state are the same instant -- and it is
@@ -244,7 +244,8 @@ int yylex(int *lvalp, mdbp_ctx *ctx)
          * decides what the failure means (an unknown terminal name is a
          * verdict of "unsupported", an allocation failure is "internal").
          * ctx->cursor keeps counting handed-over tokens exactly as below, so
-         * error.at_index indexes the caller's token vector unchanged. */
+         * mdbp_result.error_token_index indexes the lexed token vector
+         * unchanged. */
         mdbp_token tok;
         int rc = ctx->source(ctx->source_user, &tok);
 
@@ -258,8 +259,9 @@ int yylex(int *lvalp, mdbp_ctx *ctx)
 
     if (ctx->cursor >= ctx->ntokens) {
         /* The synthetic end of input.  It is NOT counted in cursor, and
-         * lookahead_index becomes ntokens, which is what error.at_index
-         * reports when the failure is at end of input. */
+         * lookahead_index becomes ntokens, which is what
+         * mdbp_result.error_token_index reports when the failure is at end
+         * of input. */
         ctx->lookahead_index = ctx->ntokens;
         return 0;
     }

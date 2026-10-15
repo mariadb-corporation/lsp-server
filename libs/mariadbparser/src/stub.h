@@ -1,15 +1,16 @@
 /* src/stub.h -- the extracted parser's runtime contract, and nothing else.
  *
- * build/yy_stub.yy's whole prologue is the single line
+ * generated/yy_stub.yy's prologue is
  *
- *     %{ #include "stub.h" %}
+ *     %{ #include "stub.h" ... %}
  *
- * so this header is what bison's generated parser is compiled against.  Every
- * one of the grammar's 3,927 actions is `{ MDBP_R(<serial>); }` (PLAN.md
- * S2.1), `ctx` is the `%parse-param`/`%lex-param` name, and the value type is
+ * followed only by the parsing_place macros (see mdbp_ctx.ctx below), so this
+ * header is what bison's generated parser is compiled against.  Every one of
+ * the grammar's actions is `{ MDBP_R(<serial>); }`, `ctx` is the
+ * `%parse-param`/`%lex-param` name, and the value type is
  * `%define api.value.type {int}` -- so YYSTYPE is `int`.
  *
- * THE TRAP, recorded here because it costs a round otherwise: bison emits the
+ * THE TRAP, recorded here because it is easy to fall into: bison emits the
  * first user prologue BEFORE `#include "parser.h"`, so at the point this file
  * is read YYSTYPE does not exist yet.  Hence `yylex` is declared with `int *`
  * (which is what YYSTYPE is here) and this header must NOT include parser.h.
@@ -32,9 +33,9 @@
 #include "mdbparse.h"
 
 /* Where yylex takes the next token from when the token vector is not the
- * answer: `--valid live` (task 8.3) has the PARSER drive the lexer, exactly as
- * MariaDB does, because valid(T) can only be answered from a live parser
- * stack.  Returns 1 and fills *out (only `name` and `token_number` are read by
+ * answer: mdbp_parse_sql() has the PARSER drive the lexer, exactly as
+ * MariaDB does, because valid(T) -- can the parser shift terminal T here? --
+ * can only be answered from a live parser stack.  Returns 1 and fills *out (only `name` and `token_number` are read by
  * yylex), 0 at the end of the stream, -1 when the source failed; the caller
  * owns the failure and inspects its own state afterwards.
  *
@@ -48,11 +49,11 @@ typedef int (*mdbp_source_fn)(void *user, mdbp_token *out);
  * `sql/sql_lex.cc`'s `lex_token` reads `curr_sel->parsing_place` at five
  * feedback sites and SPENDS it (sets NO_MATTER) when it uses it.  That whole
  * mechanism is MariaDB's own, compiled in verbatim through
- * `build/lexer_extracted.cc`.  What used to be missing was the WRITES: they
- * are grammar actions, and `tools/stub.py` blanks action bodies.  Task
- * P1.1's named rule `preserve_parsing_place` lifts them -- see that script,
- * and `build/stub-map.json`'s `preserve` block for the enumeration of every
- * lifted statement and every site it declined to lift.
+ * `generated/lexer_extracted.cc`.  The WRITES are grammar actions, and
+ * `tools/stub.py` blanks action bodies; its named rule
+ * `preserve_parsing_place` lifts them out of the blanking -- see that script,
+ * and UPSTREAM.md for the rule that keeps them when the grammar is edited by
+ * hand.
  *
  * THESE TWO DECLARATIONS ARE OURS, NOT MariaDB's TEXT.  The enum's NAMES and
  * ORDER are `sql/sql_priv.h:327`'s, because the lifted statements and the
@@ -87,12 +88,13 @@ typedef struct SELECT_LEX {
 } SELECT_LEX;
 
 /* The parse context: the input token vector, the derivation buffer and the
- * error record.  One `mdbp_ctx` per record; P3's batch mode reuses one. */
+ * error record.  One `mdbp_ctx` per record; an mdbp_parser holds one and
+ * reuses it for every call (mdbp_ctx_reset()). */
 typedef struct mdbp_ctx {
-    /* --- the lifted actions' state (task P1.1) --------------------------- */
+    /* --- the lifted actions' state --------------------------------------- */
     /* `ctx` IS A SELF-POINTER, and it is spelled `ctx` on purpose.  The
      * lifted statements reach the field through five spellings, two of which
-     * go through `thd->lex`; `build/yy_stub.yy`'s prologue resolves them with
+     * go through `thd->lex`; `generated/yy_stub.yy`'s prologue resolves them with
      * `#define thd ctx` and `#define lex ctx` (tools/stub.py's
      * PARSING_PLACE_MACROS), so `thd->lex` is literally `ctx->ctx` and this
      * member is what it reads.  Set by mdbp_ctx_init(); an mdbp_ctx that is
@@ -113,9 +115,8 @@ typedef struct mdbp_ctx {
     /* --- input ---------------------------------------------------------- */
     const mdbp_token *tokens;
     size_t ntokens;
-    /* NULL for the token-vector path (--tokens/--tokens-json/--jsonl with a
-     * "tokens" array, and every static --valid mode), which is untouched by
-     * task 8.3.  Non-NULL puts yylex on the pull path above; `tokens` and
+    /* NULL for the token-vector path, mdbp_parse_tokens().  Non-NULL
+     * (mdbp_parse_sql()) puts yylex on the pull path above; `tokens` and
      * `ntokens` are then unused and stay NULL/0, because the caller's vector
      * is grown (and reallocated) while the parse is running. */
     mdbp_source_fn source;
@@ -124,14 +125,14 @@ typedef struct mdbp_ctx {
      * end-of-input is not one of them) */
     size_t cursor;
     /* index of the current lookahead in `tokens`; == ntokens once yylex has
-     * returned the synthetic $end, which is what makes error.at_index the
-     * same quantity as replay.py's error.token_index */
+     * returned the synthetic $end, which is what makes
+     * mdbp_result.error_token_index equal ntokens at end of input */
     size_t lookahead_index;
 
     /* --- the derivation ------------------------------------------------- */
-    /* Bison rule numbers in reduce order.  GROWN DYNAMICALLY: the longest
-     * derivation in corpus/expected/sakila.jsonl is 1,107 entries and the
-     * corpus is not bounded by that, so a fixed cap would be a defect. */
+    /* Bison rule numbers in reduce order.  GROWN DYNAMICALLY: a derivation's
+     * length is bounded only by the input's, so a fixed cap would be a
+     * defect. */
     int *derivation;
     size_t nderivation;
     size_t derivation_cap;
@@ -142,7 +143,7 @@ typedef struct mdbp_ctx {
     /* --- the error record ----------------------------------------------- */
     int error_seen;
     /* the LR state on top of the parser's own stack when the error was
-     * reported, in build/grammar.output's numbering; -1 when unknown */
+     * reported, in bison's own state numbering; -1 when unknown */
     int error_state;
     const char *error_message;
     /* every terminal that can still be SHIFTED from the parser stack as it

@@ -1,7 +1,8 @@
-/* src/libmariadbparser.map -- the shared object's export list (task 9.2).
+/* src/libmariadbparser.map -- the shared object's export list, a linker
+ * version script (applied on Linux; see CMakeLists.txt).
  *
- * SOURCE, hand-written, never generated: it is the mechanism deliverable 3
- * asks for ("a controlled export surface"), chosen over -fvisibility=hidden
+ * SOURCE, hand-written, never generated: it is the library's controlled
+ * export surface, chosen over -fvisibility=hidden
  * plus an export attribute because it needs no change to any .c file --
  * include/mdbparse.h's functions are already ordinary externally-linked C
  * symbols, and a linker version script is the one knob that controls what
@@ -14,11 +15,10 @@
  * tables, this project's own internal mdbp_* helpers) falls through to
  * `local: *;` and is NOT in the exported dynamic symbol table, so it cannot
  * collide with the next library sharing the process -- the whole reason
- * deliverable 3 exists. tests/test_library.py asserts that the exported set
- * equals the header's functions; the list it expects is derived from the
- * header (tools/common.py's header_functions()), never typed in a test.
+ * this file exists. The exported set must equal the header's functions;
+ * tools/common.py's header_functions() lists them from the header.
  *
- * PLAN.md P4.1: the version NODE's name carries the major too. It moved from
+ * The version NODE's name carries the major too. It moved from
  * MDBPARSER_1.0 to MDBPARSER_2.0 with MDBP_VERSION_MAJOR and the soname, in
  * the same commit, because it is an ABI LABEL and a stale one is the exact
  * drift that commit exists to remove -- a libmariadbparser.so.2 whose
@@ -28,18 +28,18 @@
  * changed in the same breath, so no existing binary binds to this object at
  * all.
  *
- * Plan `tokeniser-entry-points.md` D-1: a MINOR release that adds functions
+ * A MINOR release that adds functions
  * adds a NODE, named MDBPARSER_<major>.<minor> and inheriting the one before
  * it, and leaves every older node exactly as it was. So a binary linked
  * against 2.0 keeps binding to MDBPARSER_2.0, and one that uses a 2.1
  * function records that it needs MDBPARSER_2.1, a node a 2.0 library does
  * not define.
  *
- * Its D-1 again: 2.1 is ONE release, so the node it opened takes all three of
- * its functions -- mdbp_lex_sql from its P2, and the comment gate's
- * release-id setter and getter from its P3 -- without another version bump.
+ * 2.1 is ONE release, so the node it opened takes all three of its
+ * functions -- mdbp_lex_sql, and the comment gate's release-id setter and
+ * getter -- without another version bump.
  *
- * Plan `lex-sql-prefix.md` D-1: 2.2 adds one function, mdbp_lex_sql_prefix,
+ * 2.2 adds one function, mdbp_lex_sql_prefix,
  * on its own new node, MDBPARSER_2.2, inheriting MDBPARSER_2.1 -- the same
  * rule, one more release.
  */
