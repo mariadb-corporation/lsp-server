@@ -1,40 +1,52 @@
 #!/usr/bin/env python3
-"""tools/lexslice.py -- the prototype lexer extractor (task 7.2, P5a).
+"""tools/lexslice.py -- slice MariaDB's lexer out of its sources by symbol.
+
+Run by hand, once per full re-extraction (see UPSTREAM.md); the build never
+runs it.
 
 WHAT THIS IS
 ------------
 MariaDB's lexer is `Lex_input_stream::lex_token` and its neighbours in
-`sql/sql_lex.cc`.  The plan's ruling is: do NOT hand-transliterate them.  Slice
-them out of MariaDB's own sources **by symbol** and compile the slice against a
-small shim (`src/lexshim.h`) plus this project's own `build/parser.h`, so the
-result regenerates when MariaDB moves instead of drifting from a hand copy.
+`sql/sql_lex.cc`.  They are not hand-transliterated: they are sliced out of
+MariaDB's own sources **by symbol** and compiled against a small shim
+(`src/lexshim.h`) plus bison's `parser.h` for the stub grammar, so a new
+server version can be re-extracted instead of re-ported by hand.
 
-BY SYMBOL, NEVER BY LINE (PLAN.md §2.3)
----------------------------------------
+BY SYMBOL, NEVER BY LINE
+------------------------
 Every location in this file is a *name*: a function name, a class name, an enum
-name, an array name.  There is not one line number anywhere, and
-`tests/test_lexslice.py` proves the property that matters -- the same symbols at
-different line numbers extract to the same text.  A slice keyed to line numbers
-breaks on the next MariaDB revision, which is the whole point of the project.
+name, an array name.  There is not one line number anywhere, so the same
+symbols at different line numbers extract to the same text.  A slice keyed to
+line numbers would break on the next MariaDB revision.
 
 MECHANICAL REWRITES ONLY
 ------------------------
-K7: modifying `sql_lex.cc`'s logic ends the experiment.  What is allowed is
-*scripted* rewriting of the slice, and every such rewrite is a named rule in
-`REWRITE_RULES` below, applied by this script and listed in the evidence.  If
-you ever want to hand-edit `build/lexer_extracted.cc`, that is the signal to
-change a rule here or to stop.
+The slice does not change `sql_lex.cc`'s logic.  What is allowed is *scripted*
+rewriting of the slice, and every such rewrite is a named rule in
+`REWRITE_RULES` below, applied by this script and listed in the manifest.
 
-OUTPUT (all under build/, which exists only on the test host and is wiped by regen-check)
------------------------------------------------------------------------------
-  build/lexer_extracted.cc   the slice, one translation unit
-  build/keywords.h           `sql/lex.h`'s keyword tables + `sql/lex_symbol.h`
-  build/lexslice.json        the manifest: every symbol, its span, every rule
+OUTPUT (all under --out)
+------------------------
+  lexer_extracted.cc   the slice, one translation unit
+  keywords.h           `sql/lex.h`'s keyword tables + `sql/lex_symbol.h`
+  lexstates.h          `enum my_lex_states` from `include/m_ctype.h`
+  state_maps_gen.cc    the generator of the two utf8mb4 lexer state maps
+  state_maps.h         its output (with --compile-state-maps)
+  lexslice.json        a debugging manifest: every symbol, its size, every rule
 
-It writes nothing under evidence/ (tools/lexspike.py owns that) and
-touches no artefact listed in evidence/P1/extract.json.
+The committed copies of the first five headers/sources live in
+libs/mariadbparser/generated/ (state_maps_gen.cc is not committed).
 
-Exit codes: 0 ok - 2 usage, wrong host, or a missing/unlocatable input.
+GENERATED TEXT IS FROZEN
+------------------------
+The banners, slice markers and comments this script writes INTO the generated
+files (BANNER, the `isolate_wsrep` marker, the `#include "ctype-utf8.h"`
+comment, the state-map generator's printf) are kept exactly as the committed
+files carry them, including their references to `build/` and to the research
+project the slice came from, so a re-extraction is byte-identical to
+generated/.  Change them only together with the committed files.
+
+Exit codes: 0 ok - 2 usage, or a missing/unlocatable input.
 """
 
 from __future__ import annotations
@@ -56,15 +68,15 @@ class LexSliceError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# What to slice.  Names only -- this list IS the design decision the spike is
-# here to make, and it is reviewed as source, not as a line range.
+# What to slice.  Names only -- these lists are reviewed as source, not as
+# line ranges.
 # ---------------------------------------------------------------------------
 
 # Types the sliced code needs that are themselves MariaDB source.  Slicing them
 # rather than re-typing them in the shim is the "extract, don't transliterate"
 # principle applied to the declarations as well as to the bodies.
 # `enum my_lex_states` gets its own generated header because BOTH translation
-# units need it: the slice, and the charset route (b) generator.
+# units need it: the slice, and the state-map generator.
 SLICE_LEX_STATES = ("include/m_ctype.h", "enum", "my_lex_states")
 
 SLICE_TYPES: list[tuple[str, str, str]] = [
@@ -75,11 +87,11 @@ SLICE_TYPES: list[tuple[str, str, str]] = [
     ("sql/sql_lex.h", "class", "Lex_input_stream"),
 ]
 
-# The functions.  The first seven are PLAN P5a deliverable 1's required set;
-# the rest are what the transitive closure forces (see `declared_not_sliced` in
-# the manifest, which is the mechanical check that nothing is silently
-# missing).  `lex_token` is on the list because `MYSQLlex` is a three-line
-# wrapper and all five parsing_place feedback sites live in `lex_token`.
+# The functions.  The first seven are the lexer proper; the rest are what the
+# transitive closure forces (see `declared_not_sliced` in the manifest, which
+# is the mechanical check that nothing is silently missing).  `lex_token` is
+# on the list because `MYSQLlex` is a three-line wrapper and all five
+# parsing_place feedback sites live in `lex_token`.
 SLICE_FUNCTIONS: list[tuple[str | None, str]] = [
     ("Lex_input_stream", "lex_token"),
     ("Lex_input_stream", "lex_one_token"),
@@ -93,14 +105,13 @@ SLICE_FUNCTIONS: list[tuple[str | None, str]] = [
     ("Lex_input_stream", "find_keyword_qualified_special_func"),
     ("Lex_input_stream", "get_token"),
     ("Lex_input_stream", "consume_comment"),
-    # Task 8.2 (P5b): the stream setup and the string-literal scanner.
-    # `init`/`reset` are what put a query into the stream at all (reset is
-    # what tools/vendor/bison2ts/reflex.py transliterates, citing
-    # sql_lex.cc:840); `get_text` IS lexing -- it honours NO_BACKSLASH_ESCAPES
-    # and '' doubling, and returning true from it is how an unterminated
-    # literal becomes ABORT_SYM -- and `unescape` is the half of it that
-    # rewrites the literal's bytes.  All four are MariaDB source, so they are
-    # sliced, not shimmed.
+    # The stream setup and the string-literal scanner.  `init`/`reset` are
+    # what put a query into the stream at all (reset: sql_lex.cc:840);
+    # `get_text` IS lexing -- it honours NO_BACKSLASH_ESCAPES and ''
+    # doubling, and returning true from it is how an unterminated literal
+    # becomes ABORT_SYM -- and `unescape` is the half of it that rewrites the
+    # literal's bytes.  All four are MariaDB source, so they are sliced, not
+    # shimmed.
     ("Lex_input_stream", "init"),
     ("Lex_input_stream", "reset"),
     ("Lex_input_stream", "get_text"),
@@ -138,33 +149,24 @@ SLICE_VARIABLES: list[tuple[str, str]] = [
     ("sql/sql_lex.cc", "unsigned_longlong_len"),
 ]
 
-# Lex_input_stream methods deliberately left as declarations only.  "It
-# compiles" means an object file (`g++ -c`), so a member function that is
-# declared in the sliced class and never defined produces no diagnostic; these
-# are the semantic-value / pre-processed-buffer / digest machinery, which
-# tools/vendor/thd.md already records as "not modelled", and dragging their
-# bodies in would drag in the server's memory-root and character-set-conversion
-# layers for no gain to the question this spike asks.  P5b decides which of
-# them it needs.
-# Task 8.2 (P5b) split this list in two, per symbol, and the distinction IS
-# the design:
+# Lex_input_stream methods deliberately left as declarations only, in two
+# groups:
 #
-#   sliced (moved into SLICE_FUNCTIONS above): init, reset, get_text,
-#     unescape.  They are lexing -- the stream setup and the string-literal
-#     scanner -- so they are MariaDB's own code or nothing.
+#   given SHIM BODIES in src/mdbp_lex.cc: the pre-processed-buffer
+#     (`body_utf8_*`) and digest members, which tools/vendor/thd.md records as
+#     "not modelled" (the buffer the binlog sees, and performance-schema
+#     digests).  Neither ever feeds back into the token stream, and dragging
+#     their bodies in would drag in the server's memory-root and
+#     charset-conversion layers for no gain.
 #
-#   still declared-only, and given SHIM BODIES in src/mdbp_lex.cc: the
-#     pre-processed-buffer (`body_utf8_*`) and digest members, which
-#     tools/vendor/thd.md records as "not modelled" (the buffer the binlog
-#     sees, and performance-schema digests).  Neither ever feeds back into the
-#     token stream, and dragging their bodies in would drag in the server's
-#     memory-root and charset-conversion layers for no gain.
-#
-#   still declared-only and NEVER REFERENCED, so they need no body at all:
-#     `get_escape_func` (its one caller is body_utf8_append_escape, which is
-#     shimmed), `get_body_utf8_maximum_length` (called by body_utf8_start and
+#   NEVER REFERENCED, so they need no body at all: `get_escape_func` (its one
+#     caller is body_utf8_append_escape, which is shimmed),
+#     `get_body_utf8_maximum_length` (called by body_utf8_start and
 #     body_utf8_append_escape, both shimmed) and `reduce_digest_token` (the
 #     slice never calls it).  `nm -u` on the object file is the check.
+#
+# The members that ARE lexing (init, reset, get_text, unescape) are in
+# SLICE_FUNCTIONS above: MariaDB's own code or nothing.
 DECLARED_NOT_DEFINED_IS_EXPECTED = {
     "get_escape_func", "body_utf8_start",
     "body_utf8_append", "body_utf8_append_ident", "body_utf8_append_escape",
@@ -173,17 +175,15 @@ DECLARED_NOT_DEFINED_IS_EXPECTED = {
 
 # The keyword tables.  `sql/lex.h` is a *definition* file: `SYMBOL symbols[] =
 # {...}` built from a `SYM(A)` macro over token names.  Because the slice
-# compiles against build/parser.h (P1/P2's numbering), SYM(A) resolves to OUR
-# token values automatically -- and any name in lex.h that build/parser.h does
-# not declare is a finding, reported in the manifest as `unknown_tokens`.
+# compiles against the stub grammar's parser.h, SYM(A) resolves to ITS token
+# values automatically -- and any name in lex.h that parser.h does not declare
+# is reported in the manifest as `unknown_tokens` (and printed on exit).
 SLICE_KEYWORD_ARRAYS = ["symbols", "sql_functions"]
 
-# The charset side.  PLAN P5a's charset decision route (b) is "generate the
-# tables at build time": compile and run `init_state_maps` once against a
-# minimal CHARSET_INFO literal and emit build/state_maps.h.  These are the
-# symbols that route needs, and they are located by symbol like everything
-# else.  Route (a) -- linking a slice of strings/ + mysys/ -- needs no slice at
-# all, it needs a cmake configure; tools/lexspike.py measures both.
+# The charset side: compile and run `init_state_maps` once against a minimal
+# CHARSET_INFO literal and emit state_maps.h, so the two 256-byte lexer maps
+# are computed by MariaDB's own code rather than re-typed.  These are the
+# symbols the generator needs, located by symbol like everything else.
 SLICE_CHARSET: list[tuple[str, str, str]] = [
     ("strings/ctype-utf8.c", "array", "ctype_utf8mb4"),
     ("strings/ctype-utf8.c", "function", "my_valid_mbcharlen_utf8mb3"),
@@ -193,12 +193,12 @@ SLICE_CHARSET: list[tuple[str, str, str]] = [
 ]
 
 
-# Task 8.2 (P5b): what the LEXER translation unit needs beyond sql_lex.cc, all
-# located by symbol like everything else.  These are data and library routines
-# the sliced lexer reads or calls; re-typing any of them into src/lexshim.h
-# would be a transliteration, which is exactly what this project does not do.
+# What the LEXER translation unit needs beyond sql_lex.cc, all located by
+# symbol like everything else.  These are data and library routines the sliced
+# lexer reads or calls; re-typing any of them into src/lexshim.h would be a
+# transliteration.
 #
-#   ctype_utf8mb4              cs->ctype: my_isdigit/my_isalpha/... (D-9's
+#   ctype_utf8mb4              cs->ctype: my_isdigit/my_isalpha/... (the
 #                              connection charset is utf8mb4, always)
 #   my_charlen_utf8mb4         cs->charlen() and my_ismbchar(), sql_lex.cc:2880
 #   my_valid_mbcharlen_utf8mb3 what my_charlen_utf8mb4 calls
@@ -235,9 +235,8 @@ SLICE_SUPPORT: list[tuple[str, str, str]] = [
 # is filled at runtime from `sql/share/charsets/Index.xml` plus the compiled-in
 # charsets -- there is no symbol to slice.  What there IS, is MariaDB's own
 # data, so the NAMES are derived from the pinned tree by the three patterns
-# below (the same derivation tools/vendor/bison2ts/reflex.py's CHARSET_NAMES
-# documents and mdb-bison-ts/tests/test_p2a_reflex.py re-derives), emitted into
-# the slice as a table, and looked up by src/mdbp_lex.cc's
+# in charset_names() below, emitted into the slice as a table, and looked up
+# by src/mdbp_lex.cc's
 # get_charset_by_csname() shim.  Only non-NULL-ness reaches the token stream:
 # the CHARSET_INFO the server would return lands in yylval->charset and feeds
 # the utf8 body, which thd.md records as not modelled.
@@ -441,7 +440,7 @@ def find_define(text: str, name: str) -> tuple[int, int]:
         # `(?:[^\n]*\\\n)*[^\n]*` and NOT `[^\n]*(?:\\\n[^\n]*)*`: the
         # second is greedy on the first line, swallows the trailing backslash
         # and can then never enter the continuation branch, so it stops at the
-        # first line of a multi-line macro.  tests/test_lexslice.py pins it.
+        # first line of a multi-line macro.
         r"(?m)^[ \t]*#[ \t]*define[ \t]+" + re.escape(name)
         + r"(?![A-Za-z0-9_])(?:[^\n]*\\\n)*[^\n]*"
     )
@@ -470,7 +469,7 @@ def _exactly_one(spans: list[tuple[int, int]], what: str) -> tuple[int, int]:
 
 # ---------------------------------------------------------------------------
 # the mechanical rewrite rules.  One entry per rule; each returns
-# (new_text, [applications]) and every application lands in the evidence.
+# (new_text, [applications]) and every application lands in the manifest.
 # ---------------------------------------------------------------------------
 
 WSREP_GUARD = "WITH_WSREP"
@@ -481,11 +480,12 @@ def rule_isolate_wsrep(body: str) -> tuple[str, list[dict]]:
     marker comment, and the server symbols it referenced are reported.
 
     Why a rule and not "let the preprocessor drop it": WITH_WSREP is undefined
-    here, so cpp would delete the block silently and the dependency would never
-    appear in any evidence.  PLAN P5a calls the `WSREP(thd)` /
-    `wsrep_thd_is_local(thd)` / `thd->wsrep_consistency_check` block a Q7
-    finding that must be recorded like any other demanded symbol, so the rule
-    removes it *visibly* and hands the identifiers to lexspike.py.
+    here, so cpp would delete the block silently and the server state it
+    reads (`WSREP(thd)`, `wsrep_thd_is_local(thd)`,
+    `thd->wsrep_consistency_check`) would never be visible.  The rule removes
+    it *visibly*, with a marker comment in the slice, and lists the
+    identifiers in the manifest's `wsrep_findings`.  (The marker's "Q7
+    finding" wording is frozen generated text; see the module docstring.)
     """
     applications: list[dict] = []
     pattern = re.compile(
@@ -517,6 +517,8 @@ REWRITE_RULES = [("isolate_wsrep", rule_isolate_wsrep)]
 # the slice
 # ---------------------------------------------------------------------------
 
+# Frozen generated text (see the module docstring): the committed
+# generated/lexer_extracted.cc carries this banner byte for byte.
 BANNER = (
     "/* GENERATED by tools/lexslice.py -- DO NOT EDIT.\n"
     "   Every byte below except this banner and the `slice:` markers is\n"
@@ -538,22 +540,15 @@ def read_source(root: Path, rel: str) -> str:
 
 
 def parser_token_names(parser_h: Path) -> set[str]:
-    """Every token name build/parser.h's `enum yytokentype` declares.
+    """Every token name parser.h's `enum yytokentype` declares.
 
     The trailing comma is OPTIONAL: bison does not write one after the LAST
     enumerator (`EMPTY_FROM_CLAUSE = 1033` here), and requiring it dropped that
     token from `declared`, where it would surface as a spurious
-    `unknown_tokens` finding.  What it must NOT do is anchor at end of line:
-    bison writes a `/* NAME */` comment after every enumerator but the first
-    few, so a bare `$` matches one line in the whole file.
-
-    What a reviewer can check: this pattern returns 780 names, which is
-    `slice_manifest.keywords.parser_h_tokens` in evidence/P5a/spike.json.  The
-    two rejected variants were measured the same way while the rule was being
-    written (779 with the comma required -- EMPTY_FROM_CLAUSE the one missing
-    name -- and 1 with a bare `$`), but build/parser.h is generated and not
-    committed, so those two numbers are re-measurable, by editing the regex
-    here after `make grammar`, rather than corroborated by an artefact.
+    `unknown_tokens` finding.  What it must NOT do is anchor at end of line
+    without allowing a comment: bison writes a `/* NAME */` comment after
+    every enumerator but the first few, so a bare `$` matches almost nothing.
+    The manifest's `keywords.parser_h_tokens` is the count this returns.
     """
     text = parser_h.read_text()
     return set(re.findall(
@@ -569,7 +564,7 @@ def keyword_symbols(lex_h_text: str) -> list[str]:
 
 
 def build_keywords_header(root: Path) -> tuple[str, dict]:
-    """build/keywords.h: sql/lex_symbol.h's declarations plus sql/lex.h's two
+    """keywords.h: sql/lex_symbol.h's declarations plus sql/lex.h's two
     keyword arrays, sliced by symbol."""
     lex_symbol = read_source(root, "sql/lex_symbol.h")
     lex_h = read_source(root, "sql/lex.h")
@@ -600,10 +595,10 @@ def build_keywords_header(root: Path) -> tuple[str, dict]:
 
 
 def build_lex_states(root: Path) -> tuple[str, dict]:
-    """build/lexstates.h -- `enum my_lex_states`, sliced from include/m_ctype.h.
+    """lexstates.h -- `enum my_lex_states`, sliced from include/m_ctype.h.
 
     Its own header because both translation units need it: the lexer slice and
-    the charset route (b) generator (whose `init_state_maps` fills the map with
+    the state-map generator (whose `init_state_maps` fills the map with
     exactly these values).
     """
     rel, _kind, name = SLICE_LEX_STATES
@@ -634,9 +629,6 @@ def charset_names(root: Path) -> list[str]:
     * `utf8`, added by hand and only here: it is not a cs_name anywhere in the
       tree, because `get_charset_number()` maps it to utf8mb3/utf8mb4 by hand
       (mysys/charset.c).
-
-    Identical to the derivation tools/vendor/bison2ts/reflex.py's CHARSET_NAMES
-    documents, so the two tables cannot silently disagree.
     """
     index = root / CHARSET_NAME_SOURCES["index_xml"]
     strings_dir = root / CHARSET_NAME_SOURCES["strings_dir"]
@@ -664,7 +656,7 @@ def build_charset_names(root: Path) -> tuple[str, dict]:
     text = (
         # No "/*" in the marker: the sources include a glob, and a nested
         # "/*" inside a /* ... */ comment is a -Wcomment warning in OUR
-        # generated bytes, which the recorded warning count must not carry.
+        # generated bytes.
         "\n/* ---- generated: charset introducer names <- "
         + CHARSET_NAME_SOURCES["index_xml"] + " + "
         + CHARSET_NAME_SOURCES["strings_dir"] + " *.c files ---- */\n"
@@ -683,12 +675,12 @@ def build_slice(root: Path) -> tuple[str, dict]:
     # The shim is included TWICE, on purpose.  Phase 1 is the primitives,
     # THD/LEX and the forward declaration of `union YYSTYPE`; the sliced types
     # come next (Lex_ident_cli_st and friends); phase 2 is the YYSTYPE union
-    # itself, whose members ARE those sliced types, plus build/parser.h.  The
-    # order is forced by the sources: MariaDB's %union holds Lex_ident_cli_st
-    # by value, and Lex_input_stream only ever sees `union YYSTYPE *`.
+    # itself, whose members ARE those sliced types, plus parser.h.  The order
+    # is forced by the sources: MariaDB's %union holds Lex_ident_cli_st by
+    # value, and Lex_input_stream only ever sees `union YYSTYPE *`.
     parts = [BANNER, '#include "lexshim.h"\n', '#include "lexstates.h"\n']
     manifest: dict = {
-        "source_tree": common.display_path(root),
+        "source_tree": str(root),
         "types": [],
         "functions": [],
         "rewrites": [],
@@ -723,7 +715,7 @@ def build_slice(root: Path) -> tuple[str, dict]:
                  "   my_charlen_utf8mb4 below is written against. */\n"
                  '#include "ctype-utf8.h"\n')
 
-    # Task 8.2: the support symbols (charset tables, my_strtoll10, to_upper_lex)
+    # The support symbols (charset tables, my_strtoll10, to_upper_lex) go
     # BEFORE sql_lex.cc's own file-scope constants and functions, because
     # lex_casecmp reads to_upper_lex and get_text reaches my_charlen_utf8mb4.
     for rel, kind, name in SLICE_SUPPORT:
@@ -807,12 +799,11 @@ def build_slice(root: Path) -> tuple[str, dict]:
 
 
 def build_state_map_generator(root: Path) -> tuple[str, dict]:
-    """build/state_maps_gen.cc -- charset route (b)'s generator.
+    """state_maps_gen.cc -- the state-map generator.
 
     `init_state_maps` (mysys/charset.c) over a minimal CHARSET_INFO literal
     carrying `ctype_utf8mb4` (strings/ctype-utf8.c), sliced by symbol.  The
-    generator prints build/state_maps.h.  Whether it compiles and runs is
-    tools/lexspike.py's charset measurement; nothing here decides.
+    generator prints state_maps.h; --compile-state-maps builds and runs it.
     """
     parts = [
         BANNER,
@@ -839,6 +830,8 @@ def build_state_map_generator(root: Path) -> tuple[str, dict]:
     return "".join(parts), manifest
 
 
+# Frozen generated text (see the module docstring): its printf writes the
+# first line of the committed generated/state_maps.h.
 MAIN_STATE_MAP_GEN = """
 /* lexslice.py: the generator's own main(), and the one hook src/lexshim.h's
    my_ci_charlen macro needs.  Neither is MariaDB source -- they print what
@@ -873,26 +866,12 @@ int main(void)
 
 
 def compile_state_maps(out: Path, root: Path, cxx: str = "g++") -> dict:
-    """Compile-and-run `<out>/state_maps_gen.cc` (charset route (b)'s
-    generator), writing `<out>/state_maps.h`.
+    """Compile and run `<out>/state_maps_gen.cc`; its stdout is
+    `<out>/state_maps.h`.
 
-    Same recipe as tools/lexspike.py's `measure_charset()` route (b) --
-    reused rather than reinvented (identical compiler flags, identical "run
-    the binary, its stdout IS the header" approach) -- but parameterised on
-    `out`/`root` instead of hardcoded to `build/`/`build/lexspike/`, because
-    tools/extract.sh's own `--out` is not always `build/` (a drift-drill
-    or regen-check scratch run). This is task 8.1's own caller
-    (`extract.sh`); lexspike.py is untouched and keeps its own copy of the
-    same recipe, hardcoded to its own scratch directory, per the plan's `Do
-    not modify tools/lexspike.py`.
-
-    Returns `argv`/`returncode`/`stderr` too (for a caller to report a real
-    failure), but `manifest_entry()` below is what gets persisted into
-    lexslice.json/state_maps.h's evidence: `--out` is an absolute, run-
-    specific path (a scratch dir for one caller, `build/` for another), so an
-    argv or stderr text that embeds it would make lexslice.json's own bytes
-    depend on WHERE it was generated rather than only on the source tree --
-    breaking exactly the byte-identity regen-check exists to prove.
+    Returns `argv`/`returncode`/`stderr` too, for the caller to report a
+    failure; only `state_maps_manifest_entry()`'s subset goes into
+    lexslice.json, so the manifest does not embed run-specific paths.
     """
     gen_src = out / "state_maps_gen.cc"
     gen_bin = out / "state_maps_gen"
@@ -925,9 +904,8 @@ def compile_state_maps(out: Path, root: Path, cxx: str = "g++") -> dict:
 
 
 def state_maps_manifest_entry(info: dict) -> dict:
-    """The path-invariant, reproducible subset of `compile_state_maps()`'s
-    return value: what lexslice.json persists. See that function's docstring
-    for why `argv`/`stderr`/`returncode` are excluded."""
+    """The path-independent subset of `compile_state_maps()`'s return value:
+    what lexslice.json records."""
     return {key: info[key] for key in ("compiles", "ran", "bytes", "entries")}
 
 
@@ -942,35 +920,29 @@ def main(argv: list[str] | None = None) -> int:
         description="Slice MariaDB's lexer out of sql_lex.cc by symbol.",
     )
     parser.add_argument(
-        "--source",
-        default=None,
-        help="the pinned MariaDB tree (read-only; default $MARIADB_SOURCE_DIR, "
-             "exit 2 when neither is given)",
+        "--source", required=True,
+        help="the MariaDB server tree at the pin (read only)",
     )
     parser.add_argument(
-        "--out", default=str(common.BUILD_DIR),
-        help="output directory (default build/)",
+        "--out", required=True,
+        help="output directory",
     )
     parser.add_argument(
         "--parser-h", default=None,
-        help="build/parser.h, for the SYM() cross-check (default <out>/parser.h)",
+        help="bison's parser.h for the stub grammar, for the SYM() "
+             "cross-check (default <out>/parser.h)",
     )
     parser.add_argument(
         "--compile-state-maps", action="store_true",
-        help="also g++-compile and run <out>/state_maps_gen.cc, writing "
-             "<out>/state_maps.h (charset route (b)'s two 256-byte tables). "
-             "Off by default: lexslice.py's own callers (tests, the P5a "
-             "spike) generate only; tools/extract.sh passes this except "
-             "under --no-compile, so state_maps.h is absent there and that "
-             "is expected, not an error.",
+        help="also compile and run <out>/state_maps_gen.cc, writing "
+             "<out>/state_maps.h (the two 256-byte lexer state maps)",
     )
-    parser.add_argument("--cxx", default="g++", help=argparse.SUPPRESS)
-    # Accepted and ignored: there is no host check left to override.
-    parser.add_argument("--allow-any-host", action="store_true",
-                        help=argparse.SUPPRESS)
+    parser.add_argument("--cxx", default="g++",
+                        help="C++ compiler for --compile-state-maps "
+                             "(default g++)")
     args = parser.parse_args(argv)
 
-    root = Path(args.source) if args.source else common.mariadb_source_dir()
+    root = Path(args.source)
     out = Path(args.out)
     parser_h = Path(args.parser_h) if args.parser_h else out / "parser.h"
 

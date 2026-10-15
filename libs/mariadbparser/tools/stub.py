@@ -2,12 +2,14 @@
 """tools/stub.py — turn MariaDB's preprocessed bison superset into a
 plain-bison, C-only grammar whose every action body is a one-line stub.
 
+Run by hand, once per full re-extraction (see UPSTREAM.md); the build never
+runs it.  Its output is committed as generated/yy_stub.yy.
+
 The transform is *line-count preserving*, exactly like MariaDB's own
 `sql/gen_yy_files.cmake` step that runs before it: every removed construct is
 blanked line by line, and where a replacement is needed it occupies the
-construct's **first** line. That property is load-bearing for the whole
-project — every `sql_yacc.yy:LINE` citation recorded anywhere stays valid
-through both stages, and bison's own `yyrline[]` therefore points at real
+construct's **first** line.  So every `sql_yacc.yy:LINE` citation stays valid
+through both stages, and bison's own `yyrline[]` points at real
 `sql_yacc.yy` lines.
 
 What the declarations section becomes
@@ -37,8 +39,8 @@ any further ``%{ … %}`` block            blank
 =======================================  ====================================
 
 Any other ``%``-directive is *unrecognised* and exits 3 rather than being
-guessed at: a silent mis-transformation would poison every number computed
-downstream, invisibly.
+guessed at: a silent mis-transformation would change the automaton
+invisibly.
 
 The ``%type`` exception, and why it is a rule of the transform
 --------------------------------------------------------------
@@ -50,14 +52,9 @@ declarations section is that ``%type``, blanking the declaration moves its
 first mention into the rules and renumbers it — and because bison builds each
 state's transitions in symbol-number order, that renumbering propagates
 through the automaton, renumbering the states downstream of every affected
-symbol.  What the baseline run recorded (``evidence/P1/differences.json`` as of
-3e67378: 297 differences in all) is six terminals carrying permuted symbol
-numbers and 279 differing states — that 279 being the whole automaton family,
-not this cause's share of it.  **How many of the 279 this cause alone accounts
-for was never measured:** no run exists between that baseline and the fixed
-pipeline, and the mid-rule-value cause below disturbs overlapping states, so
-any split between the two would be an attribution rather than a measurement.
-None is claimed here.
+symbol.  Without this rule, six terminals of the pinned grammar got permuted
+symbol numbers and the automaton's state numbering diverged from the
+original's.
 
 So a ``%type`` whose list contains character literals emits, **on the
 construct's first line**, a ``%token`` naming exactly the literals that have
@@ -67,19 +64,14 @@ their original order; every other line of the construct is still blanked and
 the file's line count is unchanged.  Literals already mentioned earlier are
 filtered out because ``%token``-redeclaring a symbol a previous ``%token``
 declared makes bison warn (measured: ``symbol ',' redeclared [-Wother]``),
-and this pipeline requires ``bison.stderr`` to be zero bytes; a symbol first
-seen in ``%left``/``%right``/``%nonassoc`` may be ``%token``-ed afterwards in
-silence (also measured).  If nothing is left after the filter, nothing is
-emitted — an empty ``%token`` line is a bison syntax error.  **Named**
-symbols in a ``%type`` list are still blanked: a ``%token`` on a nonterminal
-would be catastrophic, and `make isomorphism` is what catches a future
-revision that first-mentions a named terminal in a ``%type``.
-
-This is a **rule of the script**, mechanical and regenerable, and deliberately
-*not* an ``overrides/*.toml`` entry: the override count is this project's
-regeneration debt, and spending it on something a script can do for any
-revision would misreport that debt (``overrides/README.md`` says the same from
-the other side).
+and bison must run over the output without warnings; a symbol first seen in
+``%left``/``%right``/``%nonassoc`` may be ``%token``-ed afterwards in silence
+(also measured).  If nothing is left after the filter, nothing is emitted —
+an empty ``%token`` line is a bison syntax error.  **Named** symbols in a
+``%type`` list are still blanked: a ``%token`` on a nonterminal would be
+catastrophic.  A future revision that first-mentions a named terminal in a
+``%type`` would need this rule extended; compare bison's symbol numbering of
+the output against the original grammar's after a re-extraction.
 
 What the rules section becomes
 ------------------------------
@@ -89,10 +81,11 @@ body blanked.  **And every alternative that has no final action gains one**,
 appended at the end of the alternative's last token (so after a trailing
 ``%prec X``, and before the ``|``/``;`` that terminates the alternative).
 
-That second half is not cosmetic.  `replay.py`'s recorded `derivation` array
-is *every* reduction, not only the reductions of rules that carried a C
-action, so a rule left actionless never fires `MDBP_R` and P2/P4 cannot
-compare derivations at all.  Appending a *final* action is automaton-neutral:
+That second half is not cosmetic.  The runtime's derivation is *every*
+reduction, recorded by ``MDBP_R`` (which records bison's rule number,
+``yyn - 1``; the serial itself is only for readability), so a rule left
+actionless would be missing from the derivation and from the syntax tree
+built from it.  Appending a *final* action is automaton-neutral:
 bison synthesises an extra rule only for an action that is not last in its
 alternative, so rule count, rule numbering and state count are untouched, and
 `yyrline[n]` records where a rule *starts*, not where its action sits.
@@ -105,23 +98,22 @@ bison names a mid-rule's synthesised placeholder nonterminal ``@N`` when the
 mid-rule's value is used and ``$@N`` when it is not (measured on bison 3.8.2),
 and the placeholder's *name* is a goto key in the automaton, so a stub that
 never touches ``$$`` renames three of this grammar's 284 placeholders and the
-reference model disagrees.  The criterion is derived from the **original
-action bodies**, never from the reference model — fitting the transform to the
-answer would not be regenerable, and over- or under-selecting is exactly what
-`make isomorphism` measures.  Both forms are automaton-neutral and neither
-changes the serial assignment: there is still exactly one ``MDBP_R`` per rule.
+automaton no longer matches the original grammar's.  The criterion is derived
+from the **original action bodies** only, so it carries over to a new server
+version.  Both forms are automaton-neutral and neither changes the serial
+assignment: there is still exactly one ``MDBP_R`` per rule.
 
 What the rules section KEEPS: the named preserve rules
 ------------------------------------------------------
 One exception to "every action body is a one-line stub", and it is a **named
 rule with a manifest**, in `tools/lexslice.py`'s ``REWRITE_RULES`` style:
-``preserve_parsing_place`` (task P1.1).
+``preserve_parsing_place``.
 
 MariaDB's lexer reads ``curr_sel->parsing_place`` to decide what a few tokens
 mean (``sql_lex.cc``'s five feedback sites).  The whole read-and-spend
-machinery is already in this build, verbatim, in ``build/lexer_extracted.cc``;
-the WRITES are grammar actions, and blanking them left the field permanently
-``NO_MATTER``.  So this rule preserves, inside an otherwise-blanked action
+machinery is in the sliced lexer, verbatim (``lexer_extracted.cc``); the
+WRITES are grammar actions, and blanking them would leave the field
+permanently ``NO_MATTER``.  So this rule preserves, inside an otherwise-blanked action
 body, whole STATEMENTS that touch only ``parsing_place`` /
 ``save_parsing_place`` on one of the five paths ``sql_yacc.yy`` spells them
 with -- ``Select->``, ``sel->``, ``Lex->current_select->``,
@@ -131,12 +123,13 @@ with -- ``Select->``, ``sel->``, ``Lex->current_select->``,
 identifier it mentions is one of those path words, one of the two fields, or an
 ``enum_parsing_place`` constant; only when it carries no punctuation beyond
 ``-> = == != && || ( ) ;``; and only when it occupies WHOLE LINES strictly
-inside the body.  Anything else is listed in the manifest with the reason and
-left blanked -- half a statement is never lifted, and a statement the rule
-cannot prove self-contained is never guessed at.  The manifest also proves its
-own completeness: every ``parsing_place`` line of the input is lifted, reported
-or comment-only, and the output carries exactly the occurrences the manifest
-claims, or the run is an exit 1.  Which of the three a line is is decided by
+inside the body.  Anything else is recorded in the manifest with the reason,
+printed as a count, and left blanked -- half a statement is never lifted, and
+a statement the rule cannot prove self-contained is never guessed at.  The
+run also checks its own completeness: every ``parsing_place`` line of the
+input is lifted, reported or comment-only, and the output carries exactly the
+occurrences that were lifted, or the run is an exit 1.  Which of the three a
+line is is decided by
 masking THE WHOLE FILE, never by whether an action body happened to be scanned
 over it -- so a write OUTSIDE every action body, which no rule here can ever
 see, is an exit 1 and not a line quietly called a comment (see
@@ -162,12 +155,15 @@ Modes
 -----
 ::
 
-    stub.py --in <yy> --out <yy_stub> --map <stub-map.json> [--overrides <toml>]
+    stub.py --in <yy> --out <yy_stub> [--map <stub-map.json>]
     stub.py --check --in <yy>
-    stub.py --rule-map --parser-c <parser.c> --map <stub-map.json> --out <json>
 
-Exit codes follow the project convention: 0 ok · 1 internal error · 2 usage or
-unreadable input · 3 unsupported/unrecognised input.
+``--map`` writes an optional debugging manifest: each serial's ``sql_yacc.yy``
+line and rule, and the ``preserve`` block (every lifted statement, every
+``parsing_place`` site not lifted with the reason).
+
+Exit codes: 0 ok · 1 internal error · 2 usage or unreadable input ·
+3 unsupported/unrecognised input.
 """
 
 from __future__ import annotations
@@ -175,7 +171,6 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -187,7 +182,6 @@ EXIT_USAGE = 2
 EXIT_UNSUPPORTED = 3
 
 STUB_MAP_SCHEMA_VERSION = 1
-RULE_MAP_SCHEMA_VERSION = 1
 
 PROLOGUE_REPLACEMENT = '%{ #include "stub.h" %}'
 PROLOGUE_OPEN = '%{ #include "stub.h"'
@@ -198,7 +192,7 @@ PARAM_CTX = "mdbp_ctx *ctx"
 # `%parse-param`/`%lex-param` are rewritten only when their body is exactly
 # MariaDB's `THD *thd`; anything else is an unrecognised construct, because a
 # second parameter (or a different type) would silently change the generated
-# `yyparse` signature P2 has to call.
+# `yyparse` signature src/parser_glue.c calls.
 PARAM_RE = re.compile(r"^%(parse|lex)-param\s*\{\s*THD\s*\*\s*thd\s*\}\s*$")
 
 # Directives that survive the transform untouched.
@@ -320,7 +314,7 @@ def mask_c_text(text: str) -> str:
     Unlike `_mask_line` this never raises.  It is used to *read* an action
     body — to decide whether the body uses its own `$$` — and never to rewrite
     one, so an oddity inside a body (an apostrophe the C compiler is happy
-    with but this scanner is not) must not turn `make grammar` into an exit 3.
+    with but this scanner is not) must not turn the run into an exit 3.
     A quote with no closing quote before the end of its line is therefore
     treated as an ordinary character rather than as the start of a literal.
     """
@@ -680,9 +674,9 @@ def _rhs_positions(alt: list[Token]) -> dict[int, int]:
 #
 # One entry per rule, in `tools/lexslice.py`'s `REWRITE_RULES` style: the
 # rule is a function, it is applied by this script and nowhere else, and EVERY
-# application lands in the manifest (`build/stub-map.json`'s `preserve` block)
-# with the `sql_yacc.yy` line it was applied at.  Every site the rule does NOT
-# lift lands there too, with the reason.
+# application lands in the manifest (stub-map.json's `preserve` block) with
+# the `sql_yacc.yy` line it was applied at.  Every site the rule does NOT lift
+# lands there too, with the reason.
 # --------------------------------------------------------------------------
 
 RULE_PRESERVE_PARSING_PLACE = "preserve_parsing_place"
@@ -705,7 +699,10 @@ RULE_PRESERVE_PARSING_PLACE = "preserve_parsing_place"
 #: ORDINARY IDENTIFIERS.  A macro on those names in a shared header would
 #: rewrite that file's own declarations.  In the grammar's prologue they can
 #: reach nothing but bison's generated parser, which declares no identifier of
-#: any of these five names (checked against build/parser.c and build/parser.h).
+#: any of these five names (checked against bison 3.8.2's parser.c/parser.h).
+#:
+#: The block is emitted into yy_stub.yy, so its text is frozen: change it only
+#: together with the committed generated/yy_stub.yy.
 PARSING_PLACE_MACROS = [
     "/* stub.py rule preserve_parsing_place: the five spellings sql_yacc.yy",
     "   uses to reach the SELECT_LEX whose parsing_place MariaDB's lexer",
@@ -732,8 +729,8 @@ PARSING_PLACE_WORDS = frozenset({
 })
 
 #: `enum enum_parsing_place`, sql/sql_priv.h:327.  src/stub.h carries the same
-#: list and tests/test_parsing_place_lift.py asserts the two agree; a value
-#: outside it is NOT lifted, it is reported.
+#: list; keep the two in step.  A value outside it is NOT lifted, it is
+#: reported.
 PARSING_PLACE_VALUES = frozenset({
     "NO_MATTER", "IN_HAVING", "SELECT_LIST", "IN_WHERE", "IN_ON",
     "IN_GROUP_BY", "IN_ORDER_BY", "IN_UPDATE_ON_DUP_KEY", "IN_PART_FUNC",
@@ -931,17 +928,13 @@ class Transform:
         # `%token` already declared is a bison warning, which this pipeline
         # treats as a failure.
         self.seen_literals: set[str] = set()
-        # The `preserve_parsing_place` manifest (build/stub-map.json's
-        # `preserve` block): every application with its sql_yacc.yy line, and
-        # every site the rule did NOT lift with the reason it did not.
+        # The `preserve_parsing_place` manifest (stub-map.json's `preserve`
+        # block): every application with its sql_yacc.yy line, and every
+        # site the rule did NOT lift with the reason it did not.
         self.preserve: dict = {
             "rule": RULE_PRESERVE_PARSING_PLACE,
             "macro_lines": [],
-            # The macro block AS WRITTEN, so that anything that has to undo
-            # this transform (tests/conftest.py's
-            # `strip_lifted_parsing_place`, which builds a historical `src/`
-            # against today's grammar) reads it out of the manifest instead
-            # of keeping a second copy that can drift.
+            # The macro block AS WRITTEN.
             "macro_text": [],
             "applied": [],
             "skipped": [],
@@ -951,9 +944,8 @@ class Transform:
         # OUTSIDE comments and literals, counted PER ACTION BODY.  It is NOT
         # what the completeness check partitions (that is the whole-file
         # census `transform` takes; a per-body census cannot see a write
-        # outside every body, which is the bug task P1.1's deliverable 7b
-        # fixed) -- it is the independent second opinion `_finish_preserve`
-        # checks that census against.
+        # outside every body) -- it is the independent second opinion
+        # `_finish_preserve` checks that census against.
         self.pp_code_lines: dict[int, int] = {}
 
     def _note_literals(self, index: int) -> None:
@@ -1038,8 +1030,8 @@ class Transform:
 
         A prologue TOO SHORT to hold the block is not an error by itself:
         the macros only matter to a grammar that has statements to lift, and
-        a short prologue is a perfectly ordinary small grammar (every
-        synthetic one in tests/ is).  Such a prologue gets the one-line
+        a short prologue is a perfectly ordinary small grammar (a synthetic
+        test grammar, say).  Such a prologue gets the one-line
         `%{ #include "stub.h" %}` this transform always wrote, `macro_lines`
         stays empty, and `_finish_preserve` turns "lifted something with no
         macro block" -- the combination that would NOT compile -- into an
@@ -1141,9 +1133,7 @@ class Transform:
         the construct first-mentions nothing else), with no `<tag>`, and
         nothing at all when the filter leaves nothing — an empty `%token` line
         is a bison syntax error.  Named symbols in the list stay blanked: a
-        `%token` on a nonterminal would be catastrophic, and `make
-        isomorphism` is what would catch a revision that first-mentions a
-        *named* terminal here.
+        `%token` on a nonterminal would be catastrophic.
         """
         end = index + 1
         while end < pct and not masked[end].lstrip().startswith("%"):
@@ -1232,8 +1222,8 @@ class Transform:
                 # i.e. an unterminated rule whose last alternative is empty,
                 # `rule: FOO | <newline> other: BAR ;`.  Both readings (an
                 # empty final alternative of `rule`, or `| other` as an
-                # alternative) are guesses, and §2.1 says exit 3 rather than
-                # guess: swallowing it silently would attribute `other`'s
+                # alternative) are guesses, so exit 3 rather than guess:
+                # swallowing it silently would attribute `other`'s
                 # alternative to `rule` and leave a rule with no MDBP_R.
                 if tok.kind == "colon":
                     raise Unsupported(
@@ -1317,20 +1307,15 @@ class Transform:
         three must partition `raw_lines` exactly -- anything else is an exit 1
         rather than a manifest that quietly does not add up.
 
-        THE WHOLE-FILE MASK IS WHAT MAKES THAT REFUSAL REAL (task P1.1
-        deliverable 7b).  `comment_only` used to be `raw_lines` minus the
-        lines the PER-ACTION-BODY scan had seen (`pp_code_lines`, filled by
-        `_preserve`, which runs once per action body).  So a `parsing_place`
-        write OUTSIDE every action body -- the one thing no rule here can ever
-        see -- was bucketed as a comment, `accounted` came out equal to
-        `set(raw_lines)` by construction, and this refusal could not fire: a
-        write the rule fails to lift was counted as accounted for.  Under the
-        whole-file mask such a line is code, is neither lifted nor reported,
-        and is the exit 1 it always claimed to be.  On the pinned revision the
-        two bases agree line for line and occurrence for occurrence -- the
-        same statements lifted, the same one site reported, the same five
-        comment-only lines that `evidence/P1/extract.json`'s `preserve` block
-        records -- which is why this is a fix and not a new result.
+        THE WHOLE-FILE MASK IS WHAT MAKES THAT REFUSAL REAL.  If
+        `comment_only` were `raw_lines` minus the lines the PER-ACTION-BODY
+        scan had seen (`pp_code_lines`, filled by `_preserve`, which runs once
+        per action body), a `parsing_place` write OUTSIDE every action body --
+        the one thing no rule here can ever see -- would be bucketed as a
+        comment, `accounted` would equal `set(raw_lines)` by construction, and
+        this refusal could never fire.  Under the whole-file mask such a line
+        is code, is neither lifted nor reported, and is an exit 1.  On the
+        pinned revision one site is reported and five lines are comment-only.
         """
         lifted_lines: set[int] = set()
         for app in self.preserve["applied"]:
@@ -1405,8 +1390,7 @@ class Transform:
 
     def _valued_midrule_positions(self, alt: list[Token]) -> set[int]:
         """The RHS positions of this alternative whose *mid-rule* value the
-        original grammar used — read out of the original action bodies, never
-        out of the reference model.
+        original grammar used — read out of the original action bodies.
 
         Two ways a mid-rule's value is used, which are bison's own two:
         the mid-rule action assigns its own `$$` / `$<tag>$`, or a *later*
@@ -1486,7 +1470,7 @@ def transform(
     # ...and which of those lines carry it as CODE, taken over the WHOLE FILE
     # rather than one action body at a time.  That is the difference between a
     # completeness claim that holds by construction and one that can fail: see
-    # `_finish_preserve` (task P1.1 deliverable 7b).  `mask_c_text` keeps every
+    # `_finish_preserve`.  `mask_c_text` keeps every
     # character at its own position and every newline a newline, so line k of
     # the mask is line k of the input.
     masked_file = mask_c_text("\n".join(lines)).split("\n")
@@ -1516,66 +1500,6 @@ def transform(
 
 
 # --------------------------------------------------------------------------
-# overrides
-# --------------------------------------------------------------------------
-
-
-def load_overrides(path: Path) -> dict[int, str]:
-    """Read `[[override]]` tables from a TOML file into {1-based line: text}.
-
-    An override is the escape hatch for something the transform cannot do
-    mechanically; it patches the *input* line before the transform runs, so
-    the result is still fully regenerable for the next MariaDB release.  Each
-    entry must carry a non-empty `why`, and the count of entries across
-    `overrides/*.toml` is this project's regeneration debt — a reported metric.
-    """
-    if not path.exists():
-        raise SystemExit(EXIT_USAGE)
-    data = tomllib.loads(path.read_text())
-    out: dict[int, str] = {}
-    for entry in data.get("override", []):
-        if not isinstance(entry, dict):
-            raise Unsupported(f"{path}: [[override]] entries must be tables")
-        for key in ("line", "replace", "why"):
-            if key not in entry:
-                raise Unsupported(f"{path}: an [[override]] entry has no `{key}`")
-        if not isinstance(entry["line"], int) or entry["line"] < 1:
-            raise Unsupported(f"{path}: `line` must be a 1-based integer")
-        if "\n" in entry["replace"]:
-            raise Unsupported(
-                f"{path}: `replace` for line {entry['line']} contains a newline; "
-                "an override may not change the file's line count"
-            )
-        if not str(entry["why"]).strip():
-            raise Unsupported(
-                f"{path}: the [[override]] for line {entry['line']} has an empty `why`"
-            )
-        out[entry["line"]] = entry["replace"]
-    return out
-
-
-def count_override_entries(directory: Path) -> int:
-    """The number of TOML tables across `overrides/*.toml`.
-
-    The document itself is not a table for this purpose — a file with no
-    `[[override]]` in it has zero entries, and zero is what this project's
-    regeneration debt is supposed to be."""
-    total = 0
-    for path in sorted(directory.glob("*.toml")):
-        data = tomllib.loads(path.read_text())
-        total += sum(_count_tables(value) for value in data.values())
-    return total
-
-
-def _count_tables(value) -> int:
-    if isinstance(value, dict):
-        return 1 + sum(_count_tables(v) for v in value.values())
-    if isinstance(value, list):
-        return sum(_count_tables(v) for v in value)
-    return 0
-
-
-# --------------------------------------------------------------------------
 # modes
 # --------------------------------------------------------------------------
 
@@ -1594,22 +1518,9 @@ def variant_of(path: Path) -> str:
     return match.group(1).upper() if match else "UNKNOWN"
 
 
-def repo_relative(path: Path) -> str:
-    """`path` as records spell it (common.display_path())."""
-    return common.display_path(Path(path).absolute())
-
-
 def run_transform(args) -> int:
     src = Path(args.inp)
     lines = read_lines(src)
-    if args.overrides:
-        for number, text in load_overrides(Path(args.overrides)).items():
-            if not 1 <= number <= len(lines):
-                raise Unsupported(
-                    f"{args.overrides}: line {number} is outside {src} "
-                    f"(1..{len(lines)})"
-                )
-            lines[number - 1] = text
     out, entries, counts, preserve = transform(lines)
     if args.check:
         print(f"stub.py --check: {src} transforms cleanly ({counts['serials']} serials, "
@@ -1618,24 +1529,25 @@ def run_transform(args) -> int:
         return EXIT_OK
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text("\n".join(out))
-    common.write_json(
-        Path(args.map),
-        {
-            "schema_version": STUB_MAP_SCHEMA_VERSION,
-            "source": repo_relative(src),
-            "variant": variant_of(src),
-            "entries": entries,
-            "counts": counts,
-            # The named preserve rules' manifest: every application with its
-            # sql_yacc.yy line, and every parsing_place site NOT lifted with
-            # the reason.  This block IS the enumeration the README's fact 1
-            # points at.
-            "preserve": preserve,
-        },
-    )
+    if args.map:
+        common.write_json(
+            Path(args.map),
+            {
+                "schema_version": STUB_MAP_SCHEMA_VERSION,
+                "source": str(src),
+                "variant": variant_of(src),
+                "entries": entries,
+                "counts": counts,
+                # The named preserve rules' manifest: every application with
+                # its sql_yacc.yy line, and every parsing_place site NOT
+                # lifted with the reason.
+                "preserve": preserve,
+            },
+        )
     written = len(out) - 1 if out and out[-1] == "" else len(out)
+    also = f" and {args.map}" if args.map else ""
     print(
-        f"stub.py: wrote {args.out} ({written} lines) and {args.map} "
+        f"stub.py: wrote {args.out} ({written} lines){also} "
         f"({counts['serials']} serials, {counts['midrule']} midrule, "
         f"{counts['replaced']} replaced, {counts['added']} added; "
         f"{preserve['counts']['lifted_statements']} statements preserved by "
@@ -1645,147 +1557,31 @@ def run_transform(args) -> int:
     return EXIT_OK
 
 
-CASE_RE = re.compile(r"^\s*case\s+(\d+):")
-MDBP_R_RE = re.compile(r"MDBP_R\s*\(\s*(\d+)\s*\)")
-
-
-# bison's yyreduce switch labels each block with `yyn`, which is ONE MORE than
-# the rule number grammar.output and grammar.xml use. Measured on this exact
-# parser.c: `case 2: /* query: END_OF_INPUT */` is grammar.output's `1 query:
-# END_OF_INPUT`, and `case 3: /* $@1: %empty */` is its `2 $@1: ε`. rule-map
-# records the *rule number*, because that is what replay.py's derivations are
-# in; getting this off by one would make every P2 comparison wrong by one rule
-# and still look plausible.
-CASE_LABEL_OFFSET = 1
-
-
-def run_rule_map(args) -> int:
-    """Read bison's reduce switch out of parser.c to learn its rule numbering.
-
-    After this transform every rule except rule 0 (`$accept`) carries exactly
-    one action, so bison emits one `case <N>:` per rule and each such block
-    holds exactly one `MDBP_R(<serial>);`.
-    """
-    parser_c = Path(args.parser_c)
-    if not parser_c.exists():
-        print(f"stub.py: cannot read {parser_c}", file=sys.stderr)
-        return EXIT_USAGE
-    stub_map = _read_json(Path(args.map))
-
-    serial_to_rule: dict[str, int] = {}
-    rule_to_serial: dict[str, int] = {}
-    duplicates: list[str] = []
-    current: int | None = None
-    for text in parser_c.read_text().split("\n"):
-        case = CASE_RE.match(text)
-        if case:
-            current = int(case.group(1)) - CASE_LABEL_OFFSET
-        for hit in MDBP_R_RE.finditer(text):
-            serial = int(hit.group(1))
-            if current is None:
-                print(
-                    f"stub.py: MDBP_R({serial}) outside any `case N:` in {parser_c}",
-                    file=sys.stderr,
-                )
-                return EXIT_INTERNAL
-            if str(current) in rule_to_serial:
-                duplicates.append(
-                    f"rule {current}: serials {rule_to_serial[str(current)]} and {serial}"
-                )
-                continue
-            rule_to_serial[str(current)] = serial
-            serial_to_rule[str(serial)] = current
-
-    unmapped = sorted(
-        (int(s) for s in stub_map["entries"] if s not in serial_to_rule)
-    )
-    # `unmapped` is the serial -> rule direction only: it says every serial the
-    # transform emitted reached a rule.  The other direction is the one P4
-    # cares about — every RULE must carry a serial — and nothing above tests
-    # it, because a rule with no action emits no `case` at all and so is
-    # invisible here.  bison numbers its rules 1..N contiguously (0 is
-    # `$accept`, which carries no action), so a gap in these keys IS a rule
-    # whose reduction this instrumentation would never see: a hole in the
-    # derivation, which bison itself would compile without a word.
-    numbers = sorted(int(n) for n in rule_to_serial)
-    gaps = [n for n in range(1, (numbers[-1] if numbers else 0) + 1)
-            if str(n) not in rule_to_serial]
-    common.write_json(
-        Path(args.out),
-        {
-            "schema_version": RULE_MAP_SCHEMA_VERSION,
-            "serial_to_rule": serial_to_rule,
-            "rule_to_serial": rule_to_serial,
-            "unmapped_serials": unmapped,
-        },
-    )
-    if duplicates or unmapped or gaps:
-        for line in duplicates:
-            print(f"stub.py: {line}", file=sys.stderr)
-        if unmapped:
-            print(f"stub.py: unmapped serials: {unmapped}", file=sys.stderr)
-        if gaps:
-            print(
-                f"stub.py: bison rule numbers are not contiguous: "
-                f"{len(gaps)} of 1..{numbers[-1]} carry no serial "
-                f"(first: {gaps[:10]})",
-                file=sys.stderr,
-            )
-        return EXIT_INTERNAL
-    print(
-        f"stub.py: wrote {args.out} ({len(serial_to_rule)} serials mapped to "
-        f"{len(rule_to_serial)} bison rules)"
-    )
-    return EXIT_OK
-
-
-def _read_json(path: Path):
-    import json
-
-    try:
-        return json.loads(path.read_text())
-    except OSError as exc:
-        print(f"stub.py: cannot read {path}: {exc}", file=sys.stderr)
-        raise SystemExit(EXIT_USAGE) from exc
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="stub.py", description="stub-transform a bison grammar"
     )
-    parser.add_argument("--in", dest="inp", help="input .yy grammar")
-    parser.add_argument("--out", help="output path")
-    parser.add_argument("--map", help="stub-map.json path")
-    parser.add_argument("--overrides", help="overrides/stub.toml")
+    parser.add_argument("--in", dest="inp", required=True,
+                        help="input .yy grammar (gen_yy_files.cmake's output)")
+    parser.add_argument("--out", help="output .yy path")
+    parser.add_argument("--map", help="optional stub-map.json debugging manifest")
     parser.add_argument(
         "--check",
         action="store_true",
         help="transform in memory, write nothing, exit 3 on any unrecognised construct",
     )
-    parser.add_argument(
-        "--rule-map",
-        action="store_true",
-        help="build the serial <-> bison-rule-number mapping from a parser.c",
-    )
-    parser.add_argument("--parser-c", help="bison's generated parser.c (--rule-map)")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.check:
+        if args.out or args.map:
+            parser.error("--check writes nothing; drop --out/--map")
+    elif not args.out:
+        parser.error("--in needs --out (or use --check)")
     try:
-        if args.rule_map:
-            if args.check or not (args.parser_c and args.map and args.out):
-                parser.error("--rule-map needs --parser-c, --map and --out")
-            return run_rule_map(args)
-        if not args.inp:
-            parser.error("--in is required")
-        if args.check:
-            if args.out or args.map:
-                parser.error("--check writes nothing; drop --out/--map")
-        elif not (args.out and args.map):
-            parser.error("--in needs --out and --map (or use --check)")
         return run_transform(args)
     except Unsupported as exc:
         print(f"stub.py: unsupported: {exc}", file=sys.stderr)
