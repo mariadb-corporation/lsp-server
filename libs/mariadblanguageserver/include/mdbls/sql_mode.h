@@ -56,6 +56,10 @@ uint32_t sql_mode_bits(std::string_view list);
 // mysqldump writes them.  Any other value expression (CONCAT(), REPLACE(), a
 // variable not seen before) makes the mode unknown until the next plain
 // assignment; the previous text is kept.
+// Whether `statement` contains "sql_mode" in any case: only such statements
+// can change the session mode.
+bool mentions_sql_mode(std::string_view statement);
+
 class Sql_mode_tracker {
  public:
   // `initial` is the connection's mode, also what DEFAULT restores.

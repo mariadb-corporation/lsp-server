@@ -225,13 +225,17 @@ void Sql_mode_tracker::set(std::string mode, bool known) {
   m_known = known;
 }
 
+bool mentions_sql_mode(std::string_view statement) {
+  for (size_t i = 0; i + 8 <= statement.size(); ++i) {
+    const char c = statement[i];
+    if ((c == 's' || c == 'S') && iequals(statement.substr(i, 8), "sql_mode")) return true;
+  }
+  return false;
+}
+
 bool Sql_mode_tracker::observe(std::string_view statement) {
   // Cheap rejection: only statements containing "sql_mode" can matter.
-  bool mentions = false;
-  for (size_t i = 0; i + 8 <= statement.size() && !mentions; ++i) {
-    mentions = iequals(statement.substr(i, 8), "sql_mode");
-  }
-  if (!mentions) return false;
+  if (!mentions_sql_mode(statement)) return false;
 
   std::vector<Token> t;
   tokenize(statement, m_version_id, (m_bits & k_no_backslash_escapes) == 0, &t);

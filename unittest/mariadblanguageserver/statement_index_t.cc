@@ -19,6 +19,7 @@
 
 #include <fstream>
 #include <iterator>
+#include <random>
 #include <sstream>
 #include <string>
 #include <tuple>
@@ -213,6 +214,131 @@ TEST(Statement_index, mysqldump_modes) {
   ASSERT_FALSE(index.statements().empty());
   for (const auto &m : index.modes()) EXPECT_TRUE(m.known) << m.mode;
   EXPECT_EQ("STRICT_TRANS_TABLES", index.modes()[index.statements().back().mode].mode);
+}
+
+namespace {
+
+// The index as values, so that two indexes compare regardless of the order
+// their modes and delimiters were interned in.
+struct Flat {
+  uint32_t begin, body_end, end;
+  std::string delimiter, active_delimiter, mode;
+  bool known;
+  Statement_kind kind;
+  bool mentions;
+  bool clean_after;
+  bool operator==(const Flat &) const = default;
+};
+
+void PrintTo(const Flat &f, std::ostream *os) {
+  *os << "[" << f.begin << "," << f.body_end << "," << f.end << " delim '" << f.delimiter
+      << "' active '" << f.active_delimiter << "' mode '" << f.mode << "'"
+      << (f.known ? "" : " unknown") << (f.kind == Statement_kind::comment ? " comment" : "")
+      << (f.mentions ? " mentions" : "") << (f.clean_after ? "" : " open") << "]";
+}
+
+std::vector<Flat> flatten(const Statement_index &index) {
+  std::vector<Flat> out;
+  for (const auto &s : index.statements()) {
+    const auto &m = index.modes()[s.mode];
+    out.push_back({s.begin, s.body_end, s.end, index.delimiters()[s.delimiter],
+                   index.delimiters()[s.active_delimiter], m.mode, m.known, s.kind,
+                   s.mentions_sql_mode, s.clean_after});
+  }
+  return out;
+}
+
+void check_update_matches_build(std::string text, unsigned seed, int edits) {
+  static const std::vector<std::string> pieces = {
+      ";", ";\n", "\n", " ", "x", "SELECT 1", "'", "\"", "`", "/*", "*/", "-- ", "#",
+      "DELIMITER $$\n", "\nDELIMITER ;\n", "$$", "\\G", "/*!40101 ", "/*M!100100 ",
+      "SET sql_mode='ANSI_QUOTES';\n", "SET sql_mode='NO_BACKSLASH_ESCAPES';\n",
+      "SET @m = @@sql_mode;\n", "SET sql_mode = @m;\n", "\\'", "BEGIN SELECT 1; END"};
+  std::mt19937 rng(seed);
+  const Index_options options;
+  Statement_index index = Statement_index::build(text, options);
+  for (int n = 0; n < edits; ++n) {
+    const uint32_t at = static_cast<uint32_t>(rng() % (text.size() + 1));
+    const uint32_t removed =
+        std::min<uint32_t>(static_cast<uint32_t>(rng() % 24), static_cast<uint32_t>(text.size() - at));
+    std::string inserted;
+    for (unsigned c = rng() % 3; c > 0; --c) inserted += pieces[rng() % pieces.size()];
+    const auto before = flatten(index);
+    text.replace(at, removed, inserted);
+
+    Index_splice splice;
+    const auto updated = Statement_index::update(index, text, at, removed,
+                                                 static_cast<uint32_t>(inserted.size()),
+                                                 options, &splice);
+    const auto built = Statement_index::build(text, options);
+    const auto got = flatten(updated);
+    ASSERT_EQ(got, flatten(built)) << "seed " << seed << " edit " << n << " at " << at
+                                   << " removed " << removed << " inserted '" << inserted
+                                   << "'\n" << text << "\nbefore " << testing::PrintToString(before)
+                                   << "\nsplice " << splice.first << " " << splice.removed << " "
+                                   << splice.added << " " << splice.delta;
+    ASSERT_EQ(updated.final_delimiter(), built.final_delimiter()) << "seed " << seed;
+    ASSERT_EQ(updated.open_at_end(), built.open_at_end()) << "seed " << seed;
+    ASSERT_EQ(updated.errors(), built.errors()) << "seed " << seed;
+
+    // The splice: an unchanged prefix, a replaced middle, a shifted suffix.
+    ASSERT_LE(splice.first + splice.removed, before.size());
+    ASSERT_EQ(before.size() - splice.removed + splice.added, got.size());
+    for (size_t i = 0; i < splice.first; ++i) ASSERT_EQ(got[i], before[i]);
+    for (size_t i = splice.first + splice.removed; i < before.size(); ++i) {
+      Flat f = before[i];
+      f.begin = static_cast<uint32_t>(f.begin + splice.delta);
+      f.body_end = static_cast<uint32_t>(f.body_end + splice.delta);
+      f.end = static_cast<uint32_t>(f.end + splice.delta);
+      ASSERT_EQ(got[i - splice.removed + splice.added], f);
+    }
+    index = updated;
+  }
+}
+
+}  // namespace
+
+TEST(Statement_index, update_reuses_the_unedited_statements) {
+  std::string text = "SELECT 1;\nSELECT 2;\nSELECT 3;\nSELECT 4;\n";
+  const auto old = Statement_index::build(text);
+  text.replace(17, 1, "22");  // SELECT 2 -> SELECT 22
+  Index_splice splice;
+  const auto index = Statement_index::update(old, text, 17, 1, 2, {}, &splice);
+  EXPECT_EQ(splice.first, 1u);
+  EXPECT_EQ(splice.removed, 1u);
+  EXPECT_EQ(splice.added, 1u);
+  EXPECT_EQ(splice.delta, 1);
+  ASSERT_EQ(index.statements().size(), 4u);
+  EXPECT_EQ(index.text_of(text, index.statements()[1]), "SELECT 22");
+  EXPECT_EQ(index.text_of(text, index.statements()[3]), "SELECT 4");
+}
+
+TEST(Statement_index, update_follows_a_new_delimiter_to_the_end) {
+  std::string text = "SELECT 1;\nSELECT 2;\nSELECT 3$$\nSELECT 4;\n";
+  const auto old = Statement_index::build(text);
+  text.insert(10, "DELIMITER $$\n");
+  Index_splice splice;
+  const auto index = Statement_index::update(old, text, 10, 0, 13, {}, &splice);
+  EXPECT_EQ(flatten(index), flatten(Statement_index::build(text)));
+  EXPECT_EQ(index.final_delimiter(), "$$");
+}
+
+TEST(Statement_index, update_equals_build_for_random_edits) {
+  const std::string synthetic =
+      "SELECT 1;\n-- note\nSET sql_mode='ANSI_QUOTES';\nSELECT \"a\";\n"
+      "DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; END$$\nDELIMITER ;\n"
+      "/*!40101 SET @old=@@sql_mode */;\nSET sql_mode='';\nSELECT 'a\\'b';\n"
+      "SET sql_mode=@old;\nSELECT 2\\G\nSELECT `x;y`;\n/* c */ SELECT 3;\n";
+  for (unsigned seed = 1; seed <= 300; ++seed) {
+    check_update_matches_build(synthetic, seed, 40);
+    if (HasFatalFailure()) return;
+  }
+  for (const char *name : {"sakila-schema.sql", "mysqldump_t.sql", "mrs_grammar_test.sql"}) {
+    for (unsigned seed = 1; seed <= 20; ++seed) {
+      check_update_matches_build(read_file(name), seed, 30);
+      if (HasFatalFailure()) return;
+    }
+  }
 }
 
 }  // namespace mdbls

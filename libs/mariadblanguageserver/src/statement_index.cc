@@ -106,14 +106,11 @@ uint8_t Statement_index::intern_delimiter(const std::string &delimiter) {
   return static_cast<uint8_t>(m_delimiters.size() - 1);
 }
 
-Statement_index Statement_index::build(std::string_view text, const Index_options &options) {
-  if (text.size() >= std::numeric_limits<uint32_t>::max()) {
-    throw std::length_error("text of 4 GiB or more");
-  }
-  Statement_index index;
-  Sql_mode_tracker tracker(options.sql_mode, options.version_id);
-  Statement_mode current{tracker.mode(), tracker.bits(), true};
-  uint16_t current_id = index.intern_mode(current);
+template <typename Stop>
+void Statement_index::scan(std::string_view text, uint32_t from, Sql_mode_tracker &tracker,
+                           const std::string &delimiter, Stop &&stop) {
+  Statement_mode current{tracker.mode(), tracker.bits(), tracker.known()};
+  uint16_t current_id = intern_mode(current);
 
   // \g and \G (with their format suffixes) end a statement; any other
   // backslash is an ordinary character, which also guarantees the splitter
@@ -122,45 +119,174 @@ Statement_index Statement_index::build(std::string_view text, const Index_option
     const size_t n = mysqlshdk::utils::statement_delimiter_length(s);
     return n > 0 ? std::make_pair(n, true) : std::make_pair(size_t{0}, false);
   };
-  auto error = [&index](std::string_view message) {
-    index.m_errors.emplace_back(message);
-  };
+  auto error = [this](std::string_view message) { m_errors.emplace_back(message); };
 
   Sql_splitter splitter(command, error, {});
   splitter.set_ansi_quotes((current.bits & k_ansi_quotes) != 0);
   splitter.set_no_backslash_escapes((current.bits & k_no_backslash_escapes) != 0);
   splitter.set_dollar_quoted_strings(false);  // MariaDB has no $tag$ strings
-  splitter.set_delimiter(options.delimiter);
+  splitter.set_delimiter(delimiter);
+  m_open_at_end = Open_context::none;
 
-  if (!text.empty()) {
+  if (from < text.size()) {
     // The splitter's interface takes a mutable buffer, but with the command
     // callback above it never writes to it.
-    splitter.feed(const_cast<char *>(text.data()), text.size());
+    splitter.feed(const_cast<char *>(text.data()) + from, text.size() - from);
 
     Sql_splitter::Range range;
-    std::string delimiter;
+    std::string ended_by;
     while (!splitter.eof()) {
-      if (!splitter.next_range(&range, &delimiter)) break;
+      if (!splitter.next_range(&range, &ended_by)) break;
       Statement st;
-      st.begin = static_cast<uint32_t>(range.offset);
-      st.body_end = static_cast<uint32_t>(range.offset + range.length);
-      st.end = static_cast<uint32_t>(st.body_end + delimiter.size());
-      st.delimiter = index.intern_delimiter(delimiter);
+      st.begin = static_cast<uint32_t>(from + range.offset);
+      st.body_end = static_cast<uint32_t>(st.begin + range.length);
+      st.end = static_cast<uint32_t>(st.body_end + ended_by.size());
+      st.delimiter = intern_delimiter(ended_by);
+      st.active_delimiter = intern_delimiter(splitter.delimiter());
       const std::string_view body = text.substr(st.begin, st.body_end - st.begin);
       st.kind = classify(body);
       st.mode = current_id;
-      index.m_statements.push_back(st);
+      st.mentions_sql_mode = st.kind == Statement_kind::sql && mentions_sql_mode(body);
+      st.clean_after = splitter.context() == Sql_splitter::Context::kNone;
+      m_statements.push_back(st);
 
-      if (st.kind == Statement_kind::sql && tracker.observe(body)) {
+      if (st.mentions_sql_mode && tracker.observe(body)) {
         current = {tracker.mode(), tracker.bits(), tracker.known()};
-        current_id = index.intern_mode(current);
+        current_id = intern_mode(current);
         splitter.set_ansi_quotes((current.bits & k_ansi_quotes) != 0);
         splitter.set_no_backslash_escapes((current.bits & k_no_backslash_escapes) != 0);
       }
+      if (stop(m_statements.back())) {
+        m_final_delimiter = splitter.delimiter();
+        return;
+      }
     }
-    index.m_open_at_end = open_context(splitter.context());
+    m_open_at_end = open_context(splitter.context());
   }
-  index.m_final_delimiter = splitter.delimiter();
+  m_final_delimiter = splitter.delimiter();
+}
+
+Statement_index Statement_index::build(std::string_view text, const Index_options &options) {
+  if (text.size() >= std::numeric_limits<uint32_t>::max()) {
+    throw std::length_error("text of 4 GiB or more");
+  }
+  Statement_index index;
+  Sql_mode_tracker tracker(options.sql_mode, options.version_id);
+  index.scan(text, 0, tracker, options.delimiter, [](const Statement &) { return false; });
+  return index;
+}
+
+Statement_index Statement_index::update(const Statement_index &old, std::string_view text,
+                                       uint32_t edit_begin, uint32_t removed,
+                                       uint32_t inserted, const Index_options &options,
+                                       Index_splice *splice) {
+  if (text.size() >= std::numeric_limits<uint32_t>::max()) {
+    throw std::length_error("text of 4 GiB or more");
+  }
+  const auto &olds = old.m_statements;
+  const int64_t delta = static_cast<int64_t>(inserted) - static_cast<int64_t>(removed);
+
+  // The first statement the edit can touch: the first that ends at or after
+  // the edit's start.  Text added right at a statement's end can extend it (a
+  // statement without delimiter, or \G taking a format suffix).  Splitting
+  // resumes right after the statement before it, so that a change to the
+  // blanks and DELIMITER commands between the two is seen.
+  // A statement without a delimiter ended because of what follows it (a
+  // comment before a DELIMITER command, say), which the edit may have
+  // changed, and after one that left a comment open the splitter cannot
+  // start afresh: step back over those too.
+  size_t k = static_cast<size_t>(
+      std::lower_bound(olds.begin(), olds.end(), edit_begin,
+                       [](const Statement &s, uint32_t off) { return s.end < off; }) -
+      olds.begin());
+  while (k > 0 && (olds[k - 1].delimiter == 0 || !olds[k - 1].clean_after)) --k;
+  const uint32_t from = k == 0 ? 0 : olds[k - 1].end;
+
+  Statement_index index;
+  index.m_modes = old.m_modes;
+  index.m_delimiters = old.m_delimiters;
+  index.m_statements.assign(olds.begin(), olds.begin() + static_cast<ptrdiff_t>(k));
+
+  // The state at `from`: the delimiter in force after statement k-1, and the
+  // sql_mode tracker replayed over the statements before it that may change
+  // the mode (their text is before the edit, so unchanged).
+  Sql_mode_tracker tracker(options.sql_mode, options.version_id);
+  for (size_t i = 0; i < k; ++i) {
+    if (olds[i].mentions_sql_mode) tracker.observe(old.text_of(text, olds[i]));
+  }
+  const std::string delimiter =
+      k == 0 ? options.delimiter : old.m_delimiters[olds[k - 1].active_delimiter];
+
+  // Stop at the first new statement that starts after the inserted text and
+  // equals an old one shifted by the edit, split in the same state: from
+  // there on everything is as before.
+  // A statement that mentions sql_mode may also save it in a variable that a
+  // later one restores, state the mode id does not show: once one was split
+  // again, or was removed, split to the end.
+  const uint32_t edit_end_new = edit_begin + inserted;
+  size_t realigned = olds.size();
+  bool mode_touched = false;
+  bool clean_before = true;  // the state at `from` is clean (see above)
+  index.scan(text, from, tracker, delimiter, [&](const Statement &st) {
+    const bool was_clean = clean_before;
+    clean_before = st.clean_after;
+    mode_touched = mode_touched || st.mentions_sql_mode;
+    if (mode_touched || !was_clean || st.begin < edit_end_new) return false;
+    const int64_t old_begin = static_cast<int64_t>(st.begin) - delta;
+    if (old_begin < 0) return false;
+    const auto it = std::lower_bound(
+        olds.begin() + static_cast<ptrdiff_t>(k), olds.end(), static_cast<uint32_t>(old_begin),
+        [](const Statement &s, uint32_t off) { return s.begin < off; });
+    if (it == olds.end() || it->begin != old_begin) return false;
+    const bool same = it->end - it->begin == st.end - st.begin && it->delimiter == st.delimiter &&
+                      it->active_delimiter == st.active_delimiter && it->mode == st.mode &&
+                      it->kind == st.kind && it->clean_after == st.clean_after &&
+                      (it == olds.begin() || std::prev(it)->clean_after);
+    if (!same) return false;
+    for (auto o = olds.begin() + static_cast<ptrdiff_t>(k); o != it; ++o) {
+      if (o->mentions_sql_mode) {
+        mode_touched = true;
+        return false;
+      }
+    }
+    realigned = static_cast<size_t>(it - olds.begin());
+    return true;
+  });
+
+  // Splitter messages carry no position, so they cannot be spliced: with
+  // any, old or new, index the whole text again.
+  if (!old.m_errors.empty() || !index.m_errors.empty()) {
+    if (splice != nullptr) *splice = {0, olds.size(), 0, delta};
+    Statement_index full = build(text, options);
+    if (splice != nullptr) splice->added = full.m_statements.size();
+    return full;
+  }
+
+  const size_t added_end = index.m_statements.size();  // includes the realigned one
+  if (realigned < olds.size()) {
+    // The realigned statement was split again already; keep the rest, shifted.
+    index.m_statements.reserve(index.m_statements.size() + (olds.size() - realigned - 1));
+    for (size_t i = realigned + 1; i < olds.size(); ++i) {
+      Statement s = olds[i];
+      s.begin = static_cast<uint32_t>(s.begin + delta);
+      s.body_end = static_cast<uint32_t>(s.body_end + delta);
+      s.end = static_cast<uint32_t>(s.end + delta);
+      index.m_statements.push_back(s);
+    }
+    index.m_open_at_end = old.m_open_at_end;
+    index.m_final_delimiter = old.m_final_delimiter;
+  }
+  if (splice != nullptr) {
+    splice->first = k;
+    splice->delta = delta;
+    if (realigned < olds.size()) {
+      splice->removed = realigned - k;
+      splice->added = added_end - 1 - k;
+    } else {
+      splice->removed = olds.size() - k;
+      splice->added = added_end - k;
+    }
+  }
   return index;
 }
 

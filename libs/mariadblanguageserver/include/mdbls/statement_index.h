@@ -46,6 +46,24 @@ struct Statement {
                            // in force when the statement runs
   uint8_t delimiter = 0;   // index into Statement_index::delimiters(); 0 is ""
   Statement_kind kind = Statement_kind::sql;
+  uint8_t active_delimiter = 0;  // the delimiter in force while it was split,
+                                 // also after it (DELIMITER commands come
+                                 // between statements)
+  bool mentions_sql_mode = false;  // may change the mode (Sql_mode_tracker)
+  bool clean_after = true;  // the splitter was in no string or comment after
+                            // it: a delimiter inside an unclosed /*! ... does
+                            // end a statement, but the comment stays open
+};
+
+// How an edit changed the statement list: statements [0, first) are the
+// same, the `removed` old statements from `first` on were replaced by
+// `added` new ones, and every statement after them is the same, its offsets
+// moved by `delta`.
+struct Index_splice {
+  size_t first = 0;
+  size_t removed = 0;
+  size_t added = 0;
+  int64_t delta = 0;
 };
 
 // The sql_mode a statement is lexed with.  `known` is false after a SET whose
@@ -85,6 +103,17 @@ class Statement_index {
  public:
   static Statement_index build(std::string_view text, const Index_options &options = {});
 
+  // The index of `text`, the document after replacing `removed` bytes at
+  // `edit_begin` of the text `old` was built from with `inserted` bytes.
+  // Equal to build(text, options), but only the region around the edit is
+  // split again: from the end of the statement before the edited one until
+  // a statement starts where an old one did, shifted by the edit, in the
+  // same delimiter and sql_mode.  `splice` describes the change.
+  static Statement_index update(const Statement_index &old, std::string_view text,
+                                uint32_t edit_begin, uint32_t removed, uint32_t inserted,
+                                const Index_options &options = {},
+                                Index_splice *splice = nullptr);
+
   const std::vector<Statement> &statements() const { return m_statements; }
   const std::vector<Statement_mode> &modes() const { return m_modes; }
   const std::vector<std::string> &delimiters() const { return m_delimiters; }
@@ -107,6 +136,12 @@ class Statement_index {
 
  private:
   uint16_t intern_mode(const Statement_mode &mode);
+  // Splits `text` from `from` on, with the delimiter and tracker state there,
+  // appending to m_statements; `stop` may end the scan early (it gets the
+  // statement just added) and returns true to stop.
+  template <typename Stop>
+  void scan(std::string_view text, uint32_t from, class Sql_mode_tracker &tracker,
+            const std::string &delimiter, Stop &&stop);
   uint8_t intern_delimiter(const std::string &delimiter);
 
   std::vector<Statement> m_statements;
