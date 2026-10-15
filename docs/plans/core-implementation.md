@@ -50,9 +50,9 @@ corpus archives, the analysis tooling, the Python test suite and the test-host-b
   Re-extracting against a newer tree is deferred (not part of this plan, by decision).
 - **Build gaps**: Linux only (CMake stops on macOS), needs `uv` and bash, needs a MariaDB
   source tree at configure time. §3 fixes these.
-- **`REST` is not a keyword**, so `CREATE REST SERVICE ...` is rejected by this parser,
-  usually at `REST`; `USE rest SERVICE` is rejected later. §2.2 therefore routes REST SQL
-  by prefix before the server parser runs.
+- **`REST` is not a keyword** in the server grammar, so `CREATE REST SERVICE ...` is
+  rejected by the unmerged parser, usually at `REST`. §2.2 and §3 merge the REST SQL
+  rules into the extracted grammar instead of routing to a second parser.
 
 ### 1.2 The REST SQL grammar (mariadb-shell `mysqlshdk/libs/mrs/`)
 
@@ -65,10 +65,26 @@ on the **first** error. The `.g4` files there are documentation mirrors, not cod
 `rest_sql_prefixes()` is the list of opening words the shell itself uses to route a
 statement to this parser (`CONFIGURE REST`, `CREATE [OR REPLACE] REST`, `ALTER REST`,
 `DROP REST`, `USE REST`, `SHOW [CREATE] REST`, `GRANT REST`, `REVOKE REST`, `CLONE REST`).
-The parser-only file set is `parser.yy parser.{h,cc} parser_driver.h lexer.{h,cc} ast.h
-strings.{h,cc}`; it includes no shell headers (its CMake comment says so, so it can be
-shared with a server plugin). AST positions exist only per statement (line/column of its
-first token), not per name.
+The grammar was **written to be merged into `sql_yacc.yy`**: its header says so, the rules
+between `/* START OF MERGE PART */` (line 432) and `/* END OF MERGE PART */` (line 2319)
+are written in the server grammar's style, and the rules after the marker
+(`schema_name`, `pure_identifier`, `identifier`, `qualified_identifier`,
+`text_string_literal`, `text_or_identifier`) exist only because the standalone parser has
+no server to supply them. What the merge has to bridge:
+
+- **Token names** follow the ANTLR/MySQL convention (`CREATE_SYMBOL`, `USE_SYMBOL`,
+  `VIEW_SYMBOL`), the server's follow its own (`CREATE`, `USE_SYM`, `VIEW_SYM`); of the
+  133 MRS keywords roughly half exist in the server, the rest (`REST`, `SERVICE`,
+  `CONFIGURE`, `METADATA`, `CONTENT`, `AUTH`, `APP`, `VENDOR`, `PUBLISHED`, `ENDPOINTS`,
+  `DAEMON`, ...) are new and must stay usable as identifiers.
+- **Two lexer-level tokens the server lexer does not produce**: `REST_REQUEST_PATH`
+  (`/service/schema`, used 3 times) and 19 `@ANNOTATION` tokens (`@IN`, `@NOCHECK`,
+  ..., used 46 times). In the server lexer `/` is a character token and `@name` is
+  `'@'` followed by an identifier, so both can be expressed as grammar rules over the
+  server's tokens, with the annotation word checked by name in the tree walker.
+- The AST (`ast.h`) and the hand-written lexer are not reused in a merge: the merged
+  rules are stubbed like every other action, and REST objects come from the derivation
+  tree by rule name, as the server statements do.
 
 ### 1.3 The statement splitter (mariadb-shell `mysqlshdk/libs/utils/utils_mysql_parsing.{h,cc}`)
 
@@ -181,25 +197,33 @@ Points that go beyond the pasted sketch:
 
 ### 2.2 Parsing one statement (the worker's job)
 
-```text
-if kind == RestSql  (first two words match rest_sql_prefixes(), case-insensitive)
-    parse with libmariadbparser-mrs  -> RestSqlCorrect / RestSqlIncorrect
-else
-    parse with libmariadbparser      -> ServerSqlCorrect / ServerSqlIncorrect
-```
+**One grammar.** The REST SQL rules are merged into the extracted server grammar at
+extraction time (§3, `tools/mrs_merge.py`), so libmariadbparser parses both dialects
+with the server's own lexer and one automaton. There is no second parser, no prefix
+routing and no "try the server grammar, then the REST grammar" loop: a statement is
+parsed once, and whether it is a REST statement is a property of its derivation (the
+reduction of `mrs_statement`), recorded in the index as `StatementKind::RestSql` after
+the parse. The status values stay as the pasted plan lists them, so a consumer can still
+tell "REST statement with an error" from "server statement with an error".
 
-This differs from the pasted plan in the order: the pasted plan tries the server grammar
-first and the REST grammar on failure. The prefix check is what the shell itself does to
-route statements (`Sql_handler_registry`, also called from inside its splitter), it costs a
-few byte compares, it is exact (every REST statement starts with one of eleven prefixes),
-and it saves one guaranteed-failing server parse per REST statement. The server grammar
-remains authoritative for everything else. If we later add `REST` as a keyword to
-libmariadbparser, nothing here changes.
+Why merged rather than two parsers:
+
+- one token stream and one lexer, the server's, so `/*M!` comments, backslash rules and
+  `/*!NNNNNN` gates behave identically in both dialects (the shell's standalone MRS lexer
+  leaves `/*!` comments as invalid tokens, for example);
+- one expected-token set, so keyword completion after `CREATE` offers `REST` next to
+  `TABLE`, and completion inside a REST statement works like everywhere else;
+- one tree type and one rule-name walker for the outline;
+- it is the same merged grammar a future server-side MRS plugin needs, so the merge
+  script is reusable there.
 
 The worker holds one `mdbp_parser` (created with the statement's `sql_mode`, charset
-utf8mb4, and the configured release id for `/*!NNNNNN */` comments) and one MRS driver,
-both reused across statements. Parsers whose `sql_mode` differs from the statement's are
-re-created; a small per-thread cache keyed by mode bits avoids thrashing in mixed files.
+utf8mb4, and the configured release id for `/*!NNNNNN */` comments), reused across
+statements. Parsers whose `sql_mode` differs from the statement's are re-created; a small
+per-thread cache keyed by mode bits avoids thrashing in mixed files.
+
+A build option `MDBP_WITH_MRS` (default ON) leaves the merge out, which gives the pure
+server grammar for comparison and for consumers that do not want REST SQL.
 
 ### 2.3 The thread pool
 
@@ -255,11 +279,10 @@ What a `ParseResult` holds:
 ```cpp
 struct ParseResult {
     bool accepted;
-    Diagnostic error;                    // byte range, message, expected tokens (server) / message (MRS)
+    Diagnostic error;                    // byte range, message, expected tokens
     std::vector<Token> tokens;           // name, byte span (copied out of the parser's buffers)
     std::vector<int> derivation;         // server statements only
     std::unique_ptr<SyntaxTree> tree;    // built lazily, kept only for DDL and for the cursor statement
-    std::unique_ptr<mrs::ast::Statement> rest_ast;   // REST statements
 };
 ```
 
@@ -338,8 +361,8 @@ before diagnostics are published; completion requests bypass it.
 `Catalog`: schemas → tables (columns with type, nullability, default, charset/collation,
 generated expressions; indexes; primary/unique/foreign keys; table options), views,
 triggers, routines (parameters, return type), events, sequences, users/roles (names
-only), plus REST objects from the MRS AST (services, schemas, views, procedures, content
-sets, auth apps, roles, users). Every object records the statement index that defined it
+only), plus REST objects from the merged grammar's rules (services, schemas, views,
+procedures, content sets, auth apps, roles, users), walked by rule name like the rest. Every object records the statement index that defined it
 and the byte range of its name token, so the outline links back to source and
 go-to-definition works.
 
@@ -486,8 +509,7 @@ cmake/                         copied from mariadb-shell: bootstrap_vcpkg, boots
                                bison, compiler, compile_flags, libutils, exeutils, packaging,
                                git_hooks, static_analysis
 libs/mariadbparser/            the extraction core (§1.1), plus: macOS/Windows build,
-                               rule-info API (2.3)
-libs/mariadbparser-mrs/        vendored REST SQL parser from mariadb-shell (parser.yy, lexer, ast)
+                               the REST SQL merge (tools/mrs_merge.py), rule-info API (2.3)
 libs/sqlsplitter/              vendored Sql_splitter from mariadb-shell, dependencies cut
 libs/mariadblanguageserver/    the engine library (C API in include/, C++ in src/)
 src/mariadb-lsp/               the executable: LSP transport + CLI subcommands
@@ -528,11 +550,31 @@ Build conventions, copied from the shell rather than invented:
 - Packaging: `cpack -G TGZ` per platform; the binary is meant to be installed into
   mariadb-shell's `bin/` next to `mariadb-shell`, which is where the extension's locator
   will look (§5, decision 4).
-- Vendored code from mariadb-shell (`libs/sqlsplitter`, `libs/mariadbparser-mrs`) is
-  copied by `scripts/sync_from_shell.py`, which records the shell commit in a
-  `PROVENANCE.json` next to the copy; a CI check compares the vendored files with the
-  shell tree when one is available and fails on silent drift. Local edits are confined to
-  a small patch file applied after copying, so a re-sync is mechanical.
+- **The REST SQL merge is a step of the extraction pipeline**, `tools/mrs_merge.py`,
+  run on the preprocessed `yy_mariadb.yy` before `stub.py`, with the shell's
+  `mysqlshdk/libs/mrs/parser.yy` (pinned shell commit, fingerprinted in the parser's
+  provenance like the server files) as its input. It:
+  1. takes the rules between the `MERGE PART` markers and drops the helper rules after
+     them in favour of the server's (`identifier` → `ident`, `qualified_identifier` →
+     `table_ident`, `text_string_literal` → `TEXT_STRING_sys`, ...);
+  2. renames tokens through a table (`CREATE_SYMBOL` → `CREATE`, `USE_SYMBOL` →
+     `USE_SYM`, `VIEW_SYMBOL` → `VIEW_SYM`, ...) and declares the new keywords as
+     `%token <kwd>`, adding each to `keyword_ident` (or the narrower list the merge
+     table names) so that it stays a valid identifier elsewhere, and to the lexer's
+     keyword table that `lexslice.py` emits;
+  3. replaces `REST_REQUEST_PATH` by a rule over `'/'` and identifiers and the
+     `@ANNOTATION` tokens by `'@' ident`, since the server lexer is kept untouched;
+  4. hooks `mrs_statement` into the server's `verb_clause`, and adjusts `%expect` only
+     by the number of conflicts the merge introduces, each one listed with its
+     resolution in `overrides/mrs.toml` so the count is visible regeneration debt.
+  The result is one `yy_stub.yy`; everything downstream (bison, LAC, the derivation,
+  `gen_tables.py`, the rule-name table) is unchanged. The shell's lexer, AST and driver
+  are not vendored at all.
+- Vendored code from mariadb-shell (`libs/sqlsplitter`) is copied by
+  `scripts/sync_from_shell.py`, which records the shell commit in a `PROVENANCE.json`
+  next to the copy; a CI check compares the vendored files with the shell tree when one
+  is available and fails on silent drift. Local edits are confined to a small patch file
+  applied after copying, so a re-sync is mechanical.
 
 ---
 
@@ -561,7 +603,7 @@ short record in `docs/plans/records/<phase>.md` of what was measured. Numbers be
 - `libs/sqlsplitter`: vendored `Sql_splitter`, dependencies cut, its 1,829-line gtest
   suite ported.
 - `StatementIndex` (§2.1): streaming build from a file or buffer, line table,
-  offset→line/UTF-16 column module, `sql_mode` tracking, REST-prefix classification.
+  offset→line/UTF-16 column module, `sql_mode` tracking.
 - CLI skeleton with `split` and `tokens`.
 - Done when: the index of a generated 256 MB dump builds in *target* under 2 s on this
   machine and under 400 MB RSS beyond the file itself; chunk-boundary tests pass at the
@@ -569,19 +611,30 @@ short record in `docs/plans/records/<phase>.md` of what was measured. Numbers be
   statements the shell's own splitter produces (differential test against
   `mariadb-shell` when available).
 
-### P2 — Parallel parsing pipeline and `check` (2 weeks)
+### P2 — REST SQL merge, parallel parsing pipeline and `check` (2–3 weeks)
 
-- `libs/mariadbparser-mrs`: vendored REST parser, built with `BISON_TARGET` as in the
-  shell, its `parser_t.cc` tests ported; a C wrapper returning the first error with byte
-  offsets (convert the lexer's line/column back to bytes via the line table).
+- **Merge spike first (2–3 days):** `tools/mrs_merge.py` to the point where bison
+  accepts the merged grammar; the deliverable is the conflict count and the list of
+  conflicts with the construct behind each. The known candidates are `USE REST ...`
+  against `USE <schema>`, and `GRANT REST ...` / `REVOKE REST ...` against a role named
+  `rest`, where LALR(1) has to decide on `REST` before seeing the next word. The
+  expected resolution is to prefer the shift (REST is read as the keyword after USE,
+  GRANT and REVOKE; a schema or role literally named `rest` needs backticks there),
+  recorded in `overrides/mrs.toml`. If the spike finds conflicts that cannot be resolved
+  that way, the fallback is the shell's standalone MRS parser as a second library, and
+  §2.2 is rewritten; that is decided by the spike, not now.
+- Finish the merge: token map, new keywords into the keyword lists and the lexer table,
+  request-path and annotation rules, `MDBP_WITH_MRS`, the shell's
+  `unittest/data/mrs/grammar_test.sql` as a corpus that must parse, and a test that the
+  pure-server corpus verdicts do not change with the merge switched on.
 - `ParserPool` (§2.3) with priorities, idle join, version-stale dropping; per-thread
   parser cache keyed by `sql_mode`.
 - `check` subcommand, text and JSON output, exit codes.
 - Thread-safety evidence: TSan build of the pool over a statement corpus with a planted
   race as control, N-thread differential against the single-threaded run.
-- Done when: `check` over the sakila schema, the mysql-test SQL files and the REST
-  grammar test file reports the expected verdicts (golden files); a 256 MB dump checks
-  end-to-end in *target* under 10 s on 8 cores; TSan clean.
+- Done when: `check` over the sakila schema, the mysql-test SQL files and the shell's
+  REST grammar test file reports the expected verdicts (golden files) with one parser; a
+  256 MB dump checks end-to-end in *target* under 10 s on 8 cores; TSan clean.
 
 ### P3 — Syntax tree, object model, `outline` (2–3 weeks)
 
@@ -659,8 +712,9 @@ order.
 
 ## 5. Decisions needed from you
 
-1. **REST dispatch order.** Prefix check before the server parser (§2.2) instead of
-   server-then-REST. Agree?
+1. **REST as a keyword.** With the merged grammar, `REST` is read as a keyword after
+   `USE`, `GRANT` and `REVOKE`, so a schema or role literally named `rest` needs backticks
+   in those three positions; everywhere else it stays a plain identifier. Acceptable?
 2. **Tree construction.** Offline from the derivation plus a small rule-info API (§2.4a),
    not inside the grammar actions. Agree?
 3. **MariaDB pin.** The build fetches the server at the parser's pin (`bab03b0f`,
