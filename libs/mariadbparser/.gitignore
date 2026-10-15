@@ -1,0 +1,55 @@
+# Regenerable install/build output; by product requirement, never hand-edited.
+build/
+
+# tools/sanitizers.py's sanitised build tree (ASan/UBSan objects, the
+# sanitised archive, shared object and driver binaries). A SIBLING of build/
+# rather than a directory inside it, so the sha256 manifest of build/ that
+# `make sanitizers` takes before and after has no hole carved out of it; the
+# script owns creating AND deleting it, and every fact about it is banked in
+# evidence/P9/sanitizers.json.
+build-sanitizers/
+
+# tools/memcheck.py's scratch tree (the api-smoke driver compiled in
+# both link modes against the SHIPPED library, the planted-defect control,
+# the workload inputs and valgrind's captured output). A SIBLING of build/
+# rather than a directory inside it, for the same reason build-sanitizers/ is
+# one: the sha256 manifest of build/ that `make memcheck` takes before and
+# after has no hole carved out of it. Nothing here is rebuilt FROM build/ --
+# this tree sweeps what build/ ships -- the script owns creating AND deleting
+# it, and every fact about it is banked in evidence/P9/memcheck.json.
+build-memcheck/
+
+# tools/helgrind_drd.py's scratch tree (the concurrency driver compiled
+# against the SHIPPED library, the planted-race control, the pthread_once
+# oracle, the liveness probe's scratch suppression copies, the workload input
+# and valgrind's XML reports). A SIBLING of build/ rather than a directory
+# inside it, for the same reason build-sanitizers/ and build-memcheck/ are:
+# the sha256 manifest of build/ that `make helgrind-drd` takes before and
+# after has no hole carved out of it. Nothing here is rebuilt FROM build/ --
+# helgrind and drd instrument at run time -- the script owns creating AND
+# deleting it, and every fact about it is banked in
+# evidence/P9/helgrind-drd.json.
+build-helgrind-drd/
+
+# uv-provisioned virtualenv (`uv sync --frozen`), never carried in git.
+.venv/
+
+# Python bytecode caches.
+__pycache__/
+*.pyc
+
+# pytest's cache directory.
+.pytest_cache/
+
+# corpus/ holds the bulk corpus data, mirrored from the two upstream git
+# repositories at the revisions corpus/PROVENANCE.json pins. The data is
+# committed only as the archives in corpus/archive/ (see
+# tools/corpus_archive.py), which the build unpacks into its own tree; an
+# unpacked copy here is never committed. Tracked besides the archives: the
+# pin itself, corpus/PROVENANCE.json, and corpus/PIN-VERIFY.json, the banked
+# result of `corpus_mirror.py --verify-pin` against the two upstream
+# repositories, which the test suite ties to the pin by digest.
+/corpus/*
+!/corpus/PROVENANCE.json
+!/corpus/PIN-VERIFY.json
+!/corpus/archive/

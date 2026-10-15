@@ -1,0 +1,56 @@
+{
+  "grammar": {
+    "archive_sha256": "71b5df4016bef9f0381903d1853434871a15c8216208badf4c1cada4cad4755a",
+    "members": {
+      "grammar-automaton.json": {
+        "sha256": "ce0cae21cbe3f7b9d2abd8b75d9245889f7a53168245755a8be4b5b464e2c32c",
+        "size": 10804570
+      },
+      "grammar-model.json": {
+        "sha256": "e13f08ee5188957dc59d7c2d713c9a6266fb6fd117dc09a2f079a791926940f5",
+        "size": 2156678
+      }
+    }
+  },
+  "lex-fixtures": {
+    "archive_sha256": "2ca4185719f75bb1f3876f665ed35601536ee19d668a18ae5d4e0a237ff1d69c",
+    "members": {
+      "lex-fixtures/comments.jsonl": {
+        "sha256": "94da994ad495138474eb49938aea5b65ed01219e69a40f563fa8906ccddb5ed1",
+        "size": 9392
+      },
+      "lex-fixtures/edge.jsonl": {
+        "sha256": "9f900df4ef12046677c5005b043a4fd3f8154157e220cdbdedce340a2d1a38f5",
+        "size": 5337
+      },
+      "lex-fixtures/identifiers.jsonl": {
+        "sha256": "bcf38b3752125d3f95fc7890490fdd03b4ef6cb1f331cb39c2eef993a102b577",
+        "size": 10368
+      },
+      "lex-fixtures/merge.jsonl": {
+        "sha256": "24c57a478bc5a6cf1ee83ce5845b7efc8fe5171c4c2ef285ce0ce4b7b793e1af",
+        "size": 13596
+      },
+      "lex-fixtures/numbers.jsonl": {
+        "sha256": "51a765f43de1c320b626c5b33cc79dbcbe73bb1ba6a4c1a9905c921230420007",
+        "size": 11310
+      },
+      "lex-fixtures/operators.jsonl": {
+        "sha256": "c03214cd9ac52baff8e672a54bbfbc2bbbf58ee216c660ad10aff0c3ac9ff0a1",
+        "size": 10616
+      },
+      "lex-fixtures/sqlmode.jsonl": {
+        "sha256": "fcc72a45d53208d08a768fd4a243eb9b0e575a0624bd7507f3701b86066da1c5",
+        "size": 12338
+      },
+      "lex-fixtures/strings.jsonl": {
+        "sha256": "34d3ef20c20329524e3d413aa619e690167fccc178c4654b6339323ef7872c81",
+        "size": 6850
+      },
+      "lex-fixtures/variables.jsonl": {
+        "sha256": "4fd861865f77ebb9aaafb2d98fd1971b56b019131661867ad81522238288170a",
+        "size": 4454
+      }
+    }
+  }
+}

@@ -1,0 +1,7 @@
+# Overrides applied to tools/stub.py's input before it transforms.
+# See overrides/README.md for the format and for why the entry count matters.
+#
+# This file is deliberately empty of entries: the transform handles
+# sql_yacc.yy as MariaDB ships it, so this project's regeneration debt is
+# currently zero. Adding an entry here is a decision to be argued for in the
+# commit message, not a routine step.
