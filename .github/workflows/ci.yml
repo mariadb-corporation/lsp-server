@@ -1,0 +1,93 @@
+name: MariaDB-LSP-Server-CI
+
+# Builds the language server and runs its unit tests.  Shaped like MariaDB
+# Shell's shell-ci.yml: the Linux build runs on the self-hosted devtools runner
+# (started by devtools-ci-start.yml) with ccache, a PR titled [bypass-ci] skips
+# the build, and a fork PR falls back to a GitHub-hosted runner.  A macOS job
+# runs on a GitHub-hosted runner.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  ensure-runner:
+    if: ${{ !contains(github.event.pull_request.title, '[bypass-ci]') }}
+    uses: ./.github/workflows/devtools-ci-start.yml
+    secrets: inherit
+
+  linux:
+    name: Linux build and unit tests
+    needs: ensure-runner
+    if: ${{ always() && needs.ensure-runner.result != 'failure' && needs.ensure-runner.result != 'cancelled' }}
+    runs-on: ${{ (github.event.pull_request.head.repo.fork || contains(github.event.pull_request.title, '[bypass-ci]')) && 'ubuntu-latest' || 'self-hosted' }}
+    env:
+      BUILD_DIR: bld
+      RUN_BUILD: ${{ !contains(github.event.pull_request.title, '[bypass-ci]') }}
+    steps:
+      - name: Skip CI Notice
+        if: contains(github.event.pull_request.title, '[bypass-ci]')
+        run: echo "Bypassing CI checks due to PR title tag."
+
+      - name: Checkout
+        if: env.RUN_BUILD == 'true'
+        uses: actions/checkout@v4
+
+      - name: Setup ccache
+        if: env.RUN_BUILD == 'true'
+        run: |
+          set -euo pipefail
+          if ! command -v ccache >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y ccache
+          fi
+          echo "CCACHE_DIR=$HOME/.cache/ci/ccache-lsp-server" >> "$GITHUB_ENV"
+
+      - name: Prime ccache
+        if: env.RUN_BUILD == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$CCACHE_DIR"
+          ccache --set-config=max_size=5G
+          ccache --zero-stats
+
+      - name: Configure
+        if: env.RUN_BUILD == 'true'
+        run: |
+          cmake -S . -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DWITH_VCPKG_TRIPLET=x64-linux-dynamic \
+            -DMARIADB_BOOTSTRAP_DIR="$HOME/.cache/ci/mariadb-server-lsp" \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Build
+        if: env.RUN_BUILD == 'true'
+        run: cmake --build "$BUILD_DIR" --parallel "$(nproc)"
+
+      - name: Report ccache statistics
+        if: always() && env.RUN_BUILD == 'true'
+        run: ccache --show-stats || true
+
+      - name: Unit tests
+        if: env.RUN_BUILD == 'true'
+        run: ctest --test-dir "$BUILD_DIR" --output-on-failure --parallel "$(nproc)"
+
+  macos:
+    name: macOS build and unit tests
+    if: ${{ !contains(github.event.pull_request.title, '[bypass-ci]') }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        run: brew install ninja bison
+
+      - name: Configure
+        run: |
+          cmake -S . -B bld -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DWITH_VCPKG_TRIPLET=arm64-osx \
+            -DBISON_EXECUTABLE="$(brew --prefix bison)/bin/bison"
+
+      - name: Build
+        run: cmake --build bld --parallel "$(sysctl -n hw.ncpu)"
+
+      - name: Unit tests
+        run: ctest --test-dir bld --output-on-failure --parallel "$(sysctl -n hw.ncpu)"

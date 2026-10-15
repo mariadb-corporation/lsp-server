@@ -584,6 +584,17 @@ short record in `docs/plans/records/<phase>.md` of what was measured. Numbers be
 
 ### P0 — Build foundation (1–2 weeks)
 
+**Status 2026-10-15: done on macOS, except the items marked open.** The extraction ran
+once and `generated/` is committed; the build needs bison and a compiler only; the token
+tables and rule numbers come from bison's own output at run time, so `gen_tables.py` is
+gone; the output matches the original build on all 212,332 recorded token streams; the
+client library is built from the pinned server tree as in the shell; 283 unit tests pass,
+the parser tests also under ThreadSanitizer. Open: a Linux run in CI (workflow written,
+not yet run), Windows (the lexer uses POSIX threads and the CLI POSIX I/O), the shell's
+git hooks (they enforce copyright headers the imported parser sources lack),
+`scripts/run_unit_tests.py` (ctest is used for now), and cpack packaging (P7).
+
+
 - Copy the shell's CMake modules and `vcpkg.json` shape; top-level `CMakeLists.txt`,
   `unittest/` with `run_unit_tests`, `scripts/run_unit_tests.py`, CI workflow;
   `bootstrap_mariadb.cmake` at the parser's pin, the client library linked from it.
