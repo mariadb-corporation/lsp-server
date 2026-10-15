@@ -713,6 +713,37 @@ reading objects out of statements with a syntax error.
 
 ### P4 — The language server (3 weeks)
 
+**Status 2026-10-15: done on macOS, except the items marked open.** `mariadb-lsp lsp`
+(described in `docs/language-server.md`) has the threads of the plan: reader,
+writer, event loop, request pool and parser pool. It has incremental sync with
+`Statement_index::update()`, `Line_map::update()` and per-statement verdicts that
+survive edits. Checks run as chunked passes, viewport and edit first; results from
+stale snapshots are moved through the edits or dropped. It serves diagnostics,
+document symbols, folding, selection ranges and semantic tokens (`range`, `full`,
+`full/delta`). It also handles `mariadb/documentContext`, `mariadb/viewport`,
+`mariadb/outline`, `mariadb/parseProgress` and work done progress. 17 Python e2e tests
+run under ctest. ThreadSanitizer reports no race in the unit tests or the e2e run (a
+planted race in a control program was reported).
+
+Measured on 8 cores with the 256 MB dump: range tokens for 100 lines in the middle
+arrive about 370 ms after the `didOpen` message is read (target 500 ms). An edit in
+the middle publishes its diagnostics in 4 ms median and 5 ms max over 10 edits
+(target 100 ms p95).
+
+Three changes against §2.6 got there. The text is a `std::string` changed in place
+unless a snapshot shares it, not a piece table. The transport reads the file
+descriptor, not `std::cin`, which reads a character at a time. Opening indexes in
+parallel (`build_parallel`, 775 ms to 165 ms).
+
+Open items:
+- The Windows build is ported and has a CI job, but it has not been run yet.
+- The bounded give-up region of §2.6 is not built. An edit that opens a string or
+  comment which never closes re-splits to the end of the file and rechecks what follows.
+  In a dump the splitter resynchronizes at the next quote or `*/`: 5 ms and 24 ms
+  measured.
+- Semantic tokens do not classify identifiers; that needs the catalog (P5).
+- `mariadb/refreshCatalog` is P5.
+
 - JSON-RPC over stdio (Content-Length framing), one reader thread, one writer thread,
   request workers on the pool, `$/cancelRequest`, incremental sync with the piece table,
   the edit path of §2.6 with bounded give-up regions, debounce.
