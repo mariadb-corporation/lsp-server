@@ -125,24 +125,7 @@ const char *kind_name(mdbls::Statement_kind k) {
   return k == mdbls::Statement_kind::comment ? "comment" : "sql";
 }
 
-const char *open_name(mdbls::Open_context c) {
-  switch (c) {
-    case mdbls::Open_context::none:
-      return nullptr;
-    case mdbls::Open_context::single_quote_string:
-      return "single-quoted string";
-    case mdbls::Open_context::double_quote_string:
-      return "double-quoted string";
-    case mdbls::Open_context::backtick_identifier:
-      return "backtick-quoted identifier";
-    case mdbls::Open_context::double_quote_identifier:
-      return "double-quoted identifier";
-    case mdbls::Open_context::comment:
-      return "comment";
-    default:
-      return "construct";
-  }
-}
+const char *open_name(mdbls::Open_context c) { return mdbls::open_context_name(c); }
 
 // One line of tsv: control characters shown as \n, \t, \r.
 std::string escape_tsv(std::string_view s, size_t max) {
@@ -348,58 +331,7 @@ int run_tokens(const Options &o, const std::string &text, const mdbls::Line_map 
   return k_exit_ok;
 }
 
-// A terminal name as a reader would write it: SELECT_SYM -> SELECT,
-// '(' -> (, IDENT -> identifier.  Empty for terminals nobody types.
-std::string readable_terminal(std::string_view name) {
-  if (name == "$end" || name == "END_OF_INPUT") return "end of statement";
-  if (name.size() == 3 && name.front() == '\'' && name.back() == '\'') {
-    return std::string(name.substr(1, 1));
-  }
-  if (name == "IDENT" || name == "IDENT_QUOTED" || name == "LEX_HOSTNAME") return "identifier";
-  if (name == "TEXT_STRING" || name == "NCHAR_STRING" || name == "UNDERSCORE_CHARSET")
-    return "string";
-  if (name == "NUM" || name == "LONG_NUM" || name == "ULONGLONG_NUM" || name == "DECIMAL_NUM" ||
-      name == "FLOAT_NUM" || name == "HEX_NUM" || name == "HEX_STRING" || name == "BIN_NUM")
-    return "number";
-  if (name == "PARAM_MARKER") return "?";
-  if (name.rfind("LEFT_PAREN", 0) == 0) return "(";
-  if (name == "HINT_COMMENT" || name == "ABORT_SYM" || name == "FORCE_LOOKAHEAD" ||
-      name == "IMPOSSIBLE_ACTION" || name == "error" || name.find("_ORACLE_") != std::string_view::npos)
-    return "";
-  std::string out(name);
-  for (const char *suffix : {"_SYM", "_SYMBOL"}) {
-    const std::string_view sfx(suffix);
-    if (out.size() > sfx.size() && out.compare(out.size() - sfx.size(), sfx.size(), sfx) == 0) {
-      out.resize(out.size() - sfx.size());
-      break;
-    }
-  }
-  return out;
-}
-
-std::vector<std::string> readable_expected(const std::vector<std::string> &expected) {
-  std::vector<std::string> out;
-  for (const auto &e : expected) {
-    auto r = readable_terminal(e);
-    if (!r.empty() && std::find(out.begin(), out.end(), r) == out.end()) out.push_back(r);
-  }
-  // Punctuation and word classes first, keywords after, as a reader scans them.
-  std::stable_sort(out.begin(), out.end(), [](const std::string &a, const std::string &b) {
-    const bool ka = !a.empty() && std::isupper(static_cast<unsigned char>(a[0]));
-    const bool kb = !b.empty() && std::isupper(static_cast<unsigned char>(b[0]));
-    return ka < kb;
-  });
-  return out;
-}
-
-std::string near_text(std::string_view text, const mdbls::Statement_check &c) {
-  if (c.error_length == 0) return "end of statement";
-  std::string t(text.substr(c.error_offset, std::min<uint32_t>(c.error_length, 40)));
-  for (auto &ch : t) {
-    if (ch == '\n' || ch == '\r' || ch == '\t') ch = ' ';
-  }
-  return "'" + t + (c.error_length > 40 ? "...'" : "'");
-}
+using mdbls::readable_expected;
 
 struct Check_summary {
   size_t sql_statements = 0;
@@ -476,7 +408,7 @@ Check_summary run_check(const Options &o, const std::string &file, const std::st
       w->Key("token");
       w->String(c.error_token.c_str());
       w->Key("message");
-      w->String(("syntax error near " + near_text(text, c)).c_str());
+      w->String(mdbls::syntax_error_near(text, c).c_str());
       w->Key("expected");
       w->StartArray();
       for (const auto &e : readable_expected(c.expected)) w->String(e.c_str());
@@ -528,35 +460,7 @@ Check_summary run_check(const Options &o, const std::string &file, const std::st
       *out += file + ": more errors not listed\n";
       break;
     }
-    *out += where(c.error_offset) + ": error: syntax error near " + near_text(text, c);
-    const auto expected = readable_expected(c.expected);
-    if (!expected.empty()) {
-      // Word classes and punctuation are listed; keywords too when there are
-      // few, otherwise only counted (where a name may stand, every
-      // non-reserved keyword may too).
-      std::vector<std::string> shown;
-      size_t keywords = 0;
-      for (const auto &e : expected) {
-        if (std::isupper(static_cast<unsigned char>(e[0]))) {
-          ++keywords;
-        } else {
-          shown.push_back(e);
-        }
-      }
-      if (keywords <= 8) {
-        for (const auto &e : expected)
-          if (std::isupper(static_cast<unsigned char>(e[0]))) shown.push_back(e);
-        keywords = 0;
-      }
-      *out += "; expected ";
-      for (size_t k = 0; k < shown.size(); ++k) {
-        *out += (k == 0 ? "" : (k + 1 == shown.size() && keywords == 0) ? " or " : ", ") + shown[k];
-      }
-      if (keywords > 0) {
-        *out += std::string(shown.empty() ? "" : " or ") + "one of " + std::to_string(keywords) +
-                " keywords";
-      }
-    }
+    *out += where(c.error_offset) + ": error: " + mdbls::syntax_error_message(text, c);
     *out += "\n";
   }
   if (const char *open = open_name(index.open_at_end())) {

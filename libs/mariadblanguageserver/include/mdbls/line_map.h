@@ -44,6 +44,12 @@ class Line_map {
   Line_map() : m_starts{0} {}
   explicit Line_map(std::string_view text);
 
+  // Follows an edit: `removed` bytes at `edit_begin` of the text the map was
+  // built from were replaced by `inserted` bytes, giving `text`.  Equal to
+  // Line_map(text), at the cost of the lines the edit touches plus moving
+  // the line starts after it.
+  void update(std::string_view text, uint32_t edit_begin, uint32_t removed, uint32_t inserted);
+
   uint32_t line_count() const { return static_cast<uint32_t>(m_starts.size()); }
 
   // Byte offset of the first character of `line`; the text size for a line

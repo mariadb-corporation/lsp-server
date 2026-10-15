@@ -17,6 +17,9 @@
 
 #include "mdbls/syntax_check.h"
 
+#include <algorithm>
+#include <cctype>
+
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
@@ -69,6 +72,120 @@ void check_one(std::string_view text, const Statement_index &index, const Statem
 }
 
 }  // namespace
+
+Statement_check check_statement(std::string_view text, const Statement_index &index, size_t i,
+                                Parser_cache &cache, unsigned long version_id) {
+  Statement_check out;
+  const auto &s = index.statements()[i];
+  if (s.kind == Statement_kind::sql) check_one(text, index, s, cache, version_id, &out);
+  return out;
+}
+
+std::string readable_terminal(std::string_view name) {
+  if (name == "$end" || name == "END_OF_INPUT") return "end of statement";
+  if (name.size() == 3 && name.front() == '\'' && name.back() == '\'') {
+    return std::string(name.substr(1, 1));
+  }
+  if (name == "IDENT" || name == "IDENT_QUOTED" || name == "LEX_HOSTNAME") return "identifier";
+  if (name == "TEXT_STRING" || name == "NCHAR_STRING" || name == "UNDERSCORE_CHARSET")
+    return "string";
+  if (name == "NUM" || name == "LONG_NUM" || name == "ULONGLONG_NUM" || name == "DECIMAL_NUM" ||
+      name == "FLOAT_NUM" || name == "HEX_NUM" || name == "HEX_STRING" || name == "BIN_NUM")
+    return "number";
+  if (name == "PARAM_MARKER") return "?";
+  if (name.rfind("LEFT_PAREN", 0) == 0) return "(";
+  if (name == "HINT_COMMENT" || name == "ABORT_SYM" || name == "FORCE_LOOKAHEAD" ||
+      name == "IMPOSSIBLE_ACTION" || name == "error" ||
+      name.find("_ORACLE_") != std::string_view::npos)
+    return "";
+  std::string out(name);
+  for (const char *suffix : {"_SYM", "_SYMBOL"}) {
+    const std::string_view sfx(suffix);
+    if (out.size() > sfx.size() && out.compare(out.size() - sfx.size(), sfx.size(), sfx) == 0) {
+      out.resize(out.size() - sfx.size());
+      break;
+    }
+  }
+  return out;
+}
+
+std::vector<std::string> readable_expected(const std::vector<std::string> &expected) {
+  std::vector<std::string> out;
+  for (const auto &e : expected) {
+    auto r = readable_terminal(e);
+    if (!r.empty() && std::find(out.begin(), out.end(), r) == out.end()) out.push_back(r);
+  }
+  // Punctuation and word classes first, keywords after, as a reader scans them.
+  std::stable_sort(out.begin(), out.end(), [](const std::string &a, const std::string &b) {
+    const bool ka = !a.empty() && std::isupper(static_cast<unsigned char>(a[0]));
+    const bool kb = !b.empty() && std::isupper(static_cast<unsigned char>(b[0]));
+    return ka < kb;
+  });
+  return out;
+}
+
+std::string syntax_error_near(std::string_view text, const Statement_check &check) {
+  std::string out = "syntax error near ";
+  if (check.error_length == 0) return out + "end of statement";
+  std::string t(text.substr(check.error_offset, std::min<uint32_t>(check.error_length, 40)));
+  for (auto &ch : t) {
+    if (ch == '\n' || ch == '\r' || ch == '\t') ch = ' ';
+  }
+  return out + "'" + t + (check.error_length > 40 ? "...'" : "'");
+}
+
+std::string syntax_error_message(std::string_view text, const Statement_check &check,
+                                 size_t max_keywords) {
+  std::string out = syntax_error_near(text, check);
+  const auto expected = readable_expected(check.expected);
+  if (expected.empty()) return out;
+  // Word classes and punctuation are listed; keywords too when there are
+  // few, otherwise only counted (where a name may stand, every non-reserved
+  // keyword may too).
+  std::vector<std::string> shown;
+  size_t keywords = 0;
+  for (const auto &e : expected) {
+    if (std::isupper(static_cast<unsigned char>(e[0]))) {
+      ++keywords;
+    } else {
+      shown.push_back(e);
+    }
+  }
+  if (keywords <= max_keywords) {
+    for (const auto &e : expected) {
+      if (std::isupper(static_cast<unsigned char>(e[0]))) shown.push_back(e);
+    }
+    keywords = 0;
+  }
+  out += "; expected ";
+  for (size_t k = 0; k < shown.size(); ++k) {
+    out += (k == 0 ? "" : (k + 1 == shown.size() && keywords == 0) ? " or " : ", ") + shown[k];
+  }
+  if (keywords > 0) {
+    out += std::string(shown.empty() ? "" : " or ") + "one of " + std::to_string(keywords) +
+           " keywords";
+  }
+  return out;
+}
+
+const char *open_context_name(Open_context c) {
+  switch (c) {
+    case Open_context::none:
+      return nullptr;
+    case Open_context::single_quote_string:
+      return "single-quoted string";
+    case Open_context::double_quote_string:
+      return "double-quoted string";
+    case Open_context::backtick_identifier:
+      return "backtick-quoted identifier";
+    case Open_context::double_quote_identifier:
+      return "double-quoted identifier";
+    case Open_context::comment:
+      return "comment";
+    default:
+      return "construct";
+  }
+}
 
 std::vector<Statement_check> check_statements(std::string_view text,
                                               const Statement_index &index,

@@ -55,6 +55,32 @@ struct Check_options {
   size_t chunk_bytes = 1u << 20;      // statements per job: about this much text
 };
 
+// Parses statement `i` of `index` with a parser from `cache`.  A comment
+// statement is left unchecked.
+Statement_check check_statement(std::string_view text, const Statement_index &index, size_t i,
+                                Parser_cache &cache, unsigned long version_id);
+
+// A terminal name as a reader would write it: SELECT_SYM -> SELECT, '(' ->
+// (, IDENT -> identifier.  Empty for terminals nobody types.
+std::string readable_terminal(std::string_view name);
+
+// The expected terminals of a check, readable, without duplicates:
+// punctuation and word classes first, then keywords.
+std::vector<std::string> readable_expected(const std::vector<std::string> &expected);
+
+// "syntax error near 'FORM'", or "... near end of statement".
+std::string syntax_error_near(std::string_view text, const Statement_check &check);
+
+// "syntax error near 'FORM'; expected identifier or one of 12 keywords":
+// the message for a syntax_error check of a statement in `text`.  Keywords
+// are listed when there are at most `max_keywords` of them, else counted.
+std::string syntax_error_message(std::string_view text, const Statement_check &check,
+                                 size_t max_keywords = 8);
+
+// "single-quoted string", "comment", ...: what an unterminated construct at
+// the end of a text is called; nullptr for none.
+const char *open_context_name(Open_context c);
+
 // Parses every SQL statement of `index` on `pool` and returns one entry per
 // statement of the index, comments included (left unchecked).  `text` must
 // outlive the call; the call waits for its own jobs.

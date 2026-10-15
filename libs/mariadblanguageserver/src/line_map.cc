@@ -69,6 +69,34 @@ Line_map::Line_map(std::string_view text) {
   }
 }
 
+void Line_map::update(std::string_view text, uint32_t edit_begin, uint32_t removed,
+                      uint32_t inserted) {
+  if (text.size() >= std::numeric_limits<uint32_t>::max()) {
+    throw std::length_error("text of 4 GiB or more");
+  }
+  // Whether a line starts at `s` depends on the bytes at s-1 and s only (a
+  // "\r" at s-1 starts a line unless "\n" follows), so the starts in
+  // [edit_begin, edit_begin + removed] of the old text are replaced by those
+  // in [edit_begin, edit_begin + inserted] of the new one.
+  const int64_t delta = static_cast<int64_t>(inserted) - static_cast<int64_t>(removed);
+  const uint32_t lo = std::max<uint32_t>(edit_begin, 1);
+  const auto first = std::lower_bound(m_starts.begin(), m_starts.end(), lo);
+  const auto last = std::upper_bound(first, m_starts.end(), edit_begin + removed);
+  for (auto it = last; it != m_starts.end(); ++it) *it = static_cast<uint32_t>(*it + delta);
+
+  std::vector<uint32_t> fresh;
+  const uint32_t size = static_cast<uint32_t>(text.size());
+  for (uint32_t pos = lo; pos <= edit_begin + inserted && pos <= size; ++pos) {
+    const char prev = text[pos - 1];
+    if (prev == '\n' || (prev == '\r' && (pos == size || text[pos] != '\n'))) {
+      fresh.push_back(pos);
+    }
+  }
+  const auto at = m_starts.erase(first, last);
+  m_starts.insert(at, fresh.begin(), fresh.end());
+  m_size = size;
+}
+
 uint32_t Line_map::line_start(uint32_t line) const {
   return line < m_starts.size() ? m_starts[line] : m_size;
 }

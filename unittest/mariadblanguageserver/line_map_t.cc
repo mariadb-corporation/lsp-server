@@ -17,6 +17,7 @@
 
 #include <gtest/gtest.h>
 
+#include <random>
 #include <string>
 
 #include "mdbls/line_map.h"
@@ -110,6 +111,31 @@ TEST(Line_map, position_after_matches_position) {
   }
   // Going backwards falls back to position().
   EXPECT_EQ(map.position(text, 2), map.position_after(text, 20, map.position(text, 20), 2));
+}
+
+TEST(Line_map, update_equals_rebuild) {
+  static const char *const pieces[] = {"\n", "\r", "\r\n", "a", "bc", "\xc3\xa9", "\n\n", ""};
+  for (unsigned seed = 1; seed <= 2000; ++seed) {
+    std::mt19937 rng(seed);
+    std::string text;
+    for (int k = rng() % 20; k > 0; --k) text += pieces[rng() % 8];
+    Line_map lines(text);
+    for (int n = 0; n < 30; ++n) {
+      const uint32_t at = static_cast<uint32_t>(rng() % (text.size() + 1));
+      const uint32_t removed = std::min<uint32_t>(static_cast<uint32_t>(rng() % 4),
+                                                  static_cast<uint32_t>(text.size() - at));
+      std::string inserted;
+      for (int k = rng() % 3; k > 0; --k) inserted += pieces[rng() % 8];
+      text.replace(at, removed, inserted);
+      lines.update(text, at, removed, static_cast<uint32_t>(inserted.size()));
+      const Line_map fresh(text);
+      ASSERT_EQ(lines.line_count(), fresh.line_count()) << "seed " << seed << " edit " << n;
+      for (uint32_t l = 0; l < fresh.line_count(); ++l) {
+        ASSERT_EQ(lines.line_start(l), fresh.line_start(l)) << "seed " << seed << " edit " << n;
+      }
+      ASSERT_EQ(lines.line_start(fresh.line_count()), text.size());
+    }
+  }
 }
 
 }  // namespace mdbls

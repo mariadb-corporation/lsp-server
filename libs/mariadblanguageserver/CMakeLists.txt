@@ -19,8 +19,10 @@
 add_library(mariadblanguageserver STATIC
   src/catalog.cc
   src/charset.cc
+  src/document.cc
   src/line_map.cc
   src/outline.cc
+  src/semantic_tokens.cc
   src/sql_mode.cc
   src/statement_index.cc
   src/parser_pool.cc
