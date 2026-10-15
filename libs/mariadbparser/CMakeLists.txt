@@ -95,12 +95,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 add_library(mariadbparser::shared ALIAS mariadbparser_shared)
 
-# The command-line tool: verdicts, tokens and derivations for one statement or
-# a JSONL batch.  POSIX only for now (getline, getrusage).
-if(NOT WIN32)
-  add_executable(mdbparse src/mdbparse.c)
-  target_include_directories(mdbparse PRIVATE src "${MDBP_BISON_DIR}" "${MDBP_GENERATED_DIR}")
-  target_link_libraries(mdbparse PRIVATE mariadbparser)
-  set_target_properties(mdbparse PROPERTIES C_STANDARD 11 LINKER_LANGUAGE CXX)
-  add_dependencies(mdbparse mariadbparser_bison)
+# mdbparse: a command-line front end for inspecting verdicts, tokens and
+# derivations of single statements, built on the public API only.
+find_package(RapidJSON CONFIG QUIET)
+if(RapidJSON_FOUND)
+  add_executable(mdbparse src/mdbparse.cc)
+  target_link_libraries(mdbparse PRIVATE mariadbparser rapidjson)
+  if(COMMAND mdbls_target_warnings)
+    mdbls_target_warnings(mdbparse)
+  endif()
+else()
+  message(STATUS "RapidJSON not found: mdbparse is not built")
 endif()

@@ -831,25 +831,6 @@ extern "C" SELECT_LEX *mdbp_lex_select(mdbp_lexer *lx)
   return lx == NULL ? NULL : &lx->sel;
 }
 
-/* DECLARED parser context, for a run with no parser in it (src/mdbparse.c's
- * three static `--valid` modes).  `place` is an `enum enum_parsing_place`
- * value; anything outside the enum is refused with -1 rather than stored, so
- * a caller cannot smuggle in a number the sliced lexer would compare against
- * nothing.  0 on success.
- *
- * It writes the same field a lifted action would, before the first token is
- * scanned -- which is the honest shape of the claim such a test makes: "with
- * the parser in THIS state, the lexer must produce THIS stream".  The sliced
- * lexer then SPENDS it exactly as it does in a real parse; nothing here
- * re-arms it. */
-extern "C" int mdbp_lex_set_parsing_place(mdbp_lexer *lx, int place)
-{
-  if (lx == NULL || place < 0 || place >= (int) PARSING_PLACE_SIZE)
-    return -1;
-  lx->sel.parsing_place= (enum enum_parsing_place) place;
-  return 0;
-}
-
 /* The comment gate's release id, for this lexer only (plan
  * `tokeniser-entry-points.md` P3).  It writes the field src/lexshim.h's
  * MYSQL_VERSION_ID names, which the sliced lex_one_token() reads through its
@@ -863,15 +844,6 @@ extern "C" int mdbp_lex_set_version_id(mdbp_lexer *lx, unsigned long id)
     return -1;
   lx->thd.variables.mdbp_version_id= id;
   return 0;
-}
-
-extern "C" void mdbp_lex_state_maps(const unsigned char **state_map,
-                                    const unsigned char **ident_map)
-{
-  if (state_map != NULL)
-    *state_map= mdbp_cs_utf8mb4.state_map;
-  if (ident_map != NULL)
-    *ident_map= mdbp_cs_utf8mb4.ident_map;
 }
 
 /* The second half of thd.md row 5's `valid()` predicate for sql_lex.cc:2004.

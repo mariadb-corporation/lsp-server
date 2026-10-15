@@ -56,14 +56,6 @@ const char *mdbp_lex_eof_token(const mdbp_lexer *lx);
  * mdbp_lex_free(); NULL for a NULL lexer. */
 SELECT_LEX *mdbp_lex_select(mdbp_lexer *lx);
 
-/* DECLARES the parser context for a run with NO PARSER IN IT -- the three
- * static `--valid` modes, which lex a record and hand the vector to
- * mdbp_parse_tokens() afterwards, so nothing can write the field.  `place` is
- * an `enum enum_parsing_place` value (src/stub.h); a value outside the enum
- * is refused (-1) rather than stored.  0 on success.  Call it after
- * mdbp_lex_new() and before the first mdbp_lex_next(): the sliced lexer
- * SPENDS the value the same way it does in a real parse. */
-int mdbp_lex_set_parsing_place(mdbp_lexer *lx, int place);
 
 /* THE COMMENT GATE'S RELEASE ID (plan `tokeniser-entry-points.md` P3).
  *
@@ -94,13 +86,10 @@ int mdbp_lex_set_parsing_place(mdbp_lexer *lx, int place);
 /* Stores `id` as this lexer's release id.  0 on success; -1, with nothing
  * stored, for a NULL lexer or an id outside MDBP_LEX_VERSION_ID_MIN..
  * MDBP_LEX_VERSION_ID_MAX.  Call it after mdbp_lex_new() and before the first
- * mdbp_lex_next(), as mdbp_lex_set_parsing_place() is called: the id then
+ * mdbp_lex_next(): the id then
  * governs every versioned comment of the stream. */
 int mdbp_lex_set_version_id(mdbp_lexer *lx, unsigned long id);
 void mdbp_lex_free(mdbp_lexer *lx);
-/* The two 256-byte tables the lexer is actually using. */
-void mdbp_lex_state_maps(const unsigned char **state_map,
-                         const unsigned char **ident_map);
 
 /* NOT NUL-TERMINATED.  `out->text` points at `byte_start` inside the lexer's
  * own copy of the query, so its length is `byte_end - byte_start` and it is

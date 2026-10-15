@@ -40,24 +40,7 @@ int mdbp_token_number(const char *name);
  * own undefined-token kind. */
 const char *mdbp_symbol_name(int kind);
 
-/* Serial (the action's position in grammar file order, 0-based) -> bison rule
- * number, or -1.  Every rule carries exactly one action, in order, so this is
- * serial + 1. */
-int mdbp_rule_for_serial(int serial);
 
-size_t mdbp_terminal_count(void);
-size_t mdbp_serial_count(void);
-
-/* --- src/mdbp_runtime.c (parsing_place names, task P1.1) ----------------- */
-
-/* `enum enum_parsing_place` (src/stub.h) <-> its own spelling, so the CLI's
- * --parsing-place and any test can name a value without a second copy of the
- * list.  `mdbp_parsing_place_by_name()` answers -1 for a name the enum does
- * not carry; `mdbp_parsing_place_name()` answers NULL for a value outside it.
- * PARSING_PLACE_SIZE is a count and is neither named nor accepted. */
-int mdbp_parsing_place_by_name(const char *name);
-const char *mdbp_parsing_place_name(int place);
-size_t mdbp_parsing_place_count(void);
 
 /* --- src/mdbp_runtime.c (the context) ------------------------------------ */
 

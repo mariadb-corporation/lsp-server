@@ -128,59 +128,6 @@ const char *mdbp_symbol_name(int kind)
     return mdbp_kind_names[kind];
 }
 
-int mdbp_rule_for_serial(int serial)
-{
-    if (serial < 0 || serial >= mdbp_yy_nrules() - 1) {
-        return -1;
-    }
-    return serial + 1;
-}
-
-size_t mdbp_terminal_count(void)
-{
-    mdbp_tables();
-    return mdbp_nterminals;
-}
-
-size_t mdbp_serial_count(void)
-{
-    return (size_t) (mdbp_yy_nrules() - 1);
-}
-
-static const char *const mdbp_parsing_place_names[] = {
-    "NO_MATTER", "IN_HAVING", "SELECT_LIST", "IN_WHERE", "IN_ON",
-    "IN_GROUP_BY", "IN_ORDER_BY", "IN_UPDATE_ON_DUP_KEY", "IN_PART_FUNC",
-    "BEFORE_OPT_LIST", "AFTER_LIST", "FOR_LOOP_BOUND", "IN_RETURNING",
-};
-
-const char *mdbp_parsing_place_name(int place)
-{
-    if (place < 0 || place >= (int) PARSING_PLACE_SIZE) {
-        return NULL;
-    }
-    return mdbp_parsing_place_names[place];
-}
-
-int mdbp_parsing_place_by_name(const char *name)
-{
-    int place;
-
-    if (name == NULL) {
-        return -1;
-    }
-    for (place = 0; place < (int) PARSING_PLACE_SIZE; place++) {
-        if (strcmp(name, mdbp_parsing_place_names[place]) == 0) {
-            return place;
-        }
-    }
-    return -1;
-}
-
-size_t mdbp_parsing_place_count(void)
-{
-    return (size_t) PARSING_PLACE_SIZE;
-}
-
 /* --- the context --------------------------------------------------------- */
 
 void mdbp_ctx_init(mdbp_ctx *ctx, const mdbp_token *tokens, size_t ntokens,
