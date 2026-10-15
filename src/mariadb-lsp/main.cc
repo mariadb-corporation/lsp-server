@@ -45,6 +45,7 @@
 #include "mdbls/parser_pool.h"
 #include "mdbls/statement_index.h"
 #include "mdbls/syntax_check.h"
+#include "mdbls/syntax_tree.h"
 #include "mdbparse.h"
 
 namespace {
@@ -62,6 +63,7 @@ const char *const k_usage =
     "           1 when there are\n"
     "  split    list the statements of a SQL file\n"
     "  tokens   list the tokens of every statement of a SQL file\n"
+    "  tree     print the parse tree of every statement of a SQL file\n"
     "\n"
     "options:\n"
     "  --sql-mode LIST    the sql_mode at the start of the file; SET sql_mode in\n"
@@ -608,6 +610,47 @@ bool to_utf8(const Options &o, const std::string &file, std::string *text,
   return true;
 }
 
+// The parse tree of every statement, indented, tokens with their text.
+int run_tree(const Options &o, const std::string &text, const mdbls::Line_map &lines,
+             const mdbls::Statement_index &index) {
+  mdbls::Parser_cache cache;
+  std::string out;
+  for (const auto &s : index.statements()) {
+    if (s.kind != mdbls::Statement_kind::sql) continue;
+    const auto pos = lines.position(text, s.begin);
+    out += "-- statement at " + std::to_string(pos.line + 1) + ":" +
+           std::to_string(pos.character + 1) + "\n";
+    mdbp_parser *p = cache.get(index.modes()[s.mode].mode, o.index.version_id, true);
+    if (p == nullptr) {
+      out += "(not parsed: sql_mode " + index.modes()[s.mode].mode + " is not supported)\n";
+      continue;
+    }
+    const auto sql = index.text_of(text, s);
+    mdbp_result r;
+    mdbp_parse_sql(p, sql.data(), sql.size(), &r);
+    const auto tree = mdbls::Syntax_tree::build(p, r, s.begin);
+    if (!r.accepted) out += "(rejected; the trees built before the error follow)\n";
+    std::vector<std::pair<uint32_t, int>> todo;
+    for (auto it = tree.roots().rbegin(); it != tree.roots().rend(); ++it) todo.push_back({*it, 0});
+    while (!todo.empty()) {
+      const auto [n, depth] = todo.back();
+      todo.pop_back();
+      out.append(static_cast<size_t>(depth) * 2, ' ');
+      out += tree.name(n);
+      if (tree.is_token(n)) out += "  " + escape_tsv(tree.text(text, n), 60);
+      out += "\n";
+      const auto ch = tree.children(n);
+      for (auto it = ch.rbegin(); it != ch.rend(); ++it) todo.push_back({*it, depth + 1});
+    }
+    if (out.size() > (1u << 20)) {
+      std::cout << out;
+      out.clear();
+    }
+  }
+  std::cout << out;
+  return k_exit_ok;
+}
+
 std::optional<Options> parse_args(int argc, char **argv) {
   Options o;
   for (int i = 1; i < argc; ++i) {
@@ -681,7 +724,8 @@ std::optional<Options> parse_args(int argc, char **argv) {
       return std::nullopt;
     }
   }
-  if (o.command != "split" && o.command != "tokens" && o.command != "check") {
+  if (o.command != "split" && o.command != "tokens" && o.command != "check" &&
+      o.command != "tree") {
     std::cerr << (o.command.empty() ? std::string("mariadb-lsp: no command given\n")
                                     : "mariadb-lsp: unknown command " + o.command + "\n")
               << k_usage;
@@ -749,6 +793,8 @@ int main(int argc, char **argv) {
       rc = run_split(*o, text, lines, index);
     } else if (o->command == "tokens") {
       rc = run_tokens(*o, text, lines, index);
+    } else if (o->command == "tree") {
+      rc = run_tree(*o, text, lines, index);
     } else {
       std::string out;
       const auto sum = run_check(*o, file, text, lines, index, *pool, &out,

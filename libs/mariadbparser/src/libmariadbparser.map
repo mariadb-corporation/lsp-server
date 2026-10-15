@@ -66,3 +66,15 @@ MDBPARSER_2.2 {
     global:
         mdbp_lex_sql_prefix;
 } MDBPARSER_2.1;
+
+MDBPARSER_2.3 {
+    global:
+        mdbp_derivation_depths;
+        mdbp_grammar_symbol_count;
+        mdbp_grammar_terminal_count;
+        mdbp_grammar_symbol_name;
+        mdbp_grammar_rule_count;
+        mdbp_grammar_rule_lhs;
+        mdbp_grammar_rule_length;
+        mdbp_grammar_token_symbol;
+} MDBPARSER_2.2;

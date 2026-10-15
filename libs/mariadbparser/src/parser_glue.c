@@ -210,6 +210,62 @@ int mdbp_yy_translate(int token_number)
     return (int) YYTRANSLATE(token_number);
 }
 
+/* --- the grammar, for building a parse tree (public, since 2.3) ---------- */
+
+int mdbp_grammar_symbol_count(void)
+{
+    return (YYNTOKENS + YYNNTS);
+}
+
+int mdbp_grammar_terminal_count(void)
+{
+    return YYNTOKENS;
+}
+
+const char *mdbp_grammar_symbol_name(int symbol)
+{
+    if (symbol < 0 || symbol >= (YYNTOKENS + YYNNTS)) {
+        return NULL;
+    }
+    if (symbol < YYNTOKENS) {
+        /* the spelling the rest of the API uses: "$end", "SELECT_SYM", "'('" */
+        const char *name = mdbp_symbol_name(symbol);
+        return name != NULL ? name : "$undefined";
+    }
+    return yytname[symbol];
+}
+
+int mdbp_grammar_rule_count(void)
+{
+    return YYNRULES;
+}
+
+/* Bison's yyr1[]/yyr2[] are indexed by rule + 1 (the `yyn` of its yacc.c
+ * skeleton); rule 0 is $accept. */
+int mdbp_grammar_rule_lhs(int rule)
+{
+    if (rule < 0 || rule >= YYNRULES) {
+        return -1;
+    }
+    return yyr1[rule + 1];
+}
+
+int mdbp_grammar_rule_length(int rule)
+{
+    if (rule < 0 || rule >= YYNRULES) {
+        return -1;
+    }
+    return yyr2[rule + 1];
+}
+
+int mdbp_grammar_token_symbol(int token_number)
+{
+    if (token_number < 0) {
+        return -1;
+    }
+    return (int) YYTRANSLATE(token_number);
+}
+
 const char *mdbp_yy_tname(int kind)
 {
     if (kind < 0 || kind >= YYNTOKENS) {

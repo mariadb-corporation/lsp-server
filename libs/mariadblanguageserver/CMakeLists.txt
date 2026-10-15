@@ -22,7 +22,8 @@ add_library(mariadblanguageserver STATIC
   src/sql_mode.cc
   src/statement_index.cc
   src/parser_pool.cc
-  src/syntax_check.cc)
+  src/syntax_check.cc
+  src/syntax_tree.cc)
 target_include_directories(mariadblanguageserver PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 find_package(Threads REQUIRED)
 target_link_libraries(mariadblanguageserver PUBLIC sqlsplitter mariadbparser Threads::Threads)

@@ -179,9 +179,18 @@ extern "C" {
  *
  * at compile time, and one that loads the library at run time looks the
  * symbol up rather than assuming it, because a 2.1 library does not have
- * it. */
+ * it.
+ *
+ * VERSION 2.3 ADDED EIGHT FUNCTIONS for building a parse tree from a
+ * derivation: mdbp_derivation_depths() and the mdbp_grammar_*() accessors
+ * below.  Nothing existing changed meaning and no struct grew, so the soname
+ * stays libmariadbparser.so.2; the new symbols carry MDBPARSER_2.3.  A caller
+ * that needs them tests
+ *
+ *     #if MDBP_VERSION_MAJOR == 2 && MDBP_VERSION_MINOR >= 3
+ */
 #define MDBP_VERSION_MAJOR 2
-#define MDBP_VERSION_MINOR 2
+#define MDBP_VERSION_MINOR 3
 #define MDBP_VERSION_PATCH 0
 
 const char *mdbp_version_string(void);
@@ -623,6 +632,54 @@ mdbp_status mdbp_parser_set_version_id(mdbp_parser *p, unsigned long version_id)
  * does not write that number down -- ask a new parser for it, and it cannot
  * go stale.  0 for a NULL parser, which is never a release id. */
 unsigned long mdbp_parser_version_id(const mdbp_parser *p);
+
+/* ---------------------------------------------------------------------------
+ * The parse tree (since 2.3)
+ * ---------------------------------------------------------------------------
+ * A derivation lists the rules in reduce order.  Together with the stack
+ * depth at each reduction and the grammar's rules it gives the whole tree:
+ *
+ *     stack = []                       (nodes; a token is a leaf)
+ *     next  = 0                        (index into the result's tokens)
+ *     for each i:
+ *         while size(stack) < depths[i]: push leaf(tokens[next++])
+ *         n = mdbp_grammar_rule_length(derivation[i])
+ *         pop n nodes, push node(derivation[i]) with them as children
+ *
+ * When the statement was accepted, `stack` ends holding the start symbol
+ * (`query`) whose leaves are every token, END_OF_INPUT included.  When it was
+ * rejected, `stack` holds what had been built before the error.
+ *
+ * Symbols are bison's: 0 .. mdbp_grammar_terminal_count()-1 are terminals,
+ * the rest up to mdbp_grammar_symbol_count()-1 nonterminals.  A token's symbol
+ * is mdbp_grammar_token_symbol(token.token_number).  Rule 0 is $accept, which
+ * is never reduced.  The grammar functions read constant tables and may be
+ * called from any thread at any time. */
+
+/* depths[i] is the number of symbols on the parser's stack when
+ * derivation[i] was reduced, that rule's right-hand side included.  It has
+ * derivation_len entries and is owned by the parser like the derivation:
+ * valid until the next call that fills a result on `p`.  NULL when the last
+ * result has no derivation (want_derivation 0, a lex-only call, or nothing
+ * reduced). */
+const int *mdbp_derivation_depths(const mdbp_parser *p);
+
+int mdbp_grammar_symbol_count(void);
+int mdbp_grammar_terminal_count(void);
+
+/* A terminal's name as the rest of this API spells it ("$end", "SELECT_SYM",
+ * "'('"), or a nonterminal's ("select_item", "$@12" for a mid-rule action).
+ * NULL outside 0 .. mdbp_grammar_symbol_count()-1. */
+const char *mdbp_grammar_symbol_name(int symbol);
+
+int mdbp_grammar_rule_count(void);
+/* The rule's left-hand side, a nonterminal symbol; -1 for no such rule. */
+int mdbp_grammar_rule_lhs(int rule);
+/* The number of symbols on the rule's right-hand side; -1 for no such rule. */
+int mdbp_grammar_rule_length(int rule);
+/* The terminal symbol a token number stands for; the undefined-token symbol
+ * for a number the grammar does not declare, -1 for a negative number. */
+int mdbp_grammar_token_symbol(int token_number);
 
 #ifdef __cplusplus
 }

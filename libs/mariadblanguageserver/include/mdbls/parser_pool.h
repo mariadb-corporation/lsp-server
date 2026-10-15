@@ -27,6 +27,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -46,7 +47,9 @@ class Parser_cache {
 
   // The parser for this mode and release id, created on first use; nullptr
   // when the parser refuses the mode (ORACLE, MSSQL) or the id.
-  mdbp_parser *get(const std::string &sql_mode, unsigned long version_id);
+  // `derivation`: the parser records derivations, which syntax trees need.
+  mdbp_parser *get(const std::string &sql_mode, unsigned long version_id,
+                   bool derivation = false);
 
   size_t size() const { return m_parsers.size(); }
 
@@ -54,7 +57,7 @@ class Parser_cache {
   struct Deleter {
     void operator()(mdbp_parser *p) const;
   };
-  std::map<std::pair<std::string, unsigned long>, std::unique_ptr<mdbp_parser, Deleter>>
+  std::map<std::tuple<std::string, unsigned long, bool>, std::unique_ptr<mdbp_parser, Deleter>>
       m_parsers;
 };
 

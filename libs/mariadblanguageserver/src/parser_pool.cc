@@ -30,14 +30,15 @@ Parser_cache::~Parser_cache() = default;
 
 void Parser_cache::Deleter::operator()(mdbp_parser *p) const { mdbp_parser_free(p); }
 
-mdbp_parser *Parser_cache::get(const std::string &sql_mode, unsigned long version_id) {
-  const auto key = std::make_pair(sql_mode, version_id);
+mdbp_parser *Parser_cache::get(const std::string &sql_mode, unsigned long version_id,
+                               bool derivation) {
+  const auto key = std::make_tuple(sql_mode, version_id, derivation);
   auto it = m_parsers.find(key);
   if (it == m_parsers.end()) {
     mdbp_options opts;
     mdbp_options_init(&opts);
     opts.sql_mode = sql_mode.c_str();
-    opts.want_derivation = 0;
+    opts.want_derivation = derivation ? 1 : 0;
     std::unique_ptr<mdbp_parser, Deleter> p{mdbp_parser_new(&opts)};
     if (p && mdbp_parser_set_version_id(p.get(), version_id) != MDBP_OK) p.reset();
     it = m_parsers.emplace(key, std::move(p)).first;

@@ -134,6 +134,11 @@ typedef struct mdbp_ctx {
      * length is bounded only by the input's, so a fixed cap would be a
      * defect. */
     int *derivation;
+    /* derivation_depth[i]: symbols on the parser's stack when derivation[i]
+     * was reduced, the rule's own right-hand side included.  Same length
+     * and capacity as `derivation`; lets a caller see how many tokens were
+     * shifted between two reductions, and so rebuild the parse tree. */
+    int *derivation_depth;
     size_t nderivation;
     size_t derivation_cap;
     int want_derivation;
@@ -166,13 +171,15 @@ typedef struct mdbp_ctx {
 
 /* Appends bison rule number `rule` to ctx->derivation.  Called once per
  * reduction, in reduce order, which is exactly what a derivation is. */
-void mdbp_reduce(mdbp_ctx *ctx, int rule);
+void mdbp_reduce(mdbp_ctx *ctx, int rule, int depth);
 
 /* Inside a bison action `yyn` is the reduced rule's number plus one (bison's
  * yacc.c skeleton numbers its `case` labels that way), so the derivation
- * records bison's own rule number with no table in between.  The serial `n`
+ * records bison's own rule number with no table in between, and the stack
+ * depth (yyssp - yyss: the symbols on the stack, the rule's right-hand side
+ * still on it, because bison runs an action before popping).  The serial `n`
  * that tools/stub.py writes stays in the grammar text as a reader's aid. */
-#define MDBP_R(n) ((void) (n), mdbp_reduce(ctx, yyn - 1))
+#define MDBP_R(n) ((void) (n), mdbp_reduce(ctx, yyn - 1, (int) (yyssp - yyss)))
 
 /* YYSTYPE is `int`; see the trap above for why this is not spelled YYSTYPE. */
 int yylex(int *lvalp, mdbp_ctx *ctx);

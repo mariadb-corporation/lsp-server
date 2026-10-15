@@ -184,6 +184,8 @@ void mdbp_ctx_free(mdbp_ctx *ctx)
 {
     free(ctx->derivation);
     ctx->derivation = NULL;
+    free(ctx->derivation_depth);
+    ctx->derivation_depth = NULL;
     ctx->derivation_cap = 0;
     ctx->nderivation = 0;
     free((void *) ctx->expected);
@@ -193,7 +195,7 @@ void mdbp_ctx_free(mdbp_ctx *ctx)
 
 /* --- the derivation ------------------------------------------------------ */
 
-void mdbp_reduce(mdbp_ctx *ctx, int rule)
+void mdbp_reduce(mdbp_ctx *ctx, int rule, int depth)
 {
     if (!ctx->want_derivation || ctx->internal_error) {
         return;
@@ -208,13 +210,21 @@ void mdbp_reduce(mdbp_ctx *ctx, int rule)
     if (ctx->nderivation == ctx->derivation_cap) {
         size_t want = ctx->derivation_cap ? ctx->derivation_cap * 2 : 256;
         int *grown = (int *) realloc(ctx->derivation, want * sizeof *grown);
+        int *grown_depth;
         if (grown == NULL) {
             ctx->internal_error = 1;
             return;
         }
         ctx->derivation = grown;
+        grown_depth = (int *) realloc(ctx->derivation_depth, want * sizeof *grown_depth);
+        if (grown_depth == NULL) {
+            ctx->internal_error = 1;
+            return;
+        }
+        ctx->derivation_depth = grown_depth;
         ctx->derivation_cap = want;
     }
+    ctx->derivation_depth[ctx->nderivation] = depth;
     ctx->derivation[ctx->nderivation++] = rule;
 }
 

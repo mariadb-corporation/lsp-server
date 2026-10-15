@@ -67,6 +67,10 @@ struct mdbp_parser {
     /* The lexer of the last mdbp_parse_sql(), mdbp_lex_sql() or
      * mdbp_lex_sql_prefix(); see the file comment. */
     mdbp_lexer *lx;
+
+    /* The stack depth per reduction of the last result's derivation, or
+     * NULL; see mdbp_derivation_depths(). */
+    const int *depths;
 };
 
 const char *mdbp_version_string(void)
@@ -458,6 +462,7 @@ static mdbp_status result_from_parse(mdbp_parser *p, int prc, mdbp_result *out)
     out->tokens_consumed = ctx->cursor;
     out->derivation = ctx->nderivation > 0 ? ctx->derivation : NULL;
     out->derivation_len = ctx->nderivation;
+    p->depths = ctx->nderivation > 0 ? ctx->derivation_depth : NULL;
 
     if (ctx->internal_error || prc == 2) {
         /* No verdict: the automaton (or its derivation buffer) ran out of
@@ -508,6 +513,9 @@ mdbp_status mdbp_parse_tokens(mdbp_parser *p, const mdbp_token *tokens,
         return MDBP_INTERNAL;
     }
     result_init(out);
+    if (p != NULL) {
+        p->depths = NULL;
+    }
     if (p == NULL || (tokens == NULL && ntokens > 0)) {
         return result_fail(out, MDBP_INTERNAL, "no parser, or no tokens");
     }
@@ -655,6 +663,9 @@ mdbp_status mdbp_parse_sql(mdbp_parser *p, const char *sql, size_t len,
         return MDBP_INTERNAL;
     }
     result_init(out);
+    if (p != NULL) {
+        p->depths = NULL;
+    }
     if (p == NULL) {
         return result_fail(out, MDBP_INTERNAL, "no parser");
     }
@@ -754,6 +765,9 @@ static mdbp_status lex_sql_impl(mdbp_parser *p, const char *sql, size_t len,
         return MDBP_INTERNAL;
     }
     result_init(out);
+    if (p != NULL) {
+        p->depths = NULL;
+    }
     if (p == NULL) {
         return result_fail(out, MDBP_INTERNAL, "no parser");
     }
@@ -812,4 +826,9 @@ mdbp_status mdbp_lex_sql_prefix(mdbp_parser *p, const char *sql, size_t len,
                                 size_t max_tokens, mdbp_result *out, int *more)
 {
     return lex_sql_impl(p, sql, len, max_tokens, out, more);
+}
+
+const int *mdbp_derivation_depths(const mdbp_parser *p)
+{
+    return p != NULL ? p->depths : NULL;
 }
