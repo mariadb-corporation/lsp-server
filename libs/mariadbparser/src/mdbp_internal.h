@@ -4,7 +4,7 @@
  * include/mdbparse.h, which is P6's library surface and is not written yet.
  *
  *   src/mdbp_runtime.c  the token vector, the derivation buffer, yylex, and
- *                       the tables generated into build/mdbp_tables.h
+ *                       the token tables, built from bison's own arrays
  *   src/parser_glue.c   THE one translation unit that contains bison's
  *                       generated parser (it #includes build/parser.c)
  *   src/mdbparse.c      the CLI: arguments, input, the JSON verdict
@@ -21,18 +21,28 @@
 
 #include "stub.h"
 
-/* --- src/mdbp_runtime.c (the generated tables) --------------------------- */
+/* --- src/parser_glue.c (bison's own tables, read by the runtime) -------- */
 
-/* Terminal name -> bison token number, O(log n) over all 800 terminals.
+int mdbp_yy_ntokens(void);              /* YYNTOKENS: terminal symbol kinds */
+int mdbp_yy_nrules(void);               /* YYNRULES, including rule 0 $accept */
+int mdbp_yy_maxutok(void);              /* YYMAXUTOK: the largest token number */
+int mdbp_yy_translate(int token_number);/* token number -> symbol kind */
+const char *mdbp_yy_tname(int kind);    /* yytname[kind], bison's spelling */
+
+/* --- src/mdbp_runtime.c (the token tables, built once from the above) ---- */
+
+/* Terminal name -> bison token number, O(log n) over all terminals.
  * Returns -1 when `name` is not a terminal of this grammar. */
 int mdbp_token_number(const char *name);
 
-/* Bison symbol kind -> terminal name in the model's spelling, or NULL when
- * the kind is out of range.  (Not bison's own yysymbol_name: that one is
- * compiled in only under YYDEBUG, and it spells $end as "end of file".) */
+/* Bison symbol kind -> terminal name in the grammar's spelling ("$end",
+ * "SELECT_SYM", "'('"), or NULL when the kind is out of range or is bison's
+ * own undefined-token kind. */
 const char *mdbp_symbol_name(int kind);
 
-/* Serial (sql_yacc.yy file order) -> bison rule number, or -1. */
+/* Serial (the action's position in grammar file order, 0-based) -> bison rule
+ * number, or -1.  Every rule carries exactly one action, in order, so this is
+ * serial + 1. */
 int mdbp_rule_for_serial(int serial);
 
 size_t mdbp_terminal_count(void);
@@ -112,9 +122,8 @@ int mdbp_valid_live(const char *terminal_name, void *user);
  * Implemented in src/parser_glue.c because that is the one translation unit
  * with bison's `yytranslate[]` in scope, and yytranslate is exactly this map:
  * external token number -> symbol kind, which mdbp_symbol_name() then names.
- * (tools/gen_tables.py could generate a reverse table instead; it would
- * have to re-derive from build/parser.h what yytranslate already IS, so the
- * glue TU wins on having one source of truth rather than two.)
+ * (A generated reverse table would have to re-derive what yytranslate
+ * already IS, so the glue TU wins on having one source of truth.)
  *
  * Returns "$end" for 0 and the grammar model's own spelling for every
  * terminal it declares ("SELECT_SYM", "IDENT_QUOTED", "'('").  For a

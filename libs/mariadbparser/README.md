@@ -19,10 +19,10 @@ commits, how the generated files were produced, and every manual deviation.
 ```text
 include/mdbparse.h   the public C API, the only header a caller needs
 src/                 the runtime: API, lexer glue, parser glue, the CLI (mdbparse.c)
-generated/           the stubbed grammar, the lexer slice and the token tables;
-                     committed, maintained by hand between re-extractions
-tools/               stub.py, lexslice.py, gen_tables.py, common.py: the one-shot
-                     extraction tools, not used by the build
+generated/           the stubbed grammar and the lexer slice; committed,
+                     maintained by hand between re-extractions
+tools/               stub.py, lexslice.py, common.py: the one-shot extraction
+                     tools, not used by the build
 tests/lex-fixtures/  lexer cases with expected tokens, each citing sql_lex.cc
 UPSTREAM.md          pins, provenance of generated/, manual deviations
 ```
@@ -39,7 +39,12 @@ the exact ownership of every pointer in a result.
 
 ## Building
 
-Built by the top-level CMake of this repository. Needs bison 3.8.2 or newer and a C and
-C++ compiler; no Python and no server source tree. The library's own `CMakeLists.txt`
-is written in phase P0 of `docs/plans/core-implementation.md`, together with the first
-run that fills `generated/`.
+Built by the top-level CMake of this repository. Needs bison 3.8 or newer and a C11 and
+C++17 compiler; no Python and no server source tree. Targets: `mariadbparser` (static),
+`mariadbparser_shared` (`libmariadbparser.so.2` / `.2.dylib`), and the `mdbparse` CLI.
+Built and tested on macOS (Apple Clang); the original project built it on Linux with
+GCC, and CI builds it there. Windows needs the lexer's POSIX calls ported.
+
+Tests live in `unittest/mariadbparser/` at the top level: API tests, a multi-threaded
+consistency test, and the lexer fixtures in `tests/lex-fixtures/` replayed through
+`mdbp_lex_sql()`.

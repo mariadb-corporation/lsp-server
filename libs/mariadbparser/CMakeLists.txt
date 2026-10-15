@@ -1,15 +1,106 @@
-# libmariadbparser -- written in phase P0 of docs/plans/core-implementation.md.
-#
-# Intended shape: bison over generated/yy_stub.yy (with -Dparse.lac=full and the
-# XML report that gen_tables.py reads), then one static and one shared library from
-# src/*.c, src/*.cc and generated/*.cc, and the mdbparse CLI. No Python and no server
-# source tree at build time; generated/ is committed and maintained by hand.
+# libmariadbparser: bison over the committed, hand-maintained grammar in
+# generated/, then a static and a shared library and the mdbparse CLI.
+# No Python and no MariaDB source tree are needed at build time; see
+# UPSTREAM.md for where generated/ comes from.
 
-if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/yy_stub.yy")
-  message(FATAL_ERROR
-    "libs/mariadbparser/generated/ is empty: the one-shot extraction has not been run "
-    "yet. See libs/mariadbparser/UPSTREAM.md and phase P0 of "
-    "docs/plans/core-implementation.md.")
+if(NOT BISON_FOUND)
+  message(FATAL_ERROR "libmariadbparser needs bison 3.8 or newer "
+    "(Homebrew bison on macOS, winflexbison3 on Windows).")
+endif()
+if(BISON_VERSION VERSION_LESS "3.8")
+  message(FATAL_ERROR "libmariadbparser needs bison 3.8 or newer, found ${BISON_VERSION}")
 endif()
 
-message(FATAL_ERROR "libs/mariadbparser: build not written yet (phase P0)")
+set(MDBP_GENERATED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/generated")
+set(MDBP_BISON_DIR "${CMAKE_CURRENT_BINARY_DIR}/bison")
+file(MAKE_DIRECTORY "${MDBP_BISON_DIR}")
+
+# The library version comes from include/mdbparse.h, the one place it is kept.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/include/mdbparse.h" _mdbp_version_lines
+     REGEX "^#define MDBP_VERSION_(MAJOR|MINOR|PATCH) [0-9]+")
+foreach(_part MAJOR MINOR PATCH)
+  string(REGEX MATCH "MDBP_VERSION_${_part} ([0-9]+)" _m "${_mdbp_version_lines}")
+  if(NOT _m)
+    message(FATAL_ERROR "MDBP_VERSION_${_part} not found in include/mdbparse.h")
+  endif()
+  set(MDBP_VERSION_${_part} "${CMAKE_MATCH_1}")
+endforeach()
+set(MDBP_VERSION "${MDBP_VERSION_MAJOR}.${MDBP_VERSION_MINOR}.${MDBP_VERSION_PATCH}")
+
+# -k emits yytname[], from which the runtime builds its token tables;
+# -Dparse.lac=full makes the expected-token set exact.  Neither changes the
+# automaton.  parser.c is #included by src/parser_glue.c, never compiled alone.
+add_custom_command(
+  OUTPUT "${MDBP_BISON_DIR}/parser.c" "${MDBP_BISON_DIR}/parser.h"
+  COMMAND "${BISON_EXECUTABLE}" -k -d -Dparse.lac=full
+          -o "${MDBP_BISON_DIR}/parser.c"
+          "${MDBP_GENERATED_DIR}/yy_stub.yy"
+  DEPENDS "${MDBP_GENERATED_DIR}/yy_stub.yy"
+  COMMENT "bison: libmariadbparser grammar"
+  VERBATIM)
+add_custom_target(mariadbparser_bison
+  DEPENDS "${MDBP_BISON_DIR}/parser.c" "${MDBP_BISON_DIR}/parser.h")
+
+set(_mdbp_sources
+  src/parser_glue.c
+  src/mdbp_runtime.c
+  src/mdbp_api.c
+  src/mdbp_lex.cc)
+set_source_files_properties(src/parser_glue.c PROPERTIES
+  OBJECT_DEPENDS "${MDBP_BISON_DIR}/parser.c")
+
+add_library(mariadbparser_objects OBJECT ${_mdbp_sources})
+add_dependencies(mariadbparser_objects mariadbparser_bison)
+target_include_directories(mariadbparser_objects
+  PUBLIC  "${CMAKE_CURRENT_SOURCE_DIR}/include"
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src"
+          "${MDBP_GENERATED_DIR}"
+          "${MDBP_BISON_DIR}")
+set_target_properties(mariadbparser_objects PROPERTIES
+  C_STANDARD 11
+  C_STANDARD_REQUIRED ON
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON
+  POSITION_INDEPENDENT_CODE ON)
+if(NOT MSVC)
+  # The extracted lexer is MariaDB's code, compiled as written; only the
+  # library's own files are held to -Werror.
+  target_compile_options(mariadbparser_objects PRIVATE -Wall -Wextra)
+  set_source_files_properties(src/mdbp_runtime.c src/mdbp_api.c
+    PROPERTIES COMPILE_OPTIONS "-Werror")
+  # parser_glue.c #includes bison's parser.c, whose yynerrs is set and never
+  # read (the shell silences the same warning for its own bison output).
+  set_source_files_properties(src/parser_glue.c
+    PROPERTIES COMPILE_OPTIONS "-Werror;-Wno-unused-but-set-variable")
+endif()
+find_package(Threads REQUIRED)
+target_link_libraries(mariadbparser_objects PUBLIC Threads::Threads)
+
+add_library(mariadbparser STATIC $<TARGET_OBJECTS:mariadbparser_objects>)
+target_include_directories(mariadbparser PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(mariadbparser PUBLIC Threads::Threads)
+add_library(mariadbparser::static ALIAS mariadbparser)
+
+add_library(mariadbparser_shared SHARED $<TARGET_OBJECTS:mariadbparser_objects>)
+target_include_directories(mariadbparser_shared PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(mariadbparser_shared PUBLIC Threads::Threads)
+set_target_properties(mariadbparser_shared PROPERTIES
+  OUTPUT_NAME mariadbparser
+  VERSION "${MDBP_VERSION}"
+  SOVERSION "${MDBP_VERSION_MAJOR}"
+  LINKER_LANGUAGE CXX)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_link_options(mariadbparser_shared PRIVATE
+    "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/src/libmariadbparser.map")
+endif()
+add_library(mariadbparser::shared ALIAS mariadbparser_shared)
+
+# The command-line tool: verdicts, tokens and derivations for one statement or
+# a JSONL batch.  POSIX only for now (getline, getrusage).
+if(NOT WIN32)
+  add_executable(mdbparse src/mdbparse.c)
+  target_include_directories(mdbparse PRIVATE src "${MDBP_BISON_DIR}" "${MDBP_GENERATED_DIR}")
+  target_link_libraries(mdbparse PRIVATE mariadbparser)
+  set_target_properties(mdbparse PROPERTIES C_STANDARD 11 LINKER_LANGUAGE CXX)
+  add_dependencies(mdbparse mariadbparser_bison)
+endif()

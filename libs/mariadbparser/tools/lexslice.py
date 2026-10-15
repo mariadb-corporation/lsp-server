@@ -899,7 +899,6 @@ def compile_state_maps(out: Path, root: Path, cxx: str = "g++") -> dict:
     gen_bin.unlink(missing_ok=True)
     argv = [
         cxx, "-std=c++17", "-O0", "-Wall", "-Wextra",
-        "-fdiagnostics-plain-output",
         "-I", str(out), "-I", str(common.REPO_ROOT / "include"), "-I", str(common.REPO_ROOT / "src"),
         "-I", str(root / "strings"),
         "-o", str(gen_bin), str(gen_src),

@@ -1,8 +1,9 @@
 # Upstream sources and manual deviations
 
 This library is generated once from upstream sources and then maintained by hand. The
-generated files live in `generated/` and are committed; the tools in `tools/` are kept
-only for a full re-extraction (a new major server version), never run by the build.
+generated files live in `generated/` and are committed; `tools/stub.py` and
+`tools/lexslice.py` are kept only for a full re-extraction (a new major server version),
+never run by the build.
 
 ## Pins
 
@@ -13,26 +14,42 @@ only for a full re-extraction (a new major server version), never run by the bui
 
 ## How the generated files came to be
 
-1. `sql/gen_yy_files.cmake` from the server tree applies the `%ifdef MARIADB` preprocessor
-   to `sql_yacc.yy`.
-2. `tools/stub.py` blanks every action body to `{ MDBP_R(<serial>); }`, keeping only the
-   statements that assign `parsing_place` / `save_parsing_place`, because the lexer reads
-   that field back. Output: `generated/yy_stub.yy`.
-3. bison 3.8.2 with `-Dparse.lac=full` turns it into `parser.c` / `parser.h` and the
-   `grammar.xml` report (done by the build, not committed).
-4. `tools/lexslice.py` slices `Lex_input_stream::lex_token` / `lex_one_token` and their
-   transitive closure out of `sql_lex.cc` by symbol name, and the charset tables the
-   lexer needs. Output: `generated/lexer_extracted.cc`, `generated/keywords.h`,
-   `generated/lexstates.h`, `generated/state_maps_gen.cc`.
-5. `tools/gen_tables.py` derives the token-name tables from bison's `parser.h` and
-   `grammar.xml`. Output: `generated/mdbp_tables.h`. (Its `--model` cross-check against
-   a `grammar-model.json` from the original corpus is to be removed; the model is not
-   kept here.)
+`generated/` holds:
 
-Steps 2, 4 and 5 are run again only for a full re-extraction. Between re-extractions,
-upstream changes are applied by hand: diff the server file between the old and the new
-pin and apply the hunks to the generated file (actions are already blank, so grammar
-hunks are small); update the pin above and list the deviation below.
+| File | What it is |
+| --- | --- |
+| `yy_stub.yy` | `sql_yacc.yy`, MariaDB variant, every action body replaced by `{ MDBP_R(<serial>); }` except the 36 statements that write `parsing_place` |
+| `lexer_extracted.cc` | `Lex_input_stream::lex_token` / `lex_one_token` and their closure, sliced from `sql_lex.cc` by symbol |
+| `keywords.h` | the keyword and SQL-function tables from `lex.h` |
+| `lexstates.h` | the lexer state enum from `m_ctype.h` |
+| `state_maps.h` | the utf8mb4 lexer state maps, computed from the server's charset tables |
+| `ctype-utf8.h` | `strings/ctype-utf8.h`, copied unchanged |
+
+They were produced once, on 2026-10-15, on macOS (arm64) with bison 3.8.2 and
+Python 3.14, from the server tree at the pin above:
+
+1. `cmake -DIN=sql/sql_yacc.yy -DOUT1=yy_mariadb.yy -DOUT2=yy_oracle.yy -DVAL1=MARIADB -DVAL2=ORACLE -P sql/gen_yy_files.cmake`
+   (the server's own `%ifdef` preprocessor).
+2. `tools/stub.py --in yy_mariadb.yy --out yy_stub.yy --map stub-map.json`:
+   3,927 actions, 36 `parsing_place` statements preserved.
+3. `bison -d -Dparse.lac=full -o parser.c yy_stub.yy` (needed by step 4 for the
+   token numbers; no warnings).
+4. `tools/lexslice.py --source <tree> --out <dir> --parser-h parser.h --compile-state-maps`:
+   24 functions, 24 types, 1 rewrite.
+
+The result was checked against the original project's recorded output: all
+212,332 recorded token streams give the identical verdict, derivation, tokens
+consumed, error token, error position and expected-token set.
+
+The build runs only bison over `yy_stub.yy` (with `-k` and `-Dparse.lac=full`)
+and compiles. The token-name table and the rule numbers are read from bison's
+own output at run time (`yytname[]`, `yytranslate[]`, and `yyn` inside each
+action), so editing `yy_stub.yy` by hand cannot leave a stale table behind.
+
+Between re-extractions, upstream changes are applied by hand: diff the server
+file between the old and the new pin and apply the hunks to the generated file
+(actions are already blank, so grammar hunks are small); update the pin above
+and list the deviation below.
 
 ## Known judgement points in the transform
 
@@ -50,6 +67,13 @@ Kept from the original regeneration notes, since a re-extraction has to re-check
 - Only `utf8mb4` is lexed; other charsets are refused, never approximated.
 - `sql_mode` `ORACLE` and `MSSQL` are refused: the Oracle grammar variant is not
   extracted.
+
+## Changes to the tools since the original project
+
+- `tools/gen_tables.py` was removed: the runtime builds the same tables from bison's
+  own arrays.
+- `tools/lexslice.py` no longer passes GCC's `-fdiagnostics-plain-output` when it
+  compiles the state-map generator, so it also runs with Clang.
 
 ## Manual deviations from upstream
 

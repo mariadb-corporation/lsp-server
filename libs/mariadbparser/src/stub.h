@@ -163,13 +163,15 @@ typedef struct mdbp_ctx {
     size_t nexpected;
 } mdbp_ctx;
 
-/* Appends the RULE NUMBER `serial` maps to (through the generated
- * mdbp_serial_to_rule[] -- serial != rule number) to ctx->derivation.  Called
- * once per reduction, in reduce order, which is exactly what a derivation
- * is. */
-void mdbp_reduce(mdbp_ctx *ctx, int serial);
+/* Appends bison rule number `rule` to ctx->derivation.  Called once per
+ * reduction, in reduce order, which is exactly what a derivation is. */
+void mdbp_reduce(mdbp_ctx *ctx, int rule);
 
-#define MDBP_R(n) mdbp_reduce(ctx, (n))
+/* Inside a bison action `yyn` is the reduced rule's number plus one (bison's
+ * yacc.c skeleton numbers its `case` labels that way), so the derivation
+ * records bison's own rule number with no table in between.  The serial `n`
+ * that tools/stub.py writes stays in the grammar text as a reader's aid. */
+#define MDBP_R(n) ((void) (n), mdbp_reduce(ctx, yyn - 1))
 
 /* YYSTYPE is `int`; see the trap above for why this is not spelled YYSTYPE. */
 int yylex(int *lvalp, mdbp_ctx *ctx);

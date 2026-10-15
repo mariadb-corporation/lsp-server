@@ -40,7 +40,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <threads.h>
+#include "mdbp_once.h"
 
 #include "mdbp_internal.h"
 
@@ -188,6 +188,40 @@ static void mdbp_lac_unbind(void)
 #undef Lex
 #undef Select
 #undef sel
+
+/* --- bison's own tables, for src/mdbp_runtime.c ---------------------------
+ *
+ * The token-name table and the rule numbers are read from the generated
+ * parser itself (bison -k emits yytname[]), so a hand edit of
+ * generated/yy_stub.yy can never leave a second, stale table behind. */
+
+int mdbp_yy_ntokens(void)
+{
+    return YYNTOKENS;
+}
+
+int mdbp_yy_nrules(void)
+{
+    return YYNRULES;
+}
+
+int mdbp_yy_maxutok(void)
+{
+    return YYMAXUTOK;
+}
+
+int mdbp_yy_translate(int token_number)
+{
+    return (int) YYTRANSLATE(token_number);
+}
+
+const char *mdbp_yy_tname(int kind)
+{
+    if (kind < 0 || kind >= YYNTOKENS) {
+        return NULL;
+    }
+    return yytname[kind];
+}
 
 /* --- valid(T), answered from the binding above --------------------------- */
 
@@ -383,7 +417,7 @@ static char mdbp_char_names[256][8];
  * point: after this one initialisation it is READ-ONLY for the rest of the
  * process, which is exactly the contract include/mdbparse.h section 3 now
  * states. */
-static once_flag mdbp_char_names_once = ONCE_FLAG_INIT;
+static mdbp_once_t mdbp_char_names_once = MDBP_ONCE_INIT;
 
 static void mdbp_build_char_names(void)
 {
@@ -434,7 +468,7 @@ const char *mdbp_name_for_token_number(int token_number)
         }
     }
     if (token_number > 0 && token_number < 256) {
-        call_once(&mdbp_char_names_once, mdbp_build_char_names);
+        mdbp_once(&mdbp_char_names_once, mdbp_build_char_names);
         return mdbp_char_names[token_number];
     }
     return NULL;
