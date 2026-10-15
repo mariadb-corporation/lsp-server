@@ -10,7 +10,7 @@ never run by the build.
 | Upstream | Commit | What is taken |
 | --- | --- | --- |
 | MariaDB server (`https://github.com/MariaDB/server`) | `bab03b0fc44e7aeac869b20b0055c6a8f2083eb6`, 13.1.0 alpha, 2026-08-19 | `sql/sql_yacc.yy` (grammar, MariaDB variant), `sql/sql_lex.cc` and `sql/sql_lex.h` (lexer), `sql/lex.h`, `sql/lex_symbol.h`, `sql/lex_ident_cli.h` (keyword tables and token types), `include/m_ctype.h`, `strings/ctype-utf8.{c,h}`, `strings/ctype-latin1.c`, `mysys/charset.c`, `sql/share/charsets/Index.xml` (utf8mb4 character classes), `strings/my_strtoll10.c`, `sql/gen_yy_files.cmake` (the `%ifdef MARIADB` preprocessor), `VERSION` |
-| MariaDB Shell (`mariadb-shell`) | *to be recorded when the REST SQL rules are merged* | `mysqlshdk/libs/mrs/parser.yy`, the rules between `START OF MERGE PART` and `END OF MERGE PART` |
+| MariaDB Shell (`git@github.com:mariadb-corporation/mariadb-shell.git`) | `4f45397bed864ccb034d4bc565b7b704def7ed93`, on `main`, 2026-10-13 ("Add the MariaDB REST Service to the shell: built-in REST SQL"), the last commit that changed the file | `mysqlshdk/libs/mrs/parser.yy` (2,443 lines), the rules between `/* START OF MERGE PART */` (line 432) and `/* END OF MERGE PART */` (line 2319). **Not merged yet**: `generated/yy_stub.yy` holds the server grammar only until phase P2 |
 
 ## How the generated files came to be
 
