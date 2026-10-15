@@ -1,260 +1,45 @@
-> **Trimmed copy (2026-10-15).** This directory holds the extraction core only: the
-> public header, the sources, the pipeline under `tools/`, the overrides, the pinned
-> provenance, the grammar model and lexer fixtures, and `docs/REGENERATION.md`. The
-> evidence records, corpus archives, analysis tooling, Python test suite and `PLAN.md`
-> that this file refers to were left on the `architecture-review` branch and are not
-> here. The build described below is rewritten in phase P0 of
-> `docs/plans/core-implementation.md`.
-
 # libmariadbparser
 
-Two facts, first, because they are the easiest to get wrong:
+A standalone C parser for MariaDB SQL, made from the server's own Bison grammar
+(`sql/sql_yacc.yy`) and lexer (`sql/sql_lex.cc`) with every grammar action blanked, so it
+recognises exactly the language the server's LALR automaton accepts. Two facts first:
 
-1. **This parses the grammar-only language.** The parser this project builds
-   recognises everything MariaDB's LALR automaton accepts when **no action
-   code runs except the lifted `parsing_place` statements** — so it accepts a
-   **superset** of what `mariadbd` accepts, by design. A string this parser
-   accepts is not guaranteed to be valid SQL; a string it rejects is
-   guaranteed to be invalid.
+1. **It parses the grammar-only language.** A string it rejects is invalid SQL; a string
+   it accepts is not guaranteed valid, because the semantic checks inside the server's
+   actions are not here. Use it to rule statements out, never to certify them.
+2. **MariaDB variant only.** The Oracle-mode grammar is not extracted; `sql_mode`
+   `ORACLE` and `MSSQL` are refused at parser creation.
 
-   That exception is small, named and **enumerated**: `tools/stub.py`'s
-   `preserve_parsing_place` rule keeps, verbatim, the `sql_yacc.yy` statements
-   that assign `parsing_place`/`save_parsing_place` — the one field MariaDB's
-   *lexer* reads back out of the parser — and blanks every other action body
-   as before. **`build/stub-map.json`'s `preserve` block is the enumeration**:
-   every statement lifted with its `sql_yacc.yy` line, and every
-   `parsing_place` site *not* lifted with the reason. `evidence/P1/extract.json`
-   carries the same lists. Those statements object
-   to nothing and reject nothing; they spell a handful of tokens, which is why
-   they are here at all, and the superset claim is unchanged by them.
-2. **MariaDB variant only.** The Oracle-mode grammar variant and Oracle-only
-   records are out of scope for this whole project.
+The REST SQL (MariaDB REST Service) statements are merged into the same grammar, so one
+parser handles both dialects with one lexer. See `UPSTREAM.md` for the pinned upstream
+commits, how the generated files were produced, and every manual deviation.
 
-## What this is
+## Layout
 
-An experiment that mechanically extracts a standalone C parser from
-MariaDB's `sql/sql_yacc.yy`.
+```text
+include/mdbparse.h   the public C API, the only header a caller needs
+src/                 the runtime: API, lexer glue, parser glue, the CLI (mdbparse.c)
+generated/           the stubbed grammar, the lexer slice and the token tables;
+                     committed, maintained by hand between re-extractions
+tools/               stub.py, lexslice.py, gen_tables.py, common.py: the one-shot
+                     extraction tools, not used by the build
+tests/lex-fixtures/  lexer cases with expected tokens, each citing sql_lex.cc
+UPSTREAM.md          pins, provenance of generated/, manual deviations
+```
+
+## API in short
+
+`mdbp_parser_new()` creates a parser for a `sql_mode` and charset (utf8mb4 only);
+`mdbp_parse_sql()` lexes and parses one statement and reports the verdict, the error
+token with its byte offset, the expected-token set at the error (computed with LAC, so
+it is the true set), and the derivation (rule numbers in reduce order); `mdbp_lex_sql()`
+and `mdbp_lex_sql_prefix()` lex without parsing. One parser per thread, parsers are
+independent and may move between threads. The header documents everything, including
+the exact ownership of every pointer in a result.
 
 ## Building
 
-The library is built by the top-level CMake build of this repository (CMake
-3.22 or newer, Ninja). It needs a MariaDB server source tree at the pinned
-revision, named by `-DMARIADB_SOURCE_DIR`; configure stops with the commands
-below when it is missing or has no `sql/sql_yacc.yy`:
-
-```
-git -C <mariadb-server-clone> worktree add --detach <mariadb-source> bab03b0fc44e7aeac869b20b0055c6a8f2083eb6
-cmake --preset default -DMARIADB_SOURCE_DIR=<mariadb-source>
-cmake --build --preset default
-ctest --preset default
-```
-
-The build also needs bison 3.8.2, gcc/g++, and `uv`, which provides the
-tools' Python 3.12 (`uv sync --frozen`; uv prefers a CPython 3.12 it has
-installed itself over a system one, uses a system Python 3.12 when it has
-none, and downloads one only when neither exists). The target
-`mariadbparser-corpus-archive` also needs the `zstd` command-line tool:
-`tools/corpus_archive.py` compresses the archives with `zstd -3`. Unpacking
-them in the normal build needs only CMake.
-
-`cmake --build` unpacks the corpus from `corpus/archive/*.tar.zst` into
-`<binaryDir>/libs/mariadbparser/corpus` (`MDBP_CORPUS_DIR`) and runs
-`tools/extract.sh`'s full pipeline against `MARIADB_SOURCE_DIR`, writing
-everything into `<binaryDir>/libs/mariadbparser/out` (`MDBP_BUILD_DIR`):
-the generated sources, the objects, the five argv files,
-`libmariadbparser.a`, `libmariadbparser.so.<version>` with its `.so.<major>`
-and `.so` links, `mdbparse`, `mariadbparser.pc`, the run records
-`extract.json`, `build.json` and `lexgen.json`, and `compile_commands.json`.
-The pipeline first checks the fingerprints `source/PROVENANCE.json` pins; a
-MariaDB tree that differs fails the build with the files that differ. In this
-document and in the records, `build/` means that output directory and
-`corpus/` the unpacked corpus.
-
-CMake wraps the result as the imported targets `mariadbparser::static` and
-`mariadbparser::shared` (include directory `include/`).
-
-Everything in the output directory is generated by the pipeline and never
-edited by hand. Run `tools/extract.sh` directly only to regenerate against
-another MariaDB tree, with `--no-compile` and a scratch `--out` (see
-"Regenerating from a new MariaDB tree" below); building is always done by
-CMake.
-
-The corpus data is committed only as the archives in `corpus/archive/`,
-holding the pinned bytes that `corpus/PROVENANCE.json` records. They are
-rebuilt only by the explicit target `mariadbparser-corpus-archive`
-(`tools/corpus_archive.py`), and the ctest test `mariadbparser.corpus-check`
-fails while they are out of date. The optional cache paths
-`MDBP_GRAMMAR_CORPUS_DIR`, `MDBP_BISON_TS_DIR` and `MDBP_BISON_TS_CORPUS_DIR`
-name the upstream checkouts the corpus and the vendored scripts come from;
-only the tools that verify the copies against them
-(`tools/corpus_mirror.py`) need them.
-
-## Platforms
-
-Linux only for now. Windows and macOS are planned: configuring there stops
-with a message, and the port rewrites `tools/extract.sh` in Python (macOS
-ships Bash 3.2 and zsh).
-
-## Developer targets
-
-This section is filled in by P4, which defines the developer targets
-(`mariadbparser-<name>`).
-
-## What P2's verdict means
-
-For a token stream, `build/mdbparse` answers for the **grammar-only**
-language of fact 1 above: accepted means MariaDB's LALR automaton reaches
-`$accept` on those tokens, before any action C would run. The `derivation` it
-prints is the reduce-ordered list of **bison rule numbers** (mid-rule
-reductions included, rule 0 excluded) — the same numbering
-`tools/vendor/bison2ts/replay.py` and the corpus records use, so the two are
-comparable rule-number-for-rule-number, not merely accept-for-accept.
-`tools/p2_fixtures.py` is what compares them.
-
-## Using the library
-
-The same two facts from the top of this document apply here without
-qualification: this recognises a **superset** of what `mariadbd` accepts —
-use it to rule statements OUT, never to certify them IN — and it is
-**MariaDB variant only**.
-
-`include/mdbparse.h` is the only header a caller needs (`extern "C"`,
-`<stddef.h>` its only include, task 9.1). `PKG_CONFIG_PATH=build/libs/mariadbparser/out
-pkg-config --cflags --libs mariadbparser` (from the repository root) is enough to compile and link a program
-against the *build tree*, static or shared — nothing is installed, and
-distribution packaging is out of scope. Four calls:
-
-```c
-#include <mdbparse.h>
-
-mdbp_options opts;
-mdbp_options_init(&opts);
-mdbp_parser *p = mdbp_parser_new(&opts);
-
-mdbp_result res;
-mdbp_parse_sql(p, "SELECT 1", 8, &res);   /* or mdbp_parse_tokens() */
-
-mdbp_parser_free(p);
-```
-
-`opts.sql_mode` accepts the five lexer flags this library implements directly
-(`ANSI_QUOTES`, `PIPES_AS_CONCAT`, `HIGH_NOT_PRECEDENCE`, `IGNORE_SPACE`,
-`NO_BACKSLASH_ESCAPES`); the six composite names `ANSI`, `POSTGRESQL`, `DB2`,
-`MAXDB`, `MYSQL40` and `MYSQL323`, expanded into those same flags exactly as
-the server's own `expand_sql_mode()` expands them (since 2.1.1); `TRADITIONAL`
-and every other server mode, which are accepted and left inert; and neither
-`ORACLE` nor `MSSQL`, which are refused (`mdbp_parser_new()` answers NULL)
-alone or inside a list.
-
-**Tokenising a whole document: `mdbp_lex_sql()`** (since 2.1, on the symbol
-version `MDBPARSER_2.1`). It lexes any number of statements as one token
-stream and **does not parse**: there is no verdict, `accepted` is always 0,
-and there is no derivation. It is for a caller that wants the tokens of a
-whole buffer, such as an editor colouring or folding it. Statements are not
-split; a caller splits on the `';'` tokens it gets back. It lexes with **no
-parser**, so it is not a cheaper `mdbp_parse_sql()`: a few tokens that the
-lexer spells from the parser's state (`VALUES`, `VALUE`, `(`) can come out
-spelled differently, and `include/mdbparse.h` names the two mechanisms. How often
-that happens over the corpus is measured by `tools/lexonly_diff.py`, not stated
-here. A lexed name that is not a terminal of the grammar gets
-`token_number` -1 and the rest of the stream is still resolved, so one stray
-character does not blank the document. `build/mdbparse --lex-only` is the
-same call from the command line.
-
-```c
-mdbp_lex_sql(p, "SELECT 1; SELECT 2", 18, &res);
-/* res.tokens: SELECT_SYM NUM ';' SELECT_SYM NUM END_OF_INPUT */
-```
-
-**The first N tokens of a document: `mdbp_lex_sql_prefix()`** (since 2.2, on
-the symbol version `MDBPARSER_2.2`). It is for a caller that wants only the
-first few tokens of a large document, such as an editor matching a
-statement's opening keywords, without lexing (and paying for) the rest of it.
-Let `L` be what `mdbp_lex_sql()` returns for the same parser and bytes, and
-`C` be `L` without a final `END_OF_INPUT`: if `C` has `max_tokens` elements or
-fewer, this returns all of `L` and `*more` is 0; otherwise it returns the
-first `max_tokens` of `C` and `*more` is 1, and `eof_token` is `NULL` — the
-stream did not end. `build/mdbparse --lex-only --max-tokens N` is the same
-call from the command line.
-
-```c
-int more;
-mdbp_lex_sql_prefix(p, "SELECT 1; SELECT 2", 18, 2, &res, &more);
-/* res.tokens: SELECT_SYM NUM; more: 1 */
-```
-
-**The release that versioned comments are judged against:
-`mdbp_parser_set_version_id()`** (since 2.1, on `MDBPARSER_2.1`). MariaDB's
-lexer reads some comments as SQL: an executable comment `/*!NNNNNN ... */`,
-MariaDB's own `/*M!NNNNNN ... */`, and the reversed `/*!!NNNNNN ... */`. When
-digits follow the opening they name a release, and whether the comment's text
-is read or skipped depends on the release the lexer believes it is. Each
-parser carries that release as a **release id**, `major*10000 + minor*100 +
-patch`, as the server spells it: 110803 is 11.8.3. The setter changes it for
-one parser and `mdbp_parser_version_id()` reads it back. A new parser starts
-at the pinned MariaDB tree's release id, which `mdbp_parser_version_id()`
-returns on a new parser; this document does not repeat the number, so it
-cannot go stale. The id decides **only** which versioned comments are read as
-SQL: the grammar is still the pinned tree's. It applies to `mdbp_parse_sql()`,
-`mdbp_lex_sql()` and `mdbp_lex_sql_prefix()`, has no effect on
-`mdbp_parse_tokens()`, and travels with the parser to another thread. The
-accepted range is 10000 to 999999; outside
-it the call answers `MDBP_UNSUPPORTED` and the parser keeps the id it had.
-`include/mdbparse.h` states the exact rules, including the MySQL 5.7 numbers a
-plain `/*!` never reads. `build/mdbparse --version-id N` is the same setting
-from the command line, on every path that lexes.
-
-A caller whose users run MariaDB 11.8.3:
-
-```c
-mdbp_parser_set_version_id(p, 110803);
-mdbp_lex_sql(p, "SELECT 1 /*!120000 , 2 */", 25, &res);
-/* res.tokens: SELECT_SYM NUM END_OF_INPUT -- the 12.0 comment is skipped */
-```
-
-**Thread safety, stated exactly as `include/mdbparse.h` section 3 states it**:
-one parser per thread, and they are independent. Two threads may each hold
-their **own** `mdbp_parser` and call `mdbp_parse_sql()`/`mdbp_parse_tokens()`
-on them at the same time, with no lock of yours between them — distinct
-parser objects are independent. But ONE mdbp_parser MUST NEVER BE USED BY
-TWO THREADS AT THE SAME TIME: a parser owns the buffers every result points
-into, so a concurrent second call rewrites what the first call's reader is
-still reading. MOVING A PARSER BETWEEN THREADS IS ALLOWED — created on one
-thread, used on another, then on a third — provided the handoff establishes a
-happens-before edge (a mutex, a queue, a join) and no two threads use it
-concurrently; nothing that outlives a call is kept in thread-local storage,
-so the durable state travels with the object, which is what lets a thread
-pool hand a parser to whichever worker is free. Two tables remain
-process-wide — the cache of the character tokens' names, and MariaDB's own
-keyword tables — and both are WRITTEN ONCE AND READ-ONLY THEREAFTER, each
-behind a once-guard, so the first call may initialise lazily but does so
-exactly once however many threads arrive together. There is no init entry
-point to call. This is deliberately not spelled "thread-safe", which readers
-hear as permitting concurrent use of one object.
-
-That contract is why `MDBP_VERSION_MAJOR` is **2** and the soname is
-`libmariadbparser.so.2`: a consumer tests `#if MDBP_VERSION_MAJOR >= 2`
-rather than parsing this paragraph, and one that loads the library by
-explicit path fails at load rather than reading past the end of an
-`mdbp_options` that grew a field.
-
-`tools/concurrency.py` is the proof, not this paragraph:
-`evidence/P7/concurrency.json` records the field-by-field differential
-against the single-threaded answer, the migration and round-robin results,
-and a ThreadSanitizer run whose detector was first shown to catch a planted
-race.
-
-`tools/apismoke.py` is the proof: it links `tools/api_smoke.c` against
-both `build/libmariadbparser.a` and `build/libmariadbparser.so` — purely
-through the generated `.pc` — and reproduces 100 corpus verdicts through
-each.
-
-## Regenerating from a new MariaDB tree
-
-`tools/extract.sh --source <tree> --variant MARIADB --no-compile` is the
-one supported entry point for regenerating this project against a different
-MariaDB source tree. **`docs/REGENERATION.md`** is the procedure — the exact
-commands for each step, what evidence shows the step has actually been
-exercised, and the honest inventory of every place a human judgement is baked
-into the pipeline that a new revision could break. Read it before touching
-anything here; nothing about the pipeline's shape is repeated in this file.
+Built by the top-level CMake of this repository. Needs bison 3.8.2 or newer and a C and
+C++ compiler; no Python and no server source tree. The library's own `CMakeLists.txt`
+is written in phase P0 of `docs/plans/core-implementation.md`, together with the first
+run that fills `generated/`.

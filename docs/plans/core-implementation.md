@@ -15,15 +15,16 @@ Read in order: §1 what we have · §2 the design · §3 build and repository la
 
 ### 1.1 libmariadbparser (`libs/mariadbparser/`)
 
-The MariaDB server grammar (`sql/sql_yacc.yy`) and lexer (`sql/sql_lex.cc`) mechanically
-extracted into a standalone C library, by script, from a server source tree. What is in
-this branch is the **extraction core only**: the public header, the C/C++ sources, the
-pipeline (`tools/extract.sh`, `stub.py`, `lexslice.py`, `gen_tables.py`,
-`provenance.py`, `build_record.py`, `common.py`), the override mechanism, the pinned
-provenance, the grammar model and lexer fixtures (two small archives), the regeneration
-procedure (`docs/REGENERATION.md`) and the README. The evidence records, the 212k-record
-corpus archives, the analysis tooling, the Python test suite and the test-host-bound
-`PLAN.md` were left behind on purpose. Facts the rest of this plan relies on:
+The MariaDB server grammar (`sql/sql_yacc.yy`) and lexer (`sql/sql_lex.cc`) extracted
+into a standalone C library with every grammar action blanked. What is in this branch:
+the public header, the C/C++ sources, the three one-shot extraction tools (`stub.py`,
+`lexslice.py`, `gen_tables.py`, with `common.py`), the lexer test fixtures as plain
+files, and `UPSTREAM.md` with the pins and the procedure. **The generated sources
+(`generated/`: the stubbed grammar, the lexer slice, the token tables) are to be
+committed and maintained by hand**; the tools are for a full re-extraction only and the
+build never runs them. The build orchestration, provenance gate, evidence records,
+corpus archives, analysis tooling, Python test suite and regeneration document of the
+original project were left behind on purpose. Facts the rest of this plan relies on:
 
 - **API** (`include/mdbparse.h`, version 2.2): `mdbp_parse_sql()` lexes and parses one
   statement; `mdbp_lex_sql()` / `mdbp_lex_sql_prefix()` lex without parsing (whole document
@@ -44,12 +45,15 @@ corpus archives, the analysis tooling, the Python test suite and the test-host-b
 - **Pinned** to MariaDB 13.1.0 at commit `bab03b0f` (2026-08-19). The local clone at
   `/Users/mzinner/git/mariadb-server` is shallow and at `cded2b25` (2026-07-28), which is
   older than the pin, so a worktree or fetch at the pin is needed to build today.
-- **Regeneration is scripted but unproven across revisions**: the pipeline has run against
-  one server revision only, with zero override entries. `sql_yacc.yy` and `sql_lex.cc`
-  each changed about seventy times on the server's `main` since January 2026.
-  Re-extracting against a newer tree is deferred (not part of this plan, by decision).
-- **Build gaps**: Linux only (CMake stops on macOS), needs `uv` and bash, needs a MariaDB
-  source tree at configure time. §3 fixes these.
+- **Maintenance is manual between re-extractions.** `sql_yacc.yy` and `sql_lex.cc`
+  each changed about seventy times on the server's `main` since January 2026; an
+  upstream change is applied by diffing the server file between pins and patching the
+  generated file by hand (actions are already blank, so grammar hunks are small), with
+  the deviation recorded in `UPSTREAM.md`. Re-extracting with the tools is for a major
+  jump and is deferred by decision.
+- **`generated/` is empty until P0's one extraction run**, which needs a Linux host and
+  the server tree at the pin; after that the build needs bison and a compiler only, on
+  every platform.
 - **`REST` is not a keyword** in the server grammar, so `CREATE REST SERVICE ...` is
   rejected by the unmerged parser, usually at `REST`. §2.2 and §3 merge the REST SQL
   rules into the extracted grammar instead of routing to a second parser.
@@ -197,8 +201,8 @@ Points that go beyond the pasted sketch:
 
 ### 2.2 Parsing one statement (the worker's job)
 
-**One grammar.** The REST SQL rules are merged into the extracted server grammar at
-extraction time (§3, `tools/mrs_merge.py`), so libmariadbparser parses both dialects
+**One grammar.** The REST SQL rules are merged by hand into the stubbed server grammar
+(§3, `generated/yy_stub.yy`), so libmariadbparser parses both dialects
 with the server's own lexer and one automaton. There is no second parser, no prefix
 routing and no "try the server grammar, then the REST grammar" loop: a statement is
 parsed once, and whether it is a REST statement is a property of its derivation (the
@@ -508,8 +512,9 @@ vcpkg.json                     rapidjson; feature "tests": gtest
 cmake/                         copied from mariadb-shell: bootstrap_vcpkg, bootstrap_mariadb,
                                bison, compiler, compile_flags, libutils, exeutils, packaging,
                                git_hooks, static_analysis
-libs/mariadbparser/            the extraction core (§1.1), plus: macOS/Windows build,
-                               the REST SQL merge (tools/mrs_merge.py), rule-info API (2.3)
+libs/mariadbparser/            header, sources, generated/ (stubbed grammar with the REST
+                               SQL rules merged in, lexer slice, tables; committed), the
+                               one-shot tools, lexer fixtures, UPSTREAM.md; rule-info API (2.3)
 libs/sqlsplitter/              vendored Sql_splitter from mariadb-shell, dependencies cut
 libs/mariadblanguageserver/    the engine library (C API in include/, C++ in src/)
 src/mariadb-lsp/               the executable: LSP transport + CLI subcommands
@@ -525,24 +530,19 @@ Build conventions, copied from the shell rather than invented:
 
 - `cmake .. -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DWITH_VCPKG_TRIPLET=<triplet>`
   bootstraps vcpkg into `../vcpkg` and installs the manifest; `-DWITH_TESTS=0` drops gtest.
-- **One MariaDB server checkout feeds two things.** `cmake/bootstrap_mariadb.cmake`,
-  copied from the shell, fetches the server at `MARIADB_GIT_TAG` (or takes
-  `-DMARIADB_SOURCE_DIR`/`-DMARIADB_BUILD_DIR`), initialises `libmariadb`, and builds
-  `mariadbclient mysys mysys_ssl caching_sha2_password GenError`. From that tree:
-  - the **client library** is linked statically, exactly as the shell links it, headers
-    from `<src>/libmariadb/include` and `<src>/include`, with the `mariadb_capi_rename.h`
-    guard pre-defined as the shell does; no vcpkg `libmariadb`, no runtime bundling of a
-    shared client, auth plugins compiled in as the shell has them;
-  - **libmariadbparser's extraction** runs against `sql/sql_yacc.yy` and `sql/sql_lex.cc`
-    of the same tree. Until the pin moves, `MARIADB_GIT_TAG` is the parser's pin
-    (`bab03b0f`), and the provenance check keeps it honest; moving the pin and the
-    re-extraction it needs are deferred by decision. A target `mariadbparser-vendor`
-    writes the generated parser sources into the tree so that a release build needs no
-    server source.
-- `cmake/bison.cmake` finds Homebrew bison on macOS and `win_bison` on Windows;
-  libmariadbparser's `tools/extract.sh` is ported to Python (it already needs Python for
-  `stub.py`, 3.11 or newer for `tomllib`) so the extraction runs on all three platforms;
-  `uv` is dropped in favour of `find_package(Python3 3.11)`.
+- **The client library comes from the server checkout, as the shell does it.**
+  `cmake/bootstrap_mariadb.cmake`, copied from the shell, fetches the server at
+  `MARIADB_GIT_TAG` (or takes `-DMARIADB_SOURCE_DIR`/`-DMARIADB_BUILD_DIR`), initialises
+  `libmariadb`, and builds `mariadbclient mysys mysys_ssl caching_sha2_password GenError`;
+  the client library is linked statically, exactly as the shell links it, headers from
+  `<src>/libmariadb/include` and `<src>/include`, with the `mariadb_capi_rename.h` guard
+  pre-defined as the shell does; no vcpkg `libmariadb`, no runtime bundling of a shared
+  client. `MARIADB_GIT_TAG` is the parser's pin (`bab03b0f`) so that the client and the
+  grammar come from the same release.
+- **libmariadbparser builds from `generated/`**: bison over `generated/yy_stub.yy`
+  (with `-Dparse.lac=full` and the XML report), the sources, the lexer slice. No Python,
+  no server tree, no provenance gate at build time. `cmake/bison.cmake` finds Homebrew
+  bison on macOS and `win_bison` on Windows.
 - `cmake/compiler.cmake`: C++23, `-Werror -Wall -Wextra -Wpedantic -Wshadow`. The C
   library keeps its own flags.
 - `mysql_library_init()` runs once in `main()`, and every pool worker that opens a
@@ -550,26 +550,24 @@ Build conventions, copied from the shell rather than invented:
 - Packaging: `cpack -G TGZ` per platform; the binary is meant to be installed into
   mariadb-shell's `bin/` next to `mariadb-shell`, which is where the extension's locator
   will look (§5, decision 4).
-- **The REST SQL merge is a step of the extraction pipeline**, `tools/mrs_merge.py`,
-  run on the preprocessed `yy_mariadb.yy` before `stub.py`, with the shell's
-  `mysqlshdk/libs/mrs/parser.yy` (pinned shell commit, fingerprinted in the parser's
-  provenance like the server files) as its input. It:
-  1. takes the rules between the `MERGE PART` markers and drops the helper rules after
-     them in favour of the server's (`identifier` → `ident`, `qualified_identifier` →
-     `table_ident`, `text_string_literal` → `TEXT_STRING_sys`, ...);
-  2. renames tokens through a table (`CREATE_SYMBOL` → `CREATE`, `USE_SYMBOL` →
-     `USE_SYM`, `VIEW_SYMBOL` → `VIEW_SYM`, ...) and declares the new keywords as
-     `%token <kwd>`, adding each to `keyword_ident` (or the narrower list the merge
-     table names) so that it stays a valid identifier elsewhere, and to the lexer's
-     keyword table that `lexslice.py` emits;
-  3. replaces `REST_REQUEST_PATH` by a rule over `'/'` and identifiers and the
-     `@ANNOTATION` tokens by `'@' ident`, since the server lexer is kept untouched;
-  4. hooks `mrs_statement` into the server's `verb_clause`, and adjusts `%expect` only
-     by the number of conflicts the merge introduces, each one listed with its
-     resolution in `overrides/mrs.toml` so the count is visible regeneration debt.
-  The result is one `yy_stub.yy`; everything downstream (bison, LAC, the derivation,
-  `gen_tables.py`, the rule-name table) is unchanged. The shell's lexer, AST and driver
-  are not vendored at all.
+- **The REST SQL merge is a manual edit of `generated/yy_stub.yy`**, done once in P2
+  from the shell's `mysqlshdk/libs/mrs/parser.yy` (the shell commit recorded in
+  `UPSTREAM.md`), and kept up to date by hand like every other upstream change:
+  1. the rules between the `MERGE PART` markers go in; the helper rules after the
+     marker are replaced by the server's (`identifier` → `ident`, `qualified_identifier`
+     → `table_ident`, `text_string_literal` → `TEXT_STRING_sys`, ...);
+  2. tokens are renamed to the server's spelling (`CREATE_SYMBOL` → `CREATE`,
+     `USE_SYMBOL` → `USE_SYM`, `VIEW_SYMBOL` → `VIEW_SYM`, ...); the new keywords are
+     declared as `%token <kwd>`, added to `keyword_ident` (or the narrower list that
+     fits) so that each stays a valid identifier elsewhere, and added to the lexer's
+     keyword table in `generated/keywords.h`;
+  3. `REST_REQUEST_PATH` becomes a rule over `'/'` and identifiers and the
+     `@ANNOTATION` tokens become `'@' ident`, since the server lexer is kept untouched;
+  4. `mrs_statement` is hooked into the server's `verb_clause`, `%expect` is raised by
+     the conflicts the merge introduces, and each conflict with its resolution is
+     listed in `UPSTREAM.md`.
+  Everything downstream (bison, LAC, the derivation, the token tables, the rule-name
+  table) is unchanged. The shell's lexer, AST and driver are not vendored at all.
 - Vendored code from mariadb-shell (`libs/sqlsplitter`) is copied by
   `scripts/sync_from_shell.py`, which records the shell commit in a `PROVENANCE.json`
   next to the copy; a CI check compares the vendored files with the shell tree when one
@@ -589,12 +587,14 @@ short record in `docs/plans/records/<phase>.md` of what was measured. Numbers be
 - Copy the shell's CMake modules and `vcpkg.json` shape; top-level `CMakeLists.txt`,
   `unittest/` with `run_unit_tests`, `scripts/run_unit_tests.py`, CI workflow;
   `bootstrap_mariadb.cmake` at the parser's pin, the client library linked from it.
-- libmariadbparser builds on macOS and Linux from this tree: `extract.sh` → Python,
-  `uv` requirement dropped, platform gate removed, the library's CMake rewritten to use
-  the bootstrapped server tree and nothing from the left-behind apparatus;
-  `mariadbparser-vendor` target and a build from vendored sources without a server tree.
-- A first gtest for the parser library (parse, lex, expected set) so the C library has
-  a test in this tree.
+- **The one extraction run**: on a Linux host with the server tree at the pin, run
+  `stub.py`, bison, `lexslice.py` and `gen_tables.py` (its grammar-model cross-check
+  removed) by hand, commit the output as `libs/mariadbparser/generated/`, record the
+  run in `UPSTREAM.md`. From then on the tools are not needed to build.
+- libmariadbparser's CMake: bison over `generated/yy_stub.yy`, the library and the
+  `mdbparse` CLI, on macOS, Linux and Windows, with no Python and no server tree.
+- gtests for the parser library: parse, lex, expected set, and the nine lexer fixture
+  files under `tests/lex-fixtures/` replayed through `mdbp_lex_sql()`.
 - Done when: `cmake --build` and `ctest` pass on macOS (this machine) and on the Linux
   CI runner.
 
@@ -613,20 +613,22 @@ short record in `docs/plans/records/<phase>.md` of what was measured. Numbers be
 
 ### P2 — REST SQL merge, parallel parsing pipeline and `check` (2–3 weeks)
 
-- **Merge spike first (2–3 days):** `tools/mrs_merge.py` to the point where bison
-  accepts the merged grammar; the deliverable is the conflict count and the list of
-  conflicts with the construct behind each. The known candidates are `USE REST ...`
+- **Merge spike first (2–3 days):** merge the `MERGE PART` rules into
+  `generated/yy_stub.yy` by hand to the point where bison accepts the grammar; the
+  deliverable is the conflict count and the list of conflicts with the construct behind
+  each. The known candidates are `USE REST ...`
   against `USE <schema>`, and `GRANT REST ...` / `REVOKE REST ...` against a role named
   `rest`, where LALR(1) has to decide on `REST` before seeing the next word. The
   expected resolution is to prefer the shift (REST is read as the keyword after USE,
   GRANT and REVOKE; a schema or role literally named `rest` needs backticks there),
-  recorded in `overrides/mrs.toml`. If the spike finds conflicts that cannot be resolved
-  that way, the fallback is the shell's standalone MRS parser as a second library, and
-  §2.2 is rewritten; that is decided by the spike, not now.
-- Finish the merge: token map, new keywords into the keyword lists and the lexer table,
-  request-path and annotation rules, `MDBP_WITH_MRS`, the shell's
-  `unittest/data/mrs/grammar_test.sql` as a corpus that must parse, and a test that the
-  pure-server corpus verdicts do not change with the merge switched on.
+  recorded in `UPSTREAM.md`. If the spike finds conflicts that cannot be resolved that
+  way, the fallback is the shell's standalone MRS parser as a second library, and §2.2
+  is rewritten; that is decided by the spike, not now.
+- Finish the merge: token renames, new keywords into the keyword lists and
+  `generated/keywords.h`, request-path and annotation rules, `MDBP_WITH_MRS` (a bison
+  `%ifdef` around the merged rules, as the server's own `%ifdef MARIADB` works), the
+  shell's `unittest/data/mrs/grammar_test.sql` as a corpus that must parse, and a test
+  that a set of server-only statements gets the same verdicts with the merge on and off.
 - `ParserPool` (§2.3) with priorities, idle join, version-stale dropping; per-thread
   parser cache keyed by `sql_mode`.
 - `check` subcommand, text and JSON output, exit codes.
