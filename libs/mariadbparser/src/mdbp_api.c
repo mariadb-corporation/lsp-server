@@ -1,12 +1,11 @@
 /* src/mdbp_api.c -- include/mdbparse.h's implementation, and THE one
  * implementation of "parse one record".
  *
- * Everything above it is a client: src/mdbparse.c (the CLI) reads arguments,
- * three input formats and writes JSON, and every actual parse it performs
- * comes through mdbp_parse_tokens() / mdbp_parse_sql() below.  Its
- * `--lex-only` comes through mdbp_lex_sql() or mdbp_lex_sql_prefix() (task
- * P1.1 / plan `lex-sql-prefix.md`), the two calls here that lex without
- * parsing.  Two
+ * Everything above it is a client: src/mdbparse.cc (the CLI) reads arguments
+ * and input and writes JSON through the public API only, so every actual
+ * parse it performs comes through mdbp_parse_tokens() / mdbp_parse_sql()
+ * below.  Its `--lex-only` comes through mdbp_lex_sql() or
+ * mdbp_lex_sql_prefix(), the two calls here that lex without parsing.  Two
  * implementations of "parse one record" is the defect this file exists to
  * prevent -- one of them always drifts, and the one that drifts is the one
  * nobody measures.
@@ -14,8 +13,8 @@
  * WHAT LIVES HERE AND WHY.  The parser object owns:
  *   - the parse context (src/mdbp_internal.h), initialised ONCE and re-pointed
  *     per record, because its derivation buffer's capacity is the thing that
- *     makes a 212,332-record batch run cost one growth curve rather than
- *     212,332 of them;
+ *     makes a large batch run cost one growth curve rather than one per
+ *     record;
  *   - the token array a result reports, grown and reused for the same reason;
  *   - the LEXER of the last mdbp_parse_sql(), mdbp_lex_sql() or
  *     mdbp_lex_sql_prefix() call, deliberately NOT freed when that call
@@ -33,8 +32,8 @@
 #include "mdbp_internal.h"
 #include "mdbp_lex.h"
 
-/* The end-of-input symbol.  Token number 0, "bison pseudo-terminal" in the
- * grammar model, and what ends every parse that is handed a token vector. */
+/* The end-of-input symbol.  Token number 0, bison's own end-of-input
+ * pseudo-terminal, and what ends every parse that is handed a token vector. */
 #define MDBP_END_TOKEN "$end"
 
 #define MDBP_STRINGIFY_(x) #x
@@ -49,12 +48,12 @@ struct mdbp_parser {
     int prepare_mode;
     int want_derivation;
     char *sql_mode;              /* an owned copy; never NULL */
-    char *charset;               /* an owned copy; never NULL (P3.1 D-10) */
-    /* The release id versioned comments are judged against (plan
-     * `tokeniser-entry-points.md` D-6): MDBP_LEX_DEFAULT_VERSION_ID until
-     * mdbp_parser_set_version_id() stores another, always inside
-     * MDBP_LEX_VERSION_ID_MIN..MAX.  It lives HERE, in the object, so it
-     * travels with the parser when a caller hands it to another thread. */
+    char *charset;               /* an owned copy; never NULL */
+    /* The release id versioned comments are judged against:
+     * MDBP_LEX_DEFAULT_VERSION_ID until mdbp_parser_set_version_id() stores
+     * another, always inside MDBP_LEX_VERSION_ID_MIN..MAX.  It lives HERE,
+     * in the object, so it travels with the parser when a caller hands it
+     * to another thread. */
     unsigned long version_id;
 
     mdbp_ctx ctx;                /* initialised once, reset per record */
@@ -90,13 +89,13 @@ void mdbp_options_init(mdbp_options *opts)
 /* --- the two refusals, in one place each --------------------------------- */
 
 /* ORACLE and MSSQL change the language and this library cannot honour them,
- * so a list naming either is refused rather than silently ignored (PLAN.md
- * S2.2).  Case-insensitive, element by element; `found` receives the
- * canonical spelling of the offender so a caller can name it.
+ * so a list naming either is refused rather than silently ignored.
+ * Case-insensitive, element by element; `found` receives the canonical
+ * spelling of the offender so a caller can name it.
  *
- * The CLI calls THIS function for its own exit-3 diagnostic: the rule that
- * decides what the library refuses and the rule the CLI reports must be one
- * rule, or one of them drifts. */
+ * mdbp_parser_new() refuses through this function; the lexer's own refusal
+ * (src/mdbp_lex.h) is only a defensive backstop.  The rule is stated once,
+ * here, or one statement of it drifts. */
 int mdbp_sql_mode_refused(const char *list, char *found, size_t found_size)
 {
     const char *p = list == NULL ? "" : list;
@@ -124,13 +123,13 @@ int mdbp_sql_mode_refused(const char *list, char *found, size_t found_size)
     return 0;
 }
 
-/* P3.1: the charset parameter, modelled directly on mdbp_sql_mode_refused()
+/* The charset parameter, modelled directly on mdbp_sql_mode_refused()
  * above.  Exactly one name is accepted -- utf8mb4 -- plus the alias
  * utf8mb4_general_ci, which resolves to the SAME table (src/mdbp_lex.cc), so
  * accepting it is not accepting a second behaviour.  Every other name is
  * refused BY NAME, including utf8, utf8mb3 and latin1: those lex differently,
  * and an alias that silently changed behaviour is exactly the failure mode
- * D-8 exists to prevent.  `found` gets the offending spelling as the caller
+ * refusing by name prevents.  `found` gets the offending spelling as the caller
  * gave it (there is no fixed list to canonicalise against, unlike ORACLE/
  * MSSQL above).  NULL means the default and is never refused. */
 int mdbp_charset_refused(const char *name, char *found, size_t found_size)
@@ -146,14 +145,13 @@ int mdbp_charset_refused(const char *name, char *found, size_t found_size)
     return 1;
 }
 
-/* The connection charset is utf8mb4 (PLAN.md D-9), so a statement has to be
- * valid UTF-8 whichever channel it arrives through, and undecodable bytes are
- * refused rather than lexed as something else -- which is what the Python
- * oracle answers for the same bytes.  Python's own strictness: no overlong
+/* The connection charset is utf8mb4, so a statement has to be valid UTF-8
+ * whichever channel it arrives through, and undecodable bytes are refused
+ * rather than lexed as something else.  The check is strict: no overlong
  * forms, no surrogates, nothing above U+10FFFF.
  *
- * Shared with the CLI (which reports it as a usage error, exit 2) for the
- * same reason mdbp_sql_mode_refused() is: one rule, one implementation. */
+ * Shared by mdbp_parse_sql() and the two lexing calls for the same reason
+ * mdbp_sql_mode_refused() is one function: one rule, one implementation. */
 int mdbp_input_is_utf8(const char *s, size_t len)
 {
     const unsigned char *p = (const unsigned char *) s;
@@ -253,7 +251,7 @@ mdbp_parser *mdbp_parser_new(const mdbp_options *opts)
     memcpy(p->charset, charset, strlen(charset) + 1);
     p->prepare_mode = opts->prepare_mode ? 1 : 0;
     p->want_derivation = opts->want_derivation ? 1 : 0;
-    /* D-9: the one default, src/mdbp_lex.h's, and not a number of our own. */
+    /* The one default, src/mdbp_lex.h's, and not a number of our own. */
     p->version_id = MDBP_LEX_DEFAULT_VERSION_ID;
     /* Once, here: mdbp_ctx_init() memsets the struct, so calling it per record
      * would leak the derivation buffer (src/mdbp_internal.h). */
@@ -261,10 +259,10 @@ mdbp_parser *mdbp_parser_new(const mdbp_options *opts)
     return p;
 }
 
-/* --- the comment gate's release id (plan `tokeniser-entry-points.md` P3) -- */
+/* --- the comment gate's release id ---------------------------------------- */
 
 /* The range is checked BEFORE anything is stored, so a refused id leaves the
- * parser's id exactly as it was (D-6).  The bounds are src/mdbp_lex.h's, the
+ * parser's id exactly as it was.  The bounds are src/mdbp_lex.h's, the
  * same two macros the lexer's own setter checks: one range, one place. */
 mdbp_status mdbp_parser_set_version_id(mdbp_parser *p, unsigned long version_id)
 {
@@ -397,10 +395,10 @@ static const char *lexer_open(mdbp_parser *p, const char *sql, size_t len,
 
 /* How resolve_token_numbers() treats a name this grammar has no terminal for.
  * The two parse calls STOP there: the name is their refusal, and nothing past
- * it is resolved.  mdbp_lex_sql() and mdbp_lex_sql_prefix() CONTINUE (plan
- * `tokeniser-entry-points.md` D-4): the name keeps token_number == -1 and
- * every later terminal still gets its number, because a tokeniser must not
- * blank a whole document over one stray character. */
+ * it is resolved.  mdbp_lex_sql() and mdbp_lex_sql_prefix() CONTINUE: the
+ * name keeps token_number == -1 and every later terminal still gets its
+ * number, because a tokeniser must not blank a whole document over one stray
+ * character. */
 typedef enum {
     RESOLVE_STOP_AT_UNKNOWN = 0,
     RESOLVE_PAST_UNKNOWN
@@ -520,9 +518,8 @@ mdbp_status mdbp_parse_tokens(mdbp_parser *p, const mdbp_token *tokens,
     }
     /* The vector is COPIED, not borrowed, because token_number is resolved
      * from `name` and the caller's array is const.  The strings themselves are
-     * not copied: mdbparse.h says so, and copying a 22,928-token record's
-     * strings once per record is a cost a batch caller would pay 212,332
-     * times for nothing. */
+     * not copied: mdbparse.h says so, and copying every token's strings is a
+     * cost a batch caller would pay on every record for nothing. */
     for (i = 0; i < ntokens; i++) {
         p->tokens[i] = tokens[i];
         p->tokens[i].token_number = -1;
@@ -597,23 +594,21 @@ static int live_pull(void *user, mdbp_token *out)
 }
 
 /* Pulls what is left of the stream into the parser's token array, stopping
- * before a counted token once `max_tokens` of them are already pushed (task
- * P1.1 / plan `lex-sql-prefix.md` D-8): every token but END_OF_INPUT counts
- * (D-3), and END_OF_INPUT is always pushed, whatever the count.  Writes
- * `more` (when not NULL): 1 when the limit stopped the loop with input still
- * unlexed, 0 when the loop reached the stream's own end.  A rejected parse
- * returns with input still unread; lexing the rest of it (with valid(T)
- * answering 0 for everything, because the binding died with the parse) is what
- * makes `tokens` the WHOLE stream and not a prefix -- which is exactly what
- * the Python oracle does once its cursor has derailed.  mdbp_parse_sql()'s
- * tail passes (size_t) -1, a limit no stream reaches, and NULL: it always
- * lexes the rest of the stream, exactly as before this task.
+ * before a counted token once `max_tokens` of them are already pushed:
+ * every token but END_OF_INPUT counts, and END_OF_INPUT is always pushed,
+ * whatever the count.  Writes `more` (when not NULL): 1 when the limit
+ * stopped the loop with input still unlexed, 0 when the loop reached the
+ * stream's own end.  A rejected parse returns with input still unread;
+ * lexing the rest of it (with valid(T) answering 0 for everything, because
+ * the binding died with the parse) is what makes `tokens` the WHOLE stream
+ * and not a prefix.  mdbp_parse_sql()'s tail passes (size_t) -1, a limit no
+ * stream reaches, and NULL: it always lexes the rest of the stream.
  *
  * It is also the whole of mdbp_lex_sql()'s and mdbp_lex_sql_prefix()'s
  * lexing, through the one shared body (lex_sql_impl, below) both call:
  * there, nothing has been pulled yet, so "what is left" is the entire
- * stream, cut at `max_tokens` for the new call.  One pull loop for all
- * three, so they cannot come to disagree about how a stream is collected.
+ * stream, cut at `max_tokens` for mdbp_lex_sql_prefix().  One pull loop for
+ * all three, so they cannot come to disagree about how a stream is collected.
  * Returns 0, or -1 on an allocation failure. */
 static int lex_drain(mdbp_parser *p, size_t max_tokens, int *more)
 {
@@ -677,7 +672,7 @@ mdbp_status mdbp_parse_sql(mdbp_parser *p, const char *sql, size_t len,
     if (tokens_reserve(p, 0) != 0) {
         return result_fail(out, MDBP_INTERNAL, "out of memory lexing");
     }
-    /* THE JOIN (task P1.1).  MariaDB's lexer reads `parsing_place` off the
+    /* THE JOIN.  MariaDB's lexer reads `parsing_place` off the
      * SELECT_LEX its THD points at; MariaDB's grammar actions write it.  Both
      * halves are now MariaDB's own text here -- the lexer through the slice,
      * the actions through tools/stub.py's `preserve_parsing_place` rule
@@ -723,28 +718,25 @@ mdbp_status mdbp_parse_sql(mdbp_parser *p, const char *sql, size_t len,
 
 /* --- mdbp_lex_sql / mdbp_lex_sql_prefix ------------------------------------ */
 
-/* The lexer with NO parser in it (plan `tokeniser-entry-points.md` D-3),
- * shared by mdbp_lex_sql() and mdbp_lex_sql_prefix() (task P1.1 / plan
- * `lex-sql-prefix.md` D-8): mdbp_lex_sql() passes `max_tokens` (size_t) -1 --
+/* The lexer with NO parser in it, shared by mdbp_lex_sql() and
+ * mdbp_lex_sql_prefix(): mdbp_lex_sql() passes `max_tokens` (size_t) -1 --
  * a limit no document reaches -- and `more` NULL, so every branch below that
- * exists only for the new call is inert for it and its result is exactly what
- * it always was; mdbp_lex_sql_prefix() passes its own two arguments straight
- * through.
+ * exists only for mdbp_lex_sql_prefix() is inert for it;
+ * mdbp_lex_sql_prefix() passes its own two arguments straight through.
  *
  * `valid` is NULL, which src/mdbp_lex.h defines as "always 0", so the one
  * valid() site (mdbp_downgrade_left_paren in src/mdbp_lex.cc) always answers
- * a plain '('.  mdbp_lex_set_parsing_place() is never called and the parse
- * context is never pointed at the lexer's SELECT_LEX, so no grammar action
- * can write `parsing_place`: it stays the NO_MATTER mdbp_lex_new() gives it,
- * from the first byte to the last.  That is the CLI's `--valid none` with the
- * default `--parsing-place`, and deliberately NOT a rejected parse's
- * lex_drain() tail, which keeps whatever the last action wrote.
+ * a plain '('.  No parse runs and the parse context is never pointed at the
+ * lexer's SELECT_LEX, so no grammar action can write `parsing_place`: it
+ * stays the NO_MATTER mdbp_lex_new() gives it, from the first byte to the
+ * last.  That is deliberately NOT a rejected parse's lex_drain() tail, which
+ * keeps whatever the last action wrote.
  *
  * The result is the header's field-by-field list: result_init() already
  * wrote every field that list fixes (accepted 0, no derivation, no error
  * record, error_state and error_byte_pos -1, eof_token "$end", message NULL),
  * so what is left to set is the stream and what ended it -- `out->eof_token`
- * stays NULL instead (D-5) when lex_drain() stopped on the limit rather than
+ * stays NULL instead when lex_drain() stopped on the limit rather than
  * the stream's own end, which `more` (written here, not just by lex_drain()
  * itself, so it is set on every return, not only the ones that reach the
  * loop) also reports. */
@@ -756,7 +748,7 @@ static mdbp_status lex_sql_impl(mdbp_parser *p, const char *sql, size_t len,
     int cut = 0;
 
     if (more != NULL) {
-        *more = 0;               /* D-6: written on every return */
+        *more = 0;               /* written on every return */
     }
     if (out == NULL) {
         return MDBP_INTERNAL;
@@ -772,8 +764,8 @@ static mdbp_status lex_sql_impl(mdbp_parser *p, const char *sql, size_t len,
     }
     parse_begin(p);
 
-    /* The same lexer mdbp_parse_sql() opens, minus the parser: valid is NULL
-     * (D-3).  The comment gate's release id reaches it the same way. */
+    /* The same lexer mdbp_parse_sql() opens, minus the parser: valid is
+     * NULL.  The comment gate's release id reaches it the same way. */
     failed = lexer_open(p, sql, len, NULL);
     if (failed != NULL) {
         return result_fail(out, MDBP_INTERNAL, failed);
@@ -784,7 +776,7 @@ static mdbp_status lex_sql_impl(mdbp_parser *p, const char *sql, size_t len,
         return result_fail(out, MDBP_INTERNAL, "out of memory lexing");
     }
     if (cut) {
-        out->eof_token = NULL;   /* D-5: nothing ended the stream */
+        out->eof_token = NULL;   /* nothing ended the stream */
     } else {
         eof = mdbp_lex_eof_token(p->lx);
         if (eof != NULL) {
@@ -795,7 +787,7 @@ static mdbp_status lex_sql_impl(mdbp_parser *p, const char *sql, size_t len,
         *more = cut;
     }
 
-    /* D-4: never a refusal.  The first unknown index is of no use here. */
+    /* Never a refusal.  The first unknown index is of no use here. */
     (void) resolve_token_numbers(p->tokens, p->ntokens, RESOLVE_PAST_UNKNOWN);
     out->tokens = p->tokens;
     out->ntokens = p->ntokens;
@@ -804,8 +796,8 @@ static mdbp_status lex_sql_impl(mdbp_parser *p, const char *sql, size_t len,
 
 /* Lexes `sql` (`len` bytes) with MariaDB's own lexer and does not parse it:
  * see include/mdbparse.h for the full contract.  `lex_sql_impl()` above is the
- * whole of the work; this passes the two arguments that make it behave as it
- * always has (no limit, and nowhere to write whether one was hit). */
+ * whole of the work; this passes the two arguments that make it lex the whole
+ * document (no limit, and nowhere to write whether one was hit). */
 mdbp_status mdbp_lex_sql(mdbp_parser *p, const char *sql, size_t len,
                          mdbp_result *out)
 {
@@ -814,9 +806,8 @@ mdbp_status mdbp_lex_sql(mdbp_parser *p, const char *sql, size_t len,
 
 /* At most `max_tokens` counted tokens of what mdbp_lex_sql() returns for the
  * same parser and bytes, or all of it (its END_OF_INPUT included, when it has
- * one) when the document has that many counted tokens or fewer (rule D-4).
- * Since 2.2, task P1.1, plan `lex-sql-prefix.md`.  See include/mdbparse.h for the
- * full contract. */
+ * one) when the document has that many counted tokens or fewer.  Since 2.2.
+ * See include/mdbparse.h for the full contract. */
 mdbp_status mdbp_lex_sql_prefix(mdbp_parser *p, const char *sql, size_t len,
                                 size_t max_tokens, mdbp_result *out, int *more)
 {

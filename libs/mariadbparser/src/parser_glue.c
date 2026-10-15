@@ -1,36 +1,33 @@
 /* src/parser_glue.c -- the ONE translation unit that contains bison's
  * generated parser, and the only place that reads its tables.
  *
- * WHY IT #includes build/parser.c INSTEAD OF LINKING IT
- * ----------------------------------------------------
- * The verdict object has to carry `error.state` (the LR state on top of the
- * parser's own stack when the error was reported, in build/grammar.output's
- * numbering) and `error.expected_sample`, because P4 diffs both against
- * replay.py's error object.  Neither is reachable from outside yyparse:
+ * WHY IT #includes parser.c INSTEAD OF LINKING IT
+ * -----------------------------------------------
+ * A rejection has to carry `error_state` (the LR state on top of the parser's
+ * own stack when the error was reported, in bison's own state numbering) and
+ * the expected-token set.  Neither is reachable from outside yyparse:
  * bison's `yyerror(ctx, msg)` hook is handed no state, and the state stack
  * (`yyss`/`yyssp`) and the action tables (`yypact`/`yycheck`/`yytable`) are
  * function locals and file-static respectively.
  *
- * PLAN.md task 3.1 lists three routes.  Route (i), `%define parse.error
- * custom`, needs a different bison invocation, which drags P1's whole
- * evidence set (extract.json, regen.json, convergence.json, trajectory.jsonl)
- * along with it and puts `automaton_differences == 0` at risk for an
- * error-reporting detail.  This is route (ii): one glue TU that #includes
- * build/parser.c, so the tables are in scope, plus a two-line interception of
- * the `yyerror` CALL SITE -- which sits inside yyparse, where `yyssp` is a
- * live local:
+ * `%define parse.error custom` would hand the state over too, but it needs a
+ * different bison invocation and a different generated parser for what is
+ * only an error-reporting detail.  Instead this is one glue TU that
+ * #includes bison's parser.c, so the tables are in scope, plus a two-line
+ * interception of the `yyerror` call site -- which sits inside yyparse, where
+ * `yyssp` is a live local:
  *
  *     yyerrlab:
  *       ...
- *           yyerror (ctx, YY_("syntax error"));         <- build/parser.c
+ *           yyerror (ctx, YY_("syntax error"));         <- parser.c
  *
  * The function-like macro below rewrites exactly that call (and the identical
  * one in yyexhaustedlab) into a call that also passes `*yyssp`.  Bison's
- * generated file itself is untouched -- the house rule is that no artefact in
- * build/ is ever hand-edited, and none is: this is our own file changing how
- * OUR OWN hook is called.  `*yyssp` rather than `yystate` because the phase
- * asks for "the state on top of the parser's own stack" and because yysetstate
- * keeps the two equal.
+ * generated file itself is untouched -- nothing bison writes into the build
+ * directory is ever hand-edited: this is our own file changing how our own
+ * hook is called.  `*yyssp` rather than `yystate` because the error state is
+ * "the state on top of the parser's own stack", and yysetstate keeps the two
+ * equal.
  *
  * The real `yyerror` is defined below the macro-free line, so it is a
  * definition and not a macro expansion; it exists so that stub.h's
@@ -81,20 +78,22 @@ void yyerror(mdbp_ctx *ctx, const char *msg)
                    (void *) &yyes_capacity, (void *) yyssp),            \
      mdbp_note_error((yyctxarg), (yymsgarg), (int) *yyssp))
 
-/* --- valid(T): the SECOND call site inside yyparse ------------------------
+/* --- valid(T): the second call site inside yyparse ------------------------
  *
  * WHAT IS BEING SOLVED.  MariaDB's lexer rewrites tokens from
- * `curr_sel->parsing_place`, a field parser ACTIONS set; every action body is
- * a stub here, so that field can never be set and PLAN.md S1.8's substitute is
- * valid(T) -- "is terminal T shiftable in the parser's current LR state, after
- * any number of reductions".  evidence/P5a/valid-symbol.json settled how to
- * answer it: bison's own `yy_lac()`, under `%define parse.lac full` (which
- * tools/extract.sh passes as `-Dparse.lac=full`; without it the four
- * names below do not exist and this file does not compile -- a deliberate
- * tripwire).  The same evidence shows why the CHEAP answer is wrong: at an
- * INCONSISTENT state carrying a default reduction, the action-row walk
- * mdbp_collect_expected() does below answers a strict subset ({F} where LAC
- * answers {C,E,F}), and bison's own verbose message names LAC's set.
+ * `curr_sel->parsing_place`, a field the parser's grammar actions set.  Those
+ * writes are preserved in generated/yy_stub.yy, but the `(` arm at
+ * sql_lex.cc:2004 also consumes the field (sql_lex.cc:2013), which a parser
+ * state cannot model by itself.  So the lexer (mdbp_downgrade_left_paren in
+ * src/mdbp_lex.cc) emits the token it chose only when valid(T) holds -- "is
+ * terminal T shiftable in the parser's current LR state, after any number of
+ * reductions".  The answer comes from bison's own `yy_lac()`, under
+ * `%define parse.lac full` (which CMake passes to bison as
+ * `-Dparse.lac=full`; without it the four names below do not exist and this
+ * file does not compile -- a deliberate tripwire).  The cheaper answer is
+ * wrong: at an inconsistent state carrying a default reduction, a walk of the
+ * state's yypact/yycheck/yytable action row answers a strict subset ({F}
+ * where LAC answers {C,E,F}), and bison's own verbose message names LAC's set.
  *
  * HOW IT IS REACHED.  yy_lac() is `static`, and its four arguments -- yyesa,
  * yyes, yyes_capacity, yyssp -- are LOCALS of yyparse.  #including the
@@ -103,7 +102,7 @@ void yyerror(mdbp_ctx *ctx, const char *msg)
  * for `*yyssp`, and it gets the same solution applied to the skeleton's OTHER
  * in-yyparse call site, the one a lexer actually needs:
  *
- *     yychar = yylex (&yylval, ctx);            <- build/parser.c
+ *     yychar = yylex (&yylval, ctx);            <- parser.c
  *
  * The macro below rewrites that one call into "bind first, then lex".  The
  * comma expression yields the lexer's value, so `yychar = yylex (...)` still
@@ -123,21 +122,16 @@ void yyerror(mdbp_ctx *ctx, const char *msg)
  * reallocated since the last one) and cleared by mdbp_run_parser() when
  * yyparse returns, because the locals die with it.  With no binding,
  * mdbp_valid_live() answers 0 for everything -- the honest answer when there
- * is no parser stack to ask, and the same one lexdump.py's ReplayValid gives
- * after its cursor derails.
+ * is no parser stack to ask.
  *
- * yy_lac() only READS the state stack; its scratch is the yyes array
- * and its capacity, which it may reallocate and which are passed by address so yyparse sees the
- * new values (and frees them on the way out).  It does not touch
- * `yy_lac_established`, so the parser's own LAC bookkeeping is unaffected --
- * evidence/P5a/valid-symbol.json's control run measured exactly that: every
- * stream reached the same verdict with the probe compiled out.
+ * yy_lac() only reads the state stack; its scratch is the yyes array and its
+ * capacity, which it may reallocate and which are passed by address so
+ * yyparse sees the new values (and frees them on the way out).  It does not
+ * touch `yy_lac_established`, so the parser's own LAC bookkeeping is
+ * unaffected: asking valid(T) cannot change the parse.
  *
- * PLAN.md P2.1: classified per_parse (evidence/P7/globals.json), so it is
- * `_Thread_local` -- one binding per thread instead of one shared across
- * every thread's concurrent parse.  No signature change, no struct member
- * added: the type and every access below are unchanged, only the storage
- * duration is. */
+ * The binding belongs to one parse, so it is `_Thread_local` -- one binding
+ * per thread instead of one shared across every thread's concurrent parse. */
 static _Thread_local struct {
     int bound;
     void *esa;      /* yyesa            */
@@ -169,14 +163,15 @@ static void mdbp_lac_unbind(void)
                    (void *) &yyes_capacity, (void *) yyssp),            \
      yylex(__VA_ARGS__))
 
-/* -I build puts this on the include path.  It is the generated parser; it is
- * compiled here and nowhere else, so exactly one object file contains it. */
+/* bison's output directory in the build tree is on the include path.  This is
+ * the generated parser; it is compiled here and nowhere else, so exactly one
+ * object file contains it. */
 #include "parser.c"
 
 #undef yyerror
 #undef yylex
 
-/* build/yy_stub.yy's prologue defines these five (tools/stub.py's
+/* generated/yy_stub.yy's prologue defines these five (tools/stub.py's
  * PARSING_PLACE_MACROS) so that the `parsing_place` statements its
  * `preserve_parsing_place` rule lifted out of sql_yacc.yy compile unmodified.
  * They are macros on ORDINARY-LOOKING names, so they stop at the end of the
@@ -253,12 +248,12 @@ int mdbp_valid_live(const char *terminal_name, void *user)
                 (YYPTRDIFF_T *) mdbp_lac.cap, (yy_state_t *) mdbp_lac.ssp,
                 (yysymbol_kind_t) kind);
     /* 0 shiftable, 1 not, YYENOMEM exhausted.  Exhaustion is reported as "not
-     * shiftable" rather than guessed at: the lexer's five sites all read the
-     * predicate as a gate, so a false answer is the conservative one (it
-     * spells the token the way `--valid none` would), and yyparse will hit
-     * the same exhaustion on its own next LAC check and end the parse with
-     * bison's own memory-exhausted code, which the CLI reports as
-     * "status": "internal".  Nothing is silently absorbed. */
+     * shiftable" rather than guessed at: the lexer reads the predicate as a
+     * gate, so a false answer is the conservative one (it spells the plain
+     * `'('`, as a lexer with no parser would), and yyparse will hit the same
+     * exhaustion on its own next LAC check and end the parse with bison's
+     * own memory-exhausted code, which mdbp_parse_sql() reports as
+     * MDBP_INTERNAL.  Nothing is silently absorbed. */
     return rc == 0;
 }
 
@@ -279,14 +274,9 @@ static int mdbp_name_cmp(const void *a, const void *b)
  * have an action for", and at an INCONSISTENT state -- one carrying a default
  * reduction -- that is a strict subset of what the grammar accepts next: the
  * terminals reachable only THROUGH that reduction have no entry in the row
- * and were therefore left out.  evidence/P5a/valid-symbol.json settled this
- * for valid(T) already ({F} where LAC answers {C,E,F}); evidence/P8/
- * expected-baseline.json measures what it cost `expected`: over 1,605 caret
- * positions cut out of corpus statements, 811 of them answered a strict
- * subset of the LAC set, 192,517 shiftable terminals missing in total, and
- * `CREATE ` answered one terminal where twenty-four are shiftable.  For the
- * consumer that reads this field as a completion candidate set that is not a
- * smaller answer, it is a WRONG one: a missing suggestion is
+ * and were therefore left out ({F} where LAC answers {C,E,F}, as for valid(T)
+ * above).  For a consumer that reads this field as a completion candidate set
+ * that is not a smaller answer, it is a wrong one: a missing suggestion is
  * indistinguishable from "nothing applies".
  *
  * The candidate set is every terminal kind of the grammar, and everything
@@ -300,7 +290,7 @@ static int mdbp_name_cmp(const void *a, const void *b)
  *
  * THE ALLOCATION IS YYNTOKENS ENTRIES, ONCE, not a count-then-fill pass:
  * every candidate costs a yy_lac() call, and counting first would double the
- * measured per-keystroke cost to learn a number the fill pass already knows.
+ * per-keystroke cost to learn a number the fill pass already knows.
  * At most YYNTOKENS pointers are over-allocated for one rejection, which the
  * next mdbp_ctx_reset() gives back.
  *
@@ -309,17 +299,18 @@ static int mdbp_name_cmp(const void *a, const void *b)
  * is the conservative one.  HERE the same policy would be a defect: a set
  * missing the terminals whose LAC checks ran out of memory looks exactly like
  * a complete set, and a caller has no way to tell.  So exhaustion makes the
- * WHOLE set could-not-compute -- ctx->expected stays NULL, which the CLI
- * renders as `"expected_sample": null` -- and nothing is guessed at.  The
+ * WHOLE set could-not-compute -- ctx->expected stays NULL, which
+ * src/mdbparse.cc renders as `"expected_sample": null` -- and nothing is
+ * guessed at.  The
  * same holds for the two other ways the set cannot be computed: a state
  * outside the automaton (every MDBP_UNSUPPORTED record, state -1) and no live
  * LAC binding (no parse is running, so there is no stack to ask).
  *
  * A COMPUTED EMPTY SET IS NOT THE SAME ANSWER.  If every terminal is
- * genuinely unshiftable the allocation is kept and nexpected is 0, so the
- * CLI renders `[]` -- "computed, nothing applies" -- and the caller can tell
- * the two apart.  include/mdbparse.h states that contract; this is where it is
- * produced. */
+ * genuinely unshiftable the allocation is kept and nexpected is 0, so
+ * src/mdbparse.cc renders `[]` -- "computed, nothing applies" -- and a caller
+ * can tell the two apart.  include/mdbparse.h states that contract; this is
+ * where it is produced. */
 static void mdbp_collect_expected(mdbp_ctx *ctx, int state)
 {
     int kind;
@@ -378,7 +369,7 @@ int mdbp_run_parser(mdbp_ctx *ctx)
     /* The binding is set by the interception above, per yylex call; it is
      * cleared HERE because yyesa/yyes/yyes_capacity/yyssp are yyparse's own
      * locals and do not outlive this return.  A lexer that keeps running
-     * afterwards -- `--valid live` drains the rest of the token stream once
+     * afterwards -- mdbp_parse_sql() drains the rest of the token stream once
      * the parse has ended -- therefore gets valid(T) == 0 from then on. */
     rc = yyparse(ctx);
     mdbp_lac_unbind();
@@ -392,30 +383,26 @@ int mdbp_run_parser(mdbp_ctx *ctx)
  * call (its contract says the name is static).  256 entries of at most
  * "'\\377'" + NUL = 7 bytes.
  *
- * The rule is reflex.py's char_token_name(), which is bison's: the five
+ * The rule is bison's own spelling of a character literal: the five
  * escapes it spells with a backslash, printable ASCII as itself, everything
  * else as three-digit octal.  0 never reaches here (it is "$end"). */
 static char mdbp_char_names[256][8];
 
-/* PLAN.md P4.1 deliverable 1.  This table is written exactly once, lazily, on
- * whichever thread first asks for a character token's name -- and before this
- * guard it was a plain `if (!built) { build(); built = 1; }`, which two
- * threads entering mdbp_name_for_token_number() at the same moment run BOTH,
- * each writing all 256 entries while the other reads them.  The reader could
- * therefore be handed a half-written string, and the flag's unsynchronised
- * load/store is itself a data race.
+/* This table is written exactly once, lazily, on whichever thread first asks
+ * for a character token's name.  A plain `if (!built) { build(); built = 1; }`
+ * would let two threads entering mdbp_name_for_token_number() at the same
+ * moment both run it, each writing all 256 entries while the other reads
+ * them: a reader could be handed a half-written string, and the flag's
+ * unsynchronised load/store is itself a data race.
  *
- * C11 call_once() is the fix, and it is the mechanism rather than a
- * hand-rolled atomic flag for two reasons: it is what the phase prescribes
- * for the C side, and it establishes the happens-before edge a
- * double-checked flag does not -- every thread that returns from call_once()
- * sees the completed table, not merely a set flag.  `once_flag` lives in
- * libc (glibc >= 2.34), so nothing new is linked: `library_links_only_libc`
- * stays true.
+ * mdbp_once() (src/mdbp_once.h) is the guard rather than a hand-rolled
+ * atomic flag because it establishes the happens-before edge a
+ * double-checked flag does not -- every thread that returns from mdbp_once()
+ * sees the completed table, not merely a set flag.
  *
  * mdbp_char_names itself remains a shared, process-wide table.  That is the
  * point: after this one initialisation it is READ-ONLY for the rest of the
- * process, which is exactly the contract include/mdbparse.h section 3 now
+ * process, which is exactly the contract include/mdbparse.h section 3
  * states. */
 static mdbp_once_t mdbp_char_names_once = MDBP_ONCE_INIT;
 
