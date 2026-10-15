@@ -19,7 +19,10 @@
 add_library(mariadblanguageserver STATIC
   src/line_map.cc
   src/sql_mode.cc
-  src/statement_index.cc)
+  src/statement_index.cc
+  src/parser_pool.cc
+  src/syntax_check.cc)
 target_include_directories(mariadblanguageserver PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_link_libraries(mariadblanguageserver PUBLIC sqlsplitter mariadbparser)
+find_package(Threads REQUIRED)
+target_link_libraries(mariadblanguageserver PUBLIC sqlsplitter mariadbparser Threads::Threads)
 mdbls_target_warnings(mariadblanguageserver)

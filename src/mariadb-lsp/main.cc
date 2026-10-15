@@ -17,14 +17,17 @@
 
 // mariadb-lsp: the MariaDB language server and its command-line tools.
 //
-//   mariadb-lsp split  FILE   the statement index of a SQL file
-//   mariadb-lsp tokens FILE   the tokens of every statement
+//   mariadb-lsp check  FILE...  syntax errors, or success
+//   mariadb-lsp split  FILE     the statement index of a SQL file
+//   mariadb-lsp tokens FILE     the tokens of every statement
 //
-// The LSP mode (`lsp`), `check` and `outline` follow in later phases.
+// The LSP mode (`lsp`) and `outline` follow in later phases.
 
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -38,18 +41,24 @@
 #include <vector>
 
 #include "mdbls/line_map.h"
+#include "mdbls/parser_pool.h"
 #include "mdbls/statement_index.h"
+#include "mdbls/syntax_check.h"
 #include "mdbparse.h"
 
 namespace {
 
 constexpr int k_exit_ok = 0;
+constexpr int k_exit_errors = 1;
 constexpr int k_exit_usage = 2;
 
 const char *const k_usage =
-    "usage: mariadb-lsp <command> [options] FILE|-\n"
+    "usage: mariadb-lsp <command> [options] FILE|-...\n"
     "\n"
     "commands:\n"
+    "  check    check the syntax of SQL files: prints the errors, or nothing\n"
+    "           (with --format json, a summary); exit 0 when there are none,\n"
+    "           1 when there are\n"
     "  split    list the statements of a SQL file\n"
     "  tokens   list the tokens of every statement of a SQL file\n"
     "\n"
@@ -61,15 +70,22 @@ const char *const k_usage =
     "                     (major*10000 + minor*100 + patch; default 130100)\n"
     "  --format tsv|json  output format (default tsv)\n"
     "  --text             split: include each statement's text in the output\n"
+    "  --threads N        check: parser threads (default: one per CPU core)\n"
+    "  --max-errors N     check: stop listing errors after N per file (default 100)\n"
     "  --stats            print sizes and timings to stderr\n"
     "  --help             this text\n"
     "\n"
-    "Lines and columns are 1-based in tsv output and 0-based (LSP, UTF-16\n"
-    "columns) in json output.\n";
+    "Lines and columns are 1-based in text output and 0-based (LSP, UTF-16\n"
+    "columns) in json output.\n"
+    "\n"
+    "exit: 0 done (check: no errors), 1 check found errors, 2 usage or\n"
+    "      unreadable input\n";
 
 struct Options {
   std::string command;
-  std::string file;
+  std::vector<std::string> files;
+  unsigned threads = 0;
+  size_t max_errors = 100;
   mdbls::Index_options index;
   bool json = false;
   bool text = false;
@@ -323,6 +339,225 @@ int run_tokens(const Options &o, const std::string &text, const mdbls::Line_map 
   return k_exit_ok;
 }
 
+// A terminal name as a reader would write it: SELECT_SYM -> SELECT,
+// '(' -> (, IDENT -> identifier.  Empty for terminals nobody types.
+std::string readable_terminal(std::string_view name) {
+  if (name == "$end" || name == "END_OF_INPUT") return "end of statement";
+  if (name.size() == 3 && name.front() == '\'' && name.back() == '\'') {
+    return std::string(name.substr(1, 1));
+  }
+  if (name == "IDENT" || name == "IDENT_QUOTED" || name == "LEX_HOSTNAME") return "identifier";
+  if (name == "TEXT_STRING" || name == "NCHAR_STRING" || name == "UNDERSCORE_CHARSET")
+    return "string";
+  if (name == "NUM" || name == "LONG_NUM" || name == "ULONGLONG_NUM" || name == "DECIMAL_NUM" ||
+      name == "FLOAT_NUM" || name == "HEX_NUM" || name == "HEX_STRING" || name == "BIN_NUM")
+    return "number";
+  if (name == "PARAM_MARKER") return "?";
+  if (name.rfind("LEFT_PAREN", 0) == 0) return "(";
+  if (name == "HINT_COMMENT" || name == "ABORT_SYM" || name == "FORCE_LOOKAHEAD" ||
+      name == "IMPOSSIBLE_ACTION" || name == "error" || name.find("_ORACLE_") != std::string_view::npos)
+    return "";
+  std::string out(name);
+  for (const char *suffix : {"_SYM", "_SYMBOL"}) {
+    const std::string_view sfx(suffix);
+    if (out.size() > sfx.size() && out.compare(out.size() - sfx.size(), sfx.size(), sfx) == 0) {
+      out.resize(out.size() - sfx.size());
+      break;
+    }
+  }
+  return out;
+}
+
+std::vector<std::string> readable_expected(const std::vector<std::string> &expected) {
+  std::vector<std::string> out;
+  for (const auto &e : expected) {
+    auto r = readable_terminal(e);
+    if (!r.empty() && std::find(out.begin(), out.end(), r) == out.end()) out.push_back(r);
+  }
+  // Punctuation and word classes first, keywords after, as a reader scans them.
+  std::stable_sort(out.begin(), out.end(), [](const std::string &a, const std::string &b) {
+    const bool ka = !a.empty() && std::isupper(static_cast<unsigned char>(a[0]));
+    const bool kb = !b.empty() && std::isupper(static_cast<unsigned char>(b[0]));
+    return ka < kb;
+  });
+  return out;
+}
+
+std::string near_text(std::string_view text, const mdbls::Statement_check &c) {
+  if (c.error_length == 0) return "end of statement";
+  std::string t(text.substr(c.error_offset, std::min<uint32_t>(c.error_length, 40)));
+  for (auto &ch : t) {
+    if (ch == '\n' || ch == '\r' || ch == '\t') ch = ' ';
+  }
+  return "'" + t + (c.error_length > 40 ? "...'" : "'");
+}
+
+struct Check_summary {
+  size_t sql_statements = 0;
+  size_t errors = 0;
+};
+
+// Checks one file; writes text lines to `out` or one object to `w`.
+Check_summary run_check(const Options &o, const std::string &file, const std::string &text,
+                        const mdbls::Line_map &lines, const mdbls::Statement_index &index,
+                        mdbls::Parser_pool &pool, std::string *out,
+                        rapidjson::Writer<rapidjson::StringBuffer> *w) {
+  mdbls::Check_options copts;
+  copts.version_id = o.index.version_id;
+  const auto results = mdbls::check_statements(text, index, pool, copts);
+
+  Check_summary sum;
+  struct Note {
+    uint32_t offset;
+    std::string message;
+  };
+  std::vector<Note> notes;
+  std::string last_unsupported;
+  for (size_t i = 0; i < results.size(); ++i) {
+    const auto &st = index.statements()[i];
+    if (st.kind == mdbls::Statement_kind::sql) ++sum.sql_statements;
+    switch (results[i].status) {
+      case mdbls::Check_status::syntax_error:
+        ++sum.errors;
+        break;
+      case mdbls::Check_status::invalid_utf8:
+        notes.push_back({st.begin, "statement not checked: it is not valid UTF-8"});
+        break;
+      case mdbls::Check_status::unsupported_mode: {
+        const auto &mode = index.modes()[st.mode].mode;
+        if (mode != last_unsupported) {
+          notes.push_back({st.begin, "statements not checked from here: sql_mode " + mode +
+                                         " is not supported"});
+          last_unsupported = mode;
+        }
+        break;
+      }
+      case mdbls::Check_status::internal_error:
+        notes.push_back({st.begin, "statement not checked: internal parser error"});
+        break;
+      default:
+        if (st.kind == mdbls::Statement_kind::sql) last_unsupported.clear();
+        break;
+    }
+  }
+  if (index.open_at_end() != mdbls::Open_context::none) ++sum.errors;
+  for (const auto &e : index.errors()) notes.push_back({0, e});
+
+  auto pos = [&](uint32_t off) { return lines.position(text, off); };
+  if (w != nullptr) {
+    w->StartObject();
+    w->Key("file");
+    w->String(file.c_str());
+    w->Key("statements");
+    w->Uint64(sum.sql_statements);
+    w->Key("errors");
+    w->StartArray();
+    size_t listed = 0;
+    for (size_t i = 0; i < results.size() && listed < o.max_errors; ++i) {
+      const auto &c = results[i];
+      if (c.status != mdbls::Check_status::syntax_error) continue;
+      ++listed;
+      w->StartObject();
+      w->Key("start");
+      write_position(*w, pos(c.error_offset));
+      w->Key("offset");
+      w->Uint(c.error_offset);
+      w->Key("length");
+      w->Uint(c.error_length);
+      w->Key("token");
+      w->String(c.error_token.c_str());
+      w->Key("message");
+      w->String(("syntax error near " + near_text(text, c)).c_str());
+      w->Key("expected");
+      w->StartArray();
+      for (const auto &e : readable_expected(c.expected)) w->String(e.c_str());
+      w->EndArray();
+      w->EndObject();
+    }
+    if (const char *open = open_name(index.open_at_end())) {
+      w->StartObject();
+      w->Key("start");
+      write_position(*w, pos(static_cast<uint32_t>(text.size())));
+      w->Key("offset");
+      w->Uint(static_cast<uint32_t>(text.size()));
+      w->Key("length");
+      w->Uint(0);
+      w->Key("token");
+      w->String("$end");
+      w->Key("message");
+      w->String((std::string("the file ends inside an unterminated ") + open).c_str());
+      w->Key("expected");
+      w->StartArray();
+      w->EndArray();
+      w->EndObject();
+    }
+    w->EndArray();
+    w->Key("notes");
+    w->StartArray();
+    for (const auto &n : notes) {
+      w->StartObject();
+      w->Key("start");
+      write_position(*w, pos(n.offset));
+      w->Key("message");
+      w->String(n.message.c_str());
+      w->EndObject();
+    }
+    w->EndArray();
+    w->EndObject();
+    return sum;
+  }
+
+  auto where = [&](uint32_t off) {
+    const auto p = pos(off);
+    return file + ":" + std::to_string(p.line + 1) + ":" + std::to_string(p.character + 1);
+  };
+  size_t listed = 0;
+  for (size_t i = 0; i < results.size(); ++i) {
+    const auto &c = results[i];
+    if (c.status != mdbls::Check_status::syntax_error) continue;
+    if (listed++ == o.max_errors) {
+      *out += file + ": more errors not listed\n";
+      break;
+    }
+    *out += where(c.error_offset) + ": error: syntax error near " + near_text(text, c);
+    const auto expected = readable_expected(c.expected);
+    if (!expected.empty()) {
+      // Word classes and punctuation are listed; keywords too when there are
+      // few, otherwise only counted (where a name may stand, every
+      // non-reserved keyword may too).
+      std::vector<std::string> shown;
+      size_t keywords = 0;
+      for (const auto &e : expected) {
+        if (std::isupper(static_cast<unsigned char>(e[0]))) {
+          ++keywords;
+        } else {
+          shown.push_back(e);
+        }
+      }
+      if (keywords <= 8) {
+        for (const auto &e : expected)
+          if (std::isupper(static_cast<unsigned char>(e[0]))) shown.push_back(e);
+        keywords = 0;
+      }
+      *out += "; expected ";
+      for (size_t k = 0; k < shown.size(); ++k) {
+        *out += (k == 0 ? "" : (k + 1 == shown.size() && keywords == 0) ? " or " : ", ") + shown[k];
+      }
+      if (keywords > 0) {
+        *out += std::string(shown.empty() ? "" : " or ") + "one of " + std::to_string(keywords) +
+                " keywords";
+      }
+    }
+    *out += "\n";
+  }
+  if (const char *open = open_name(index.open_at_end())) {
+    *out += where(static_cast<uint32_t>(text.size())) +
+            ": error: the file ends inside an unterminated " + open + "\n";
+  }
+  for (const auto &n : notes) *out += where(n.offset) + ": note: " + n.message + "\n";
+  return sum;
+}
+
 std::optional<Options> parse_args(int argc, char **argv) {
   Options o;
   for (int i = 1; i < argc; ++i) {
@@ -367,21 +602,39 @@ std::optional<Options> parse_args(int argc, char **argv) {
       o.stats = true;
     } else if (o.command.empty() && arg.rfind("-", 0) != 0) {
       o.command = arg;
-    } else if (o.file.empty() && (arg == "-" || arg.rfind("-", 0) != 0)) {
-      o.file = arg;
+    } else if (arg == "--threads" || arg == "--max-errors") {
+      auto v = value();
+      if (!v) return std::nullopt;
+      char *end = nullptr;
+      const unsigned long n = std::strtoul(v->c_str(), &end, 10);
+      if (v->empty() || *end != '\0') {
+        std::cerr << "mariadb-lsp: " << arg << " needs a number\n";
+        return std::nullopt;
+      }
+      if (arg == "--threads") {
+        o.threads = static_cast<unsigned>(n);
+      } else {
+        o.max_errors = n;
+      }
+    } else if (arg == "-" || arg.rfind("-", 0) != 0) {
+      o.files.push_back(arg);
     } else {
       std::cerr << "mariadb-lsp: unexpected argument " << arg << "\n";
       return std::nullopt;
     }
   }
-  if (o.command != "split" && o.command != "tokens") {
+  if (o.command != "split" && o.command != "tokens" && o.command != "check") {
     std::cerr << (o.command.empty() ? std::string("mariadb-lsp: no command given\n")
                                     : "mariadb-lsp: unknown command " + o.command + "\n")
               << k_usage;
     return std::nullopt;
   }
-  if (o.file.empty()) {
+  if (o.files.empty()) {
     std::cerr << "mariadb-lsp: no input file (use - for stdin)\n";
+    return std::nullopt;
+  }
+  if (o.command != "check" && o.files.size() > 1) {
+    std::cerr << "mariadb-lsp: " << o.command << " takes one file\n";
     return std::nullopt;
   }
   return o;
@@ -393,35 +646,70 @@ int main(int argc, char **argv) {
   const auto o = parse_args(argc, argv);
   if (!o) return k_exit_usage;
 
-  auto t0 = Clock::now();
-  std::string text;
-  if (!read_input(o->file, &text)) {
-    std::cerr << "mariadb-lsp: cannot read " << o->file << "\n";
-    return k_exit_usage;
+  std::unique_ptr<mdbls::Parser_pool> pool;
+  if (o->command == "check") pool = std::make_unique<mdbls::Parser_pool>(o->threads);
+
+  rapidjson::StringBuffer json_buf;
+  rapidjson::Writer<rapidjson::StringBuffer> json(json_buf);
+  if (o->command == "check" && o->json) {
+    json.StartObject();
+    json.Key("files");
+    json.StartArray();
   }
-  const double read_ms = ms_since(t0);
 
-  t0 = Clock::now();
-  const mdbls::Line_map lines(text);
-  const double lines_ms = ms_since(t0);
+  int rc = k_exit_ok;
+  size_t total_errors = 0;
+  for (const auto &file : o->files) {
+    auto t0 = Clock::now();
+    std::string text;
+    if (!read_input(file, &text)) {
+      std::cerr << "mariadb-lsp: cannot read " << file << "\n";
+      return k_exit_usage;
+    }
+    const double read_ms = ms_since(t0);
 
-  t0 = Clock::now();
-  const auto index = mdbls::Statement_index::build(text, o->index);
-  const double index_ms = ms_since(t0);
+    t0 = Clock::now();
+    const mdbls::Line_map lines(text);
+    const double lines_ms = ms_since(t0);
 
-  t0 = Clock::now();
-  const int rc = o->command == "split" ? run_split(*o, text, lines, index)
-                                       : run_tokens(*o, text, lines, index);
-  std::cout.flush();
-  const double output_ms = ms_since(t0);
+    t0 = Clock::now();
+    const auto index = mdbls::Statement_index::build(text, o->index);
+    const double index_ms = ms_since(t0);
 
-  if (o->stats) {
-    std::fprintf(stderr,
-                 "bytes %zu, lines %u, statements %zu, sql_modes %zu\n"
-                 "read %.1f ms, line map %.1f ms, index %.1f ms, %s %.1f ms\n",
-                 text.size(), lines.line_count(), index.statements().size(),
-                 index.modes().size(), read_ms, lines_ms, index_ms, o->command.c_str(),
-                 output_ms);
+    t0 = Clock::now();
+    if (o->command == "split") {
+      rc = run_split(*o, text, lines, index);
+    } else if (o->command == "tokens") {
+      rc = run_tokens(*o, text, lines, index);
+    } else {
+      std::string out;
+      const auto sum = run_check(*o, file, text, lines, index, *pool, &out,
+                                 o->json ? &json : nullptr);
+      std::cout << out;
+      total_errors += sum.errors;
+    }
+    std::cout.flush();
+    const double output_ms = ms_since(t0);
+
+    if (o->stats) {
+      std::fprintf(stderr,
+                   "%s: bytes %zu, lines %u, statements %zu, sql_modes %zu\n"
+                   "read %.1f ms, line map %.1f ms, index %.1f ms, %s %.1f ms%s\n",
+                   file.c_str(), text.size(), lines.line_count(), index.statements().size(),
+                   index.modes().size(), read_ms, lines_ms, index_ms, o->command.c_str(),
+                   output_ms,
+                   pool ? (" (" + std::to_string(pool->max_threads()) + " threads)").c_str() : "");
+    }
+  }
+  if (o->command == "check") {
+    if (o->json) {
+      json.EndArray();
+      json.Key("errors");
+      json.Uint64(total_errors);
+      json.EndObject();
+      std::cout << json_buf.GetString() << '\n';
+    }
+    rc = total_errors > 0 ? k_exit_errors : k_exit_ok;
   }
   return rc;
 }

@@ -644,7 +644,20 @@ takes 5.4 s. Not done: a separate differential run against a `mariadb-shell` bin
 REST SQL merge"): no new conflicts, the shell's 233-statement grammar test parses, server
 verdicts unchanged over 212,332 recorded statements. The `MDBP_WITH_MRS` switch was not
 built: bison has no conditional sections, and the merged rules cost nothing when unused.
-Thread pool and `check` follow.
+
+**Status 2026-10-15: P2 is done on macOS.** `Parser_pool` (on-demand workers up to one per
+core, priorities, idle exit after 2 minutes, one parser cache per worker) and
+`check_statements()` (jobs of about 1 MB of statements, one result slot per statement)
+are in `libs/mariadblanguageserver`; `mariadb-lsp check FILE...` prints
+`FILE:LINE:COL: error: ...` with the expected terminals in readable form, notes statements
+it cannot check (ORACLE/MSSQL mode, invalid UTF-8), exits 0 or 1, and has `--format json`.
+Measured on this machine with 8 threads: a 256 MB dump checks in 2.2 s wall time with
+extended INSERTs and 2.7 s with one row per INSERT (2.29 M statements), of which the
+parallel check is 0.9 s and 1.3 s; peak memory 278 MB and 531 MB. Two errors planted at
+lines 1,000,000 and 2,000,000 are reported at their positions. ThreadSanitizer reports
+no race in the pool, checker and multi-thread tests or in a `check` run on 8 threads (no
+planted-race control was run). Not done: the viewport priority and stale-version
+dropping, which need the LSP document model (P4).
 
 - **Merge spike first (2–3 days):** merge the `MERGE PART` rules into
   `generated/yy_stub.yy` by hand to the point where bison accepts the grammar; the

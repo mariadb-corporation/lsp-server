@@ -20,6 +20,8 @@ ctest --test-dir bld
 ## Command line
 
 ```bash
+mariadb-lsp check FILE...         # syntax errors as FILE:LINE:COL, exit 1 if any
+mariadb-lsp check --format json FILE...
 mariadb-lsp split FILE            # the statements: position, kind, delimiter, sql_mode
 mariadb-lsp split --format json --text FILE
 mariadb-lsp tokens FILE           # the tokens of every statement
@@ -33,8 +35,8 @@ mariadb-lsp tokens FILE           # the tokens of every statement
 | --- | --- |
 | `libs/mariadbparser/` | the MariaDB server grammar and lexer as a standalone C library ([README](libs/mariadbparser/README.md)) |
 | `libs/sqlsplitter/` | MariaDB Shell's SQL statement splitter, maintained by hand ([UPSTREAM.md](libs/sqlsplitter/UPSTREAM.md)) |
-| `libs/mariadblanguageserver/` | the language server engine: statement index, line map, sql_mode tracking |
-| `src/mariadb-lsp/` | the `mariadb-lsp` command: `split` and `tokens` today |
+| `libs/mariadblanguageserver/` | the language server engine: statement index, line map, sql_mode tracking, parser pool, syntax check |
+| `src/mariadb-lsp/` | the `mariadb-lsp` command: `check`, `split` and `tokens` today |
 | `tests/fixtures/sql/` | SQL files used by tests (sakila schema, world, a mysqldump file) |
 | `scripts/gen_fixture_dump.py` | writes a mysqldump-style file of a given size for benchmarks |
 | `unittest/` | GoogleTest suites, built into one `run_unit_tests` binary |

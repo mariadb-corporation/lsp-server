@@ -30,3 +30,9 @@ add_test(NAME mariadb-lsp.usage COMMAND mariadb-lsp)
 set_tests_properties(mariadb-lsp.usage PROPERTIES WILL_FAIL TRUE)
 set_tests_properties(mariadb-lsp.split PROPERTIES
   PASS_REGULAR_EXPRESSION "CREATE TABLE actor")
+add_test(NAME mariadb-lsp.check-valid
+         COMMAND mariadb-lsp check "${_fixtures}/sakila-schema.sql" "${_fixtures}/mrs_grammar_test.sql")
+add_test(NAME mariadb-lsp.check-json
+         COMMAND mariadb-lsp check --format json "${_fixtures}/mysqldump_t.sql")
+set_tests_properties(mariadb-lsp.check-json PROPERTIES
+  PASS_REGULAR_EXPRESSION "sql_mode ORACLE is not supported")
