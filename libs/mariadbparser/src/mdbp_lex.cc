@@ -42,7 +42,6 @@
  * the parser's preserved grammar actions; see section 6.)
  */
 #include <limits.h>
-#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -693,15 +692,15 @@ extern "C" mdbp_lexer *mdbp_lex_new(const char *sql, size_t len,
    * therefore does not go on them, it goes HERE, on the one call site,
    * which is ours and survives regeneration.
    *
-   * pthread_once(3) rather than a C++ function-local static: a dynamically
-   * initialised local static makes the compiler emit __cxa_guard_acquire /
+   * mdbp_once() (src/mdbp_once.h: pthread_once, or InitOnceExecuteOnce on
+   * Windows), called through mdbp_lex_init_once() in src/mdbp_runtime.c,
+   * rather than a C++ function-local static: a dynamically initialised
+   * local static makes the compiler emit __cxa_guard_acquire /
    * __cxa_guard_release, which live in the C++ runtime library and would
    * make this library depend on it.  std::call_once is out for the same
-   * reason.  On POSIX systems this is the same primitive the C side's
-   * mdbp_once() (src/mdbp_once.h) uses, and it lives in libc.  Every thread
-   * returning from pthread_once() sees the finished tables, which is the
-   * happens-before edge a bare `if (!done)` would not give. */
-  static pthread_once_t keyword_lengths_once= PTHREAD_ONCE_INIT;
+   * reason.  Every thread returning from mdbp_once() sees the finished
+   * tables, which is the happens-before edge a bare `if (!done)` would not
+   * give. */
   unsigned long long bits= 0;
   mdbp_lexer *lx;
   mdbp_lexer *saved;
@@ -752,7 +751,7 @@ extern "C" mdbp_lexer *mdbp_lex_new(const char *sql, size_t len,
   lx->sel.parsing_place= NO_MATTER;
   lx->sel.save_parsing_place= NO_MATTER;
 
-  pthread_once(&keyword_lengths_once, lex_init);
+  mdbp_lex_init_once(lex_init);
 
   /* init() allocates the pre-processed buffer through THD::alloc, which reads
    * mdbp_current; set it for the duration.  system_charset_info and

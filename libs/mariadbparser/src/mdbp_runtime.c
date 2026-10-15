@@ -22,6 +22,12 @@ typedef struct mdbp_terminal {
 } mdbp_terminal;
 
 static mdbp_once_t mdbp_tables_once = MDBP_ONCE_INIT;
+static mdbp_once_t mdbp_lex_once = MDBP_ONCE_INIT;
+
+void mdbp_lex_init_once(void (*init)(void))
+{
+    mdbp_once(&mdbp_lex_once, init);
+}
 static const char **mdbp_kind_names;     /* [YYNTOKENS], NULL for undefined */
 static mdbp_terminal *mdbp_terminals;    /* sorted by name, for bsearch */
 static size_t mdbp_nterminals;

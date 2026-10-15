@@ -1,0 +1,4 @@
+# Test inputs are compared byte for byte (offsets, line breaks, Latin-1):
+# no line-ending conversion on any platform.
+tests/fixtures/** -text
+libs/mariadbparser/tests/** -text

@@ -3,8 +3,9 @@ name: MariaDB-LSP-Server-CI
 # Builds the language server and runs its unit tests.  Shaped like MariaDB
 # Shell's shell-ci.yml: the Linux build runs on the self-hosted devtools runner
 # (started by devtools-ci-start.yml) with ccache, a PR titled [bypass-ci] skips
-# the build, and a fork PR falls back to a GitHub-hosted runner.  A macOS job
-# runs on a GitHub-hosted runner.
+# the build, and a fork PR falls back to a GitHub-hosted runner.  macOS and
+# Windows jobs run on GitHub-hosted runners; the Windows job sets up MSVC,
+# vcpkg and win_bison as the shell's shell-release.yml does.
 
 on:
   pull_request:
@@ -91,3 +92,44 @@ jobs:
 
       - name: Unit tests
         run: ctest --test-dir bld --output-on-failure --parallel "$(sysctl -n hw.ncpu)"
+
+  windows:
+    name: Windows build and unit tests
+    if: ${{ !contains(github.event.pull_request.title, '[bypass-ci]') }}
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      # The VS 2022 toolset (MSVC 14.44), as in the shell's shell-release.yml.
+      - name: Setup Visual Studio 2022 Environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+          toolset: '14.44'
+
+      # vcpkg runs vcvarsall itself with the newest toolset it finds; the
+      # overlay triplet pins its ports to the same 14.44 toolset.
+      - name: Pin vcpkg to the VS 2022 toolset
+        run: echo "VCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}/.github/vcpkg-triplets" >> "$GITHUB_ENV"
+        shell: bash
+
+      # Git Bash's coreutils link.exe shadows the MSVC linker.
+      - name: Remove conflicting Git link.exe
+        run: rm -f "C:/Program Files/Git/usr/bin/link.exe"
+        shell: bash
+
+      # cmake/bison.cmake looks for win_bison in c:\ProgramData\chocolatey\bin.
+      - name: Tools
+        run: choco install winflexbison3 ninja -y
+
+      - name: Configure
+        run: |
+          cmake -S . -B bld -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DWITH_VCPKG_TRIPLET=x64-windows
+        shell: bash
+
+      - name: Build
+        run: cmake --build bld --parallel
+
+      - name: Unit tests
+        run: ctest --test-dir bld --output-on-failure --parallel 4

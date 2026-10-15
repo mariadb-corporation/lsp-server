@@ -88,7 +88,10 @@ set_target_properties(mariadbparser_shared PROPERTIES
   OUTPUT_NAME mariadbparser
   VERSION "${MDBP_VERSION}"
   SOVERSION "${MDBP_VERSION_MAJOR}"
-  LINKER_LANGUAGE CXX)
+  LINKER_LANGUAGE CXX
+  # The C API has no export annotations: on Windows export everything, the
+  # map file's job elsewhere.
+  WINDOWS_EXPORT_ALL_SYMBOLS ON)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_link_options(mariadbparser_shared PRIVATE
     "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/src/libmariadbparser.map")

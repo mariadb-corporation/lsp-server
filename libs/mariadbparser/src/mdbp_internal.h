@@ -67,6 +67,12 @@ void mdbp_ctx_reset(mdbp_ctx *ctx, const mdbp_token *tokens, size_t ntokens);
  * mdbp_ctx_init/mdbp_ctx_reset, both of which clear it. */
 void mdbp_ctx_set_source(mdbp_ctx *ctx, mdbp_source_fn source, void *user);
 
+/* Runs the lexer's one-time initialisation (src/mdbp_lex.cc) exactly once
+ * per process.  Here, in C, so that the lexer's translation unit, which
+ * compiles MariaDB's own code, never includes <windows.h> (its IN, OUT,
+ * min and max macros) for src/mdbp_once.h. */
+void mdbp_lex_init_once(void (*init)(void));
+
 /* --- src/parser_glue.c --------------------------------------------------- */
 
 /* Runs yyparse over ctx.  Returns bison's own code: 0 accepted, 1 rejected
