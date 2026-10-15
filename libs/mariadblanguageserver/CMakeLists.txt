@@ -17,6 +17,7 @@
 # MariaDB Shell comes later (see docs/plans/core-implementation.md).
 
 add_library(mariadblanguageserver STATIC
+  src/charset.cc
   src/line_map.cc
   src/sql_mode.cc
   src/statement_index.cc

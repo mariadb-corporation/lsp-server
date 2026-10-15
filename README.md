@@ -29,6 +29,8 @@ mariadb-lsp tokens FILE           # the tokens of every statement
 
 `--sql-mode`, `--delimiter` and `--version-id` set the state at the start of the file; `SET sql_mode` and `DELIMITER` in the file are followed from there. `mariadb-lsp --help` lists all options.
 
+Files are read as UTF-8. A Latin-1 file is converted to UTF-8 first when `--charset latin1` is given, or when it declares `SET NAMES latin1` (also in a versioned comment, as mysqldump writes it) before its first byte that is not UTF-8. Line and column numbers stay those of the original file. Any other file that is not valid UTF-8 is an error naming the first such byte, with exit status 2.
+
 ## Layout
 
 | Path | What it is |

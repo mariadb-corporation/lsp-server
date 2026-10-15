@@ -36,3 +36,10 @@ add_test(NAME mariadb-lsp.check-json
          COMMAND mariadb-lsp check --format json "${_fixtures}/mysqldump_t.sql")
 set_tests_properties(mariadb-lsp.check-json PROPERTIES
   PASS_REGULAR_EXPRESSION "sql_mode ORACLE is not supported")
+add_test(NAME mariadb-lsp.check-latin1-declared COMMAND mariadb-lsp check "${_fixtures}/world.sql")
+add_test(NAME mariadb-lsp.check-latin1-undeclared
+         COMMAND mariadb-lsp check "${_fixtures}/latin1_undeclared.sql")
+set_tests_properties(mariadb-lsp.check-latin1-undeclared PROPERTIES
+  PASS_REGULAR_EXPRESSION "latin1_undeclared.sql:2:30: error: the file is not valid UTF-8 \\(byte 0xB4\\)")
+add_test(NAME mariadb-lsp.check-latin1-option
+         COMMAND mariadb-lsp check --charset latin1 "${_fixtures}/latin1_undeclared.sql")

@@ -40,6 +40,7 @@
 #include <string>
 #include <vector>
 
+#include "mdbls/charset.h"
 #include "mdbls/line_map.h"
 #include "mdbls/parser_pool.h"
 #include "mdbls/statement_index.h"
@@ -66,6 +67,9 @@ const char *const k_usage =
     "  --sql-mode LIST    the sql_mode at the start of the file; SET sql_mode in\n"
     "                     the file is followed from there\n"
     "  --delimiter D      the delimiter at the start of the file (default ;)\n"
+    "  --charset NAME     the file's character set: utf8mb4 (default) or latin1;\n"
+    "                     a file that is not valid UTF-8 is read as latin1 when it\n"
+    "                     declares SET NAMES latin1 before its first non-UTF-8 byte\n"
     "  --version-id N     release id versioned comments are judged against\n"
     "                     (major*10000 + minor*100 + patch; default 130100)\n"
     "  --format tsv|json  output format (default tsv)\n"
@@ -84,6 +88,7 @@ const char *const k_usage =
 struct Options {
   std::string command;
   std::vector<std::string> files;
+  std::optional<mdbls::File_charset> charset;
   unsigned threads = 0;
   size_t max_errors = 100;
   mdbls::Index_options index;
@@ -558,6 +563,51 @@ Check_summary run_check(const Options &o, const std::string &file, const std::st
   return sum;
 }
 
+// A file read from disk, as UTF-8.  Returns false, after printing why, when
+// the file is not valid UTF-8 and nothing says it is latin1.
+bool to_utf8(const Options &o, const std::string &file, std::string *text,
+             std::string *charset, std::vector<std::string> *notes) {
+  // Line and column of `off`; the text before it must be valid UTF-8 (it is
+  // the first invalid byte, or a position in converted text).
+  auto where = [&](const std::string &t, size_t off) {
+    const mdbls::Line_map lines(t);
+    const uint32_t line = lines.line_of(static_cast<uint32_t>(off));
+    const uint32_t start = lines.line_start(line);
+    const uint32_t col = mdbls::utf16_length(std::string_view(t).substr(start, off - start));
+    return file + ":" + std::to_string(line + 1) + ":" + std::to_string(col + 1);
+  };
+  bool latin1 = o.charset == mdbls::File_charset::latin1;
+  const auto bad = latin1 ? std::nullopt : mdbls::first_invalid_utf8(*text);
+  if (bad && !o.charset) {
+    const auto declared = mdbls::declared_charset(*text, *bad);
+    if (declared && mdbls::parse_charset_name(*declared) == mdbls::File_charset::latin1) {
+      latin1 = true;
+      notes->push_back("read as latin1, as its SET NAMES " + *declared + " declares");
+    }
+  }
+  if (bad && !latin1) {
+    char byte[8];
+    std::snprintf(byte, sizeof byte, "0x%02X", static_cast<unsigned char>((*text)[*bad]));
+    std::cerr << where(*text, *bad) << ": error: the file is not valid UTF-8 (byte " << byte
+              << "); if it is Latin-1, use --charset latin1\n";
+    return false;
+  }
+  if (!latin1) {
+    *charset = "utf8mb4";
+    return true;
+  }
+  *text = mdbls::latin1_to_utf8(*text);
+  *charset = "latin1";
+  // The whole file is read as latin1; say where it declares something else.
+  for (const auto &d : mdbls::charset_declarations(*text)) {
+    if (mdbls::parse_charset_name(d.name) != mdbls::File_charset::latin1) {
+      notes->push_back(where(*text, d.offset) + ": note: the file declares SET NAMES " + d.name +
+                       " here; it is read as latin1 throughout");
+    }
+  }
+  return true;
+}
+
 std::optional<Options> parse_args(int argc, char **argv) {
   Options o;
   for (int i = 1; i < argc; ++i) {
@@ -576,6 +626,14 @@ std::optional<Options> parse_args(int argc, char **argv) {
       auto v = value();
       if (!v) return std::nullopt;
       o.index.sql_mode = *v;
+    } else if (arg == "--charset") {
+      auto v = value();
+      if (!v) return std::nullopt;
+      o.charset = mdbls::parse_charset_name(*v);
+      if (!o.charset) {
+        std::cerr << "mariadb-lsp: --charset is utf8mb4 or latin1\n";
+        return std::nullopt;
+      }
     } else if (arg == "--delimiter") {
       auto v = value();
       if (!v || v->empty()) return std::nullopt;
@@ -659,12 +717,22 @@ int main(int argc, char **argv) {
 
   int rc = k_exit_ok;
   size_t total_errors = 0;
+  bool unreadable = false;
   for (const auto &file : o->files) {
     auto t0 = Clock::now();
     std::string text;
     if (!read_input(file, &text)) {
       std::cerr << "mariadb-lsp: cannot read " << file << "\n";
       return k_exit_usage;
+    }
+    std::string charset;
+    std::vector<std::string> charset_notes;
+    if (!to_utf8(*o, file, &text, &charset, &charset_notes)) {
+      unreadable = true;
+      continue;
+    }
+    for (const auto &n : charset_notes) {
+      std::cerr << (n.rfind(file + ":", 0) == 0 ? n : file + ": note: " + n) << "\n";
     }
     const double read_ms = ms_since(t0);
 
@@ -711,5 +779,5 @@ int main(int argc, char **argv) {
     }
     rc = total_errors > 0 ? k_exit_errors : k_exit_ok;
   }
-  return rc;
+  return unreadable ? k_exit_usage : rc;
 }
