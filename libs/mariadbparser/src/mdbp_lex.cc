@@ -23,7 +23,7 @@
  * table and charlen, latin1's ctype table and my_strtoll10.
  *
  * Shim (below, each with its reason): the fake THD/LEX/SELECT_LEX state
- * tools/vendor/thd.md ledgers, the memory the lexer allocates from, the
+ * docs/thd.md ledgers, the memory the lexer allocates from, the
  * keyword hash MariaDB generates with sql/gen_lex_hash.cc, the charset-name
  * lookup the server answers from a runtime table, and the two
  * "not modelled" families -- the pre-processed (binlog) buffer and the

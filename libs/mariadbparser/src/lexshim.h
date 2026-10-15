@@ -1,7 +1,7 @@
 /* src/lexshim.h -- the fake THD / LEX / SELECT_LEX surface the sliced lexer
  * compiles against.
  *
- * SEEDED FROM tools/vendor/thd.md, WHICH IS THE LEDGER OF SERVER STATE THE
+ * SEEDED FROM docs/thd.md, WHICH IS THE LEDGER OF SERVER STATE THE
  * LEXER READS.  One field per row of that document, each carrying the
  * sql_lex.cc line the ledger cites as a comment.  Nothing here is invented:
  * a `thd.md` tag on a field says the ledger asked for it; an untagged
@@ -15,12 +15,13 @@
  * plus MariaDB's spellings for the C scaffolding its own sources use.
  *
  * Every function declared below has a body in src/mdbp_lex.cc, carrying the
- * tools/vendor/thd.md row or the sql_lex.cc behaviour that justifies it and
+ * docs/thd.md row or the sql_lex.cc behaviour that justifies it and
  * saying whether it is faithful or a deliberate no-op.  Nothing that is
  * lexing is shimmed: `init`, `reset`, `get_text` and `unescape` are part of
  * the slice.
  *
- * tools/vendor/thd.md is VENDORED: read it, never patch it.
+ * docs/thd.md is maintained together with this file: a change to what the
+ * shim models updates both.
  */
 #ifndef MDBP_LEXSHIM_H
 #define MDBP_LEXSHIM_H

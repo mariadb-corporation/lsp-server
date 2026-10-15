@@ -15,8 +15,8 @@
  * tables, this project's own internal mdbp_* helpers) falls through to
  * `local: *;` and is NOT in the exported dynamic symbol table, so it cannot
  * collide with the next library sharing the process -- the whole reason
- * this file exists. The exported set must equal the header's functions;
- * tools/common.py's header_functions() lists them from the header.
+ * this file exists. The exported set must equal the functions declared in
+ * include/mdbparse.h; adding a function there means adding it here too.
  *
  * The version NODE's name carries the major too. It moved from
  * MDBPARSER_1.0 to MDBPARSER_2.0 with MDBP_VERSION_MAJOR and the soname, in

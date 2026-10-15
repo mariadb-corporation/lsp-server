@@ -34,7 +34,8 @@ tree at the pin:
 
 1. `cmake -DIN=sql/sql_yacc.yy -DOUT1=yy_mariadb.yy -DOUT2=yy_oracle.yy -DVAL1=MARIADB -DVAL2=ORACLE -P sql/gen_yy_files.cmake`
    (the server's own `%ifdef` preprocessor).
-2. `tools/stub.py --in yy_mariadb.yy --out yy_stub.yy --map stub-map.json`.
+2. `tools/stub.py --in yy_mariadb.yy --out yy_stub.yy` (`--map stub-map.json` also writes
+   a manifest of every replaced and preserved action).
 3. `bison -d -Dparse.lac=full -o parser.c yy_stub.yy`, without warnings; step 4 reads
    the token numbers from its `parser.h`.
 4. `tools/lexslice.py --source <tree> --out <dir> --parser-h parser.h --compile-state-maps`.
@@ -85,7 +86,7 @@ Kept from the original regeneration notes, since a re-extraction has to re-check
 - `lexslice.py` slices by a symbol list and has one named rewrite rule; a renamed or
   newly split lexer function has to be added to the list.
 - `src/lexshim.h` shims the pieces of `THD` / `LEX` the sliced lexer touches; the
-  ledger of what is and is not modelled is `tools/vendor/thd.md`.
+  ledger of what is and is not modelled is `docs/thd.md`.
 - The MariaDB variant of the grammar declares `%expect 72`. Merging the REST SQL rules
   will change the count; the new count and each added conflict's resolution go into
   the deviations below.
@@ -100,8 +101,16 @@ Tools:
 
 - `tools/gen_tables.py` was removed: the runtime builds the same tables from bison's
   own arrays.
+- `tools/stub.py` lost its override mechanism and its rule-map mode;
+  `tools/lexslice.py` lost its host check and its default paths (`--source` and
+  `--out` are required); `tools/common.py` keeps only what the two tools use.
 - `tools/lexslice.py` no longer passes GCC's `-fdiagnostics-plain-output` when it
   compiles the state-map generator, so it also runs with Clang.
+- The wording the tools emit into the banner and a few comments of
+  `generated/lexer_extracted.cc` and `generated/state_maps.h` no longer refers to the
+  original project; a re-extraction still reproduces `generated/` byte for byte.
+- The ledger of modelled server state moved from `tools/vendor/thd.md` to
+  `docs/thd.md` and is maintained here.
 
 Library sources (behaviour unchanged, as the replay above shows):
 
@@ -109,9 +118,11 @@ Library sources (behaviour unchanged, as the replay above shows):
   and `yytranslate[]`; `src/stub.h` defines `MDBP_R(n)` to record `yyn - 1`.
 - `src/mdbp_once.h` replaces C11 `call_once`, which macOS lacks, with `pthread_once`
   or `InitOnceExecuteOnce`.
-
-Comments in `include/mdbparse.h` and `src/` still refer to the original project's
-`PLAN.md`, evidence records and Python tests, which are not in this repository.
+- `src/mdbparse.c`, a 2,500-line harness for comparing against the original project's
+  Python reference lexer, was replaced by `src/mdbparse.cc`, a small CLI on the public
+  API. The internal functions only the old CLI used were removed with it.
+- Comments no longer refer to the original project's plan, evidence records, corpus
+  or Python tests.
 
 ## Manual deviations from upstream
 
