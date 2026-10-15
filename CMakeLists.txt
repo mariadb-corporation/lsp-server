@@ -36,9 +36,28 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/bootstrap_vcpkg.cmake)
 # Shell: -DMARIADB_SOURCE_DIR=<src> -DMARIADB_BUILD_DIR=<bld> for an existing
 # build (the client targets built), else the tree is fetched and the client
 # targets built at configure time (cmake/bootstrap_mariadb.cmake).
+# The server commit is pinned in libs/mariadbparser/UPSTREAM.md, read by
+# cmake/mariadb_pin.cmake; moving the pin there re-runs the bootstrap.
 option(WITH_MARIADB_CLIENT "Link the MariaDB client library (live connections)" ON)
-if(WITH_MARIADB_CLIENT AND NOT MARIADB_SOURCE_DIR)
-  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/bootstrap_mariadb.cmake)
+if(WITH_MARIADB_CLIENT)
+  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/mariadb_pin.cmake)
+  if(NOT MARIADB_SOURCE_DIR OR
+     (MDBLS_BOOTSTRAPPED_REF AND NOT MDBLS_BOOTSTRAPPED_REF STREQUAL MDBLS_MARIADB_REF))
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/bootstrap_mariadb.cmake)
+  elseif(NOT MDBLS_BOOTSTRAPPED_REF)
+    # A server tree given with -DMARIADB_SOURCE_DIR: check it is at the pin.
+    find_package(Git QUIET)
+    if(GIT_FOUND)
+      execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${MARIADB_SOURCE_DIR}" rev-parse HEAD
+                      OUTPUT_VARIABLE _mdbls_tree_head OUTPUT_STRIP_TRAILING_WHITESPACE
+                      ERROR_QUIET RESULT_VARIABLE _rc)
+      if(_rc EQUAL 0 AND NOT _mdbls_tree_head STREQUAL MDBLS_MARIADB_PIN)
+        message(WARNING "MARIADB_SOURCE_DIR is at ${_mdbls_tree_head}, not at the pin "
+          "${MDBLS_MARIADB_PIN} in libs/mariadbparser/UPSTREAM.md: the client "
+          "library and the grammar come from different server commits.")
+      endif()
+    endif()
+  endif()
 endif()
 
 # The project version comes from the VERSION file ("VERSION = x.y.z").

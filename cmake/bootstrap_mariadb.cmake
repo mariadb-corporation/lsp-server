@@ -18,7 +18,7 @@
 # bootstrap_mariadb.cmake
 #
 # Copied from MariaDB Shell's cmake/bootstrap_mariadb.cmake.  Differences: the
-# default ref is the commit libs/mariadbparser is pinned to (UPSTREAM.md), so
+# default ref is the commit libs/mariadbparser/UPSTREAM.md pins, read from that file, so
 # the client library and the grammar come from the same release; the default
 # location is ../mariadb-server-lsp, so this never moves the checkout a shell
 # build uses; and a new checkout is made with a depth-1 fetch, which works for
@@ -48,8 +48,10 @@
 # known to match this shell revision.
 SET(MARIADB_GIT_REPOSITORY "https://github.com/MariaDB/server.git"
   CACHE STRING "Git URL of the MariaDB server to fetch when no source dir is given")
-SET(MARIADB_GIT_TAG "bab03b0fc44e7aeac869b20b0055c6a8f2083eb6"
-  CACHE STRING "Git ref (branch, tag, or commit) of the MariaDB server to fetch")
+# The ref comes from cmake/mariadb_pin.cmake: MARIADB_GIT_TAG when given,
+# else the commit libs/mariadbparser/UPSTREAM.md pins.
+INCLUDE(${CMAKE_CURRENT_LIST_DIR}/mariadb_pin.cmake)
+SET(_mdb_ref "${MDBLS_MARIADB_REF}")
 
 # Where the server is cloned and built. Kept OUTSIDE the shell build dir by
 # default so a clean shell rebuild does not force a full server re-clone/rebuild.
@@ -72,7 +74,7 @@ ENDIF()
 MESSAGE(STATUS "==========================================================")
 MESSAGE(STATUS "No MYSQL/MARIADB source dir given -- bootstrapping MariaDB.")
 MESSAGE(STATUS "  repo    : ${MARIADB_GIT_REPOSITORY}")
-MESSAGE(STATUS "  ref     : ${MARIADB_GIT_TAG}")
+MESSAGE(STATUS "  ref     : ${_mdb_ref}")
 MESSAGE(STATUS "  location: ${MARIADB_BOOTSTRAP_DIR}")
 MESSAGE(STATUS "  (override with -DMARIADB_SOURCE_DIR / -DMARIADB_GIT_TAG /")
 MESSAGE(STATUS "   -DMARIADB_BOOTSTRAP_DIR; an existing checkout is updated to the")
@@ -105,13 +107,13 @@ IF(NOT EXISTS "${_mdb_src}/.git")
 ENDIF()
 
 # Bring the checkout to the ref (a fresh one, or one left by an earlier run).
-MESSAGE(STATUS "Updating the MariaDB checkout at ${_mdb_src} to '${MARIADB_GIT_TAG}'...")
+MESSAGE(STATUS "Updating the MariaDB checkout at ${_mdb_src} to '${_mdb_ref}'...")
 EXECUTE_PROCESS(
   COMMAND "${GIT_EXECUTABLE}" -C "${_mdb_src}" fetch --progress --depth 1
-          --no-tags origin "${MARIADB_GIT_TAG}"
+          --no-tags origin "${_mdb_ref}"
   RESULT_VARIABLE _rc)
 IF(NOT _rc EQUAL 0)
-  MESSAGE(FATAL_ERROR "Could not fetch '${MARIADB_GIT_TAG}' into ${_mdb_src}. "
+  MESSAGE(FATAL_ERROR "Could not fetch '${_mdb_ref}' into ${_mdb_src}. "
     "To build against that tree as it is (e.g. offline), configure with "
     "-DMARIADB_SOURCE_DIR=${_mdb_src} -DMARIADB_BUILD_DIR=${_mdb_bld} instead.")
 ENDIF()
@@ -119,7 +121,7 @@ EXECUTE_PROCESS(
   COMMAND "${GIT_EXECUTABLE}" -C "${_mdb_src}" checkout --detach FETCH_HEAD
   RESULT_VARIABLE _rc)
 IF(NOT _rc EQUAL 0)
-  MESSAGE(FATAL_ERROR "Failed to check out '${MARIADB_GIT_TAG}' in ${_mdb_src}")
+  MESSAGE(FATAL_ERROR "Failed to check out '${_mdb_ref}' in ${_mdb_src}")
 ENDIF()
 
 # The Connector/C (libmariadb) lives in a git submodule; the shell links it.
@@ -284,6 +286,9 @@ ENDFOREACH()
 ##############################################################################
 SET(MARIADB_SOURCE_DIR "${_mdb_src}" CACHE PATH "Auto-fetched MariaDB server source" FORCE)
 SET(MARIADB_BUILD_DIR  "${_mdb_bld}" CACHE PATH "Auto-built MariaDB server build"  FORCE)
+# Remembered so that the top-level CMakeLists.txt re-runs this bootstrap when
+# the ref moves (for example when the pin in UPSTREAM.md changes).
+SET(MDBLS_BOOTSTRAPPED_REF "${_mdb_ref}" CACHE INTERNAL "Ref the client library was bootstrapped from")
 
 MESSAGE(STATUS "MariaDB bootstrap complete:")
 MESSAGE(STATUS "  MARIADB_SOURCE_DIR = ${MARIADB_SOURCE_DIR}")
