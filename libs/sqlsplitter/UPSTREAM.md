@@ -43,6 +43,11 @@ All are marked `lsp-server:` in the source.
     at statement level. The shell has the same bug; its chunked `iterate_sql_stream()`
     hides it when a statement ends inside the chunk that is still being read, because
     an unfinished statement is scanned again from its start.
+  - **performance fix**: the delimiter test called `m_delimiter.compare(0, n, p, 0, n)`
+    with a raw `char *p`, which builds a `string_view` of `p` and so runs `strlen()` to
+    the end of the buffer at every byte that starts like the delimiter. Over a whole
+    document that is quadratic (32 s for a 256 MB dump); the shell does not notice
+    because it feeds 64 KB chunks. The test now compares exactly `n` bytes.
 - `utils_mysql_parsing_t.cc`: includes `<gtest/gtest.h>` and the header by its full
   path instead of the shell's test headers, and defines local stand-ins for
   `g_test_trace_scripts`, `shcore::str_rstrip()` and `shcore::str_format()`.

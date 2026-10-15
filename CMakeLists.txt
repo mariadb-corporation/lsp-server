@@ -90,6 +90,7 @@ enable_testing()
 add_subdirectory(libs/mariadbparser)
 add_subdirectory(libs/sqlsplitter)
 add_subdirectory(libs/mariadblanguageserver)
+add_subdirectory(src/mariadb-lsp)
 
 if(WITH_TESTS)
   add_subdirectory(unittest)

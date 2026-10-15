@@ -17,11 +17,26 @@ ctest --test-dir bld
 - `-DWITH_VCPKG_TRIPLET=<triplet>` (for example `arm64-osx`, `x64-linux-dynamic`) fetches vcpkg into `../vcpkg`, or uses `VCPKG_ROOT`, and installs the dependencies in `vcpkg.json`. `-DWITH_TESTS=0` leaves GoogleTest out.
 - The MariaDB client library is built from a MariaDB server tree, as in MariaDB Shell. Without options the configure step fetches the server at the commit `libs/mariadbparser` is pinned to into `../mariadb-server-lsp` and builds only the client targets there. To use an existing server build instead, pass `-DMARIADB_SOURCE_DIR=<src> -DMARIADB_BUILD_DIR=<bld>`, with `mariadbclient mysys mysys_ssl caching_sha2_password GenError` built in it. `-DWITH_MARIADB_CLIENT=OFF` builds without the client library.
 
+## Command line
+
+```bash
+mariadb-lsp split FILE            # the statements: position, kind, delimiter, sql_mode
+mariadb-lsp split --format json --text FILE
+mariadb-lsp tokens FILE           # the tokens of every statement
+```
+
+`--sql-mode`, `--delimiter` and `--version-id` set the state at the start of the file; `SET sql_mode` and `DELIMITER` in the file are followed from there. `mariadb-lsp --help` lists all options.
+
 ## Layout
 
 | Path | What it is |
 | --- | --- |
 | `libs/mariadbparser/` | the MariaDB server grammar and lexer as a standalone C library ([README](libs/mariadbparser/README.md)) |
+| `libs/sqlsplitter/` | MariaDB Shell's SQL statement splitter, maintained by hand ([UPSTREAM.md](libs/sqlsplitter/UPSTREAM.md)) |
+| `libs/mariadblanguageserver/` | the language server engine: statement index, line map, sql_mode tracking |
+| `src/mariadb-lsp/` | the `mariadb-lsp` command: `split` and `tokens` today |
+| `tests/fixtures/sql/` | SQL files used by tests (sakila schema, world, a mysqldump file) |
+| `scripts/gen_fixture_dump.py` | writes a mysqldump-style file of a given size for benchmarks |
 | `unittest/` | GoogleTest suites, built into one `run_unit_tests` binary |
 | `cmake/` | build modules, most copied from MariaDB Shell |
 | `docs/plans/` | the implementation plan |

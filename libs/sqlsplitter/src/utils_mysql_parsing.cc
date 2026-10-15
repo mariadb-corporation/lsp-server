@@ -353,10 +353,12 @@ bool Sql_splitter::next_range(Sql_splitter::Range *out_range,
           }
         } else {
           // check for the current delimiter
+          // lsp-server: compare exactly m_delimiter.size() bytes.  Upstream's
+          // compare(0, n, p, 0, n) makes a string_view of `p` first, which
+          // is a strlen() to the end of the buffer at every candidate.
           if (*p == m_delimiter[0] &&
               (p + m_delimiter.size() <= eol &&
-               m_delimiter.compare(0, m_delimiter.size(), p, 0,
-                                   m_delimiter.size()) == 0)) {
+               std::string_view(p, m_delimiter.size()) == m_delimiter)) {
             if (command && run_command(true)) continue;
             pop();
             Range range{static_cast<size_t>(bos - m_begin),

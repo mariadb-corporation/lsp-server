@@ -611,6 +611,22 @@ git hooks (they enforce copyright headers the imported parser sources lack),
 
 ### P1 — Splitter and statement index (1 week)
 
+**Status 2026-10-15: done on macOS.** `libs/sqlsplitter` holds the shell's splitter
+(commit `6c0d7a9`, maintained by hand, `UPSTREAM.md`), its 308 tests pass. Two upstream
+bugs were fixed here and should go back to the shell: a `$` inside a versioned comment
+left the comment open (two statements merged), and the delimiter test ran `strlen()` to
+the end of the buffer at every `;` (quadratic on a whole file; hidden in the shell by
+64 KB chunks). `libs/mariadblanguageserver` has `Line_map`, the `sql_mode` tracker
+(follows mysqldump's save/restore) and `Statement_index`; it matches the shell's own
+chunked driver on the sakila schema, `world.sql` and a mysqldump file. `mariadb-lsp
+split` and `tokens` exist. Measured on this machine (Apple M-series, macOS) with
+`scripts/gen_fixture_dump.py`: indexing a 256 MB dump takes 1.2 s with extended
+INSERTs (8,112 statements) and 1.2 s with one row per INSERT (2.29 M statements); peak
+memory is 17 MB and 120 MB above the file's 256 MB. `tokens` over the 256 MB dump
+takes 5.4 s. Not done: a separate differential run against a `mariadb-shell` binary
+(the comparison uses the shell's code linked here instead).
+
+
 - `libs/sqlsplitter`: vendored `Sql_splitter`, dependencies cut, its 1,829-line gtest
   suite ported.
 - `StatementIndex` (§2.1): streaming build from a file or buffer, line table,

@@ -58,6 +58,14 @@ class Line_map {
   // from.  An offset inside a multi-byte character maps to that character.
   Position position(std::string_view text, uint32_t offset) const;
 
+  // Like position(), but counts forward from a position already known:
+  // `from` must be position(text, from_offset) and `offset` >= from_offset.
+  // Converting many increasing offsets this way (all tokens of a statement)
+  // costs one pass over the text instead of one pass per offset from its
+  // line start, which matters on long lines such as mysqldump's INSERTs.
+  Position position_after(std::string_view text, uint32_t from_offset, Position from,
+                          uint32_t offset) const;
+
   // LSP position to byte offset.  A line past the end gives the text size; a
   // character past the end of its line gives the line's end (before the line
   // break); a character in the middle of a surrogate pair gives the start of

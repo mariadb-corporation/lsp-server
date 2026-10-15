@@ -98,6 +98,23 @@ Position Line_map::position(std::string_view text, uint32_t offset) const {
   return {line, utf16_length(text.substr(start, offset - start))};
 }
 
+Position Line_map::position_after(std::string_view text, uint32_t from_offset,
+                                  Position from, uint32_t offset) const {
+  offset = std::min(offset, m_size);
+  from_offset = std::min(from_offset, m_size);
+  if (offset < from_offset) return position(text, offset);
+  // Both ends to the start of their character, as position() does.
+  auto char_start = [&](uint32_t o) {
+    while (o > 0 && o < m_size && (static_cast<unsigned char>(text[o]) & 0xC0) == 0x80) --o;
+    return o;
+  };
+  offset = char_start(offset);
+  from_offset = char_start(from_offset);
+  const uint32_t line = line_of(offset);
+  if (line != from.line) return position(text, offset);
+  return {line, from.character + utf16_length(text.substr(from_offset, offset - from_offset))};
+}
+
 uint32_t Line_map::offset(std::string_view text, Position pos) const {
   if (pos.line >= m_starts.size()) return m_size;
   const uint32_t start = m_starts[pos.line];

@@ -96,4 +96,20 @@ TEST(Line_map, round_trip_every_character_start) {
   }
 }
 
+TEST(Line_map, position_after_matches_position) {
+  const std::string text =
+      "INSERT INTO t VALUES ('caf\xC3\xA9', '\xF0\x9F\x98\x80');\r\nSELECT 1;\nx";
+  Line_map map(text);
+  uint32_t from = 0;
+  Position from_pos = map.position(text, 0);
+  for (uint32_t off = 0; off <= text.size(); off += 3) {
+    const Position p = map.position_after(text, from, from_pos, off);
+    EXPECT_EQ(map.position(text, off), p) << "offset " << off;
+    from = off;
+    from_pos = p;
+  }
+  // Going backwards falls back to position().
+  EXPECT_EQ(map.position(text, 2), map.position_after(text, 20, map.position(text, 20), 2));
+}
+
 }  // namespace mdbls
