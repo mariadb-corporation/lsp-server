@@ -686,6 +686,20 @@ dropping, which need the LSP document model (P4).
 
 ### P3 — Syntax tree, object model, `outline` (2–3 weeks)
 
+**Status 2026-10-15: done on macOS.** Instead of a rule-info table generated at build
+time, libmariadbparser 2.3 records the parser's stack depth at every reduction
+(`mdbp_derivation_depths()`) and exposes bison's own rule and symbol tables
+(`mdbp_grammar_*()`), which give the exact tree with no grammar change. `Syntax_tree`
+builds it; `Catalog` folds CREATE/ALTER/DROP/RENAME/USE (tables with columns, indexes,
+foreign keys, checks and options; views, routines, triggers, events, sequences; REST
+services, schemas, objects, content sets, auth apps, roles, users); `mariadb-lsp outline`
+writes it as JSON format 1 (`docs/outline-format.md`), `mariadb-lsp tree` prints trees.
+The sakila schema folds completely (35 of 35 DDL statements) and is a golden test; a test
+fails when a rule name the fold uses leaves the grammar. On the 256 MB dumps the outline
+phase takes 4 ms and 38 ms on 8 threads (only DDL is parsed), against 1.2 s for indexing.
+Not done: `textDocument/documentSymbol` (P4), a JSON Schema file for the format, and
+reading objects out of statements with a syntax error.
+
 - libmariadbparser 2.3: `mdbp_rule_info()` generated from the grammar model; symbol
   version `MDBPARSER_2.3`.
 - Tree builder (§2.4a), arena nodes, lookup by rule name, token spans.

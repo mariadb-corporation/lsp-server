@@ -42,6 +42,7 @@
 
 #include "mdbls/charset.h"
 #include "mdbls/line_map.h"
+#include "mdbls/outline.h"
 #include "mdbls/parser_pool.h"
 #include "mdbls/statement_index.h"
 #include "mdbls/syntax_check.h"
@@ -61,6 +62,7 @@ const char *const k_usage =
     "  check    check the syntax of SQL files: prints the errors, or nothing\n"
     "           (with --format json, a summary); exit 0 when there are none,\n"
     "           1 when there are\n"
+    "  outline  the schema objects a SQL file defines, as JSON\n"
     "  split    list the statements of a SQL file\n"
     "  tokens   list the tokens of every statement of a SQL file\n"
     "  tree     print the parse tree of every statement of a SQL file\n"
@@ -725,7 +727,7 @@ std::optional<Options> parse_args(int argc, char **argv) {
     }
   }
   if (o.command != "split" && o.command != "tokens" && o.command != "check" &&
-      o.command != "tree") {
+      o.command != "tree" && o.command != "outline") {
     std::cerr << (o.command.empty() ? std::string("mariadb-lsp: no command given\n")
                                     : "mariadb-lsp: unknown command " + o.command + "\n")
               << k_usage;
@@ -749,7 +751,9 @@ int main(int argc, char **argv) {
   if (!o) return k_exit_usage;
 
   std::unique_ptr<mdbls::Parser_pool> pool;
-  if (o->command == "check") pool = std::make_unique<mdbls::Parser_pool>(o->threads);
+  if (o->command == "check" || o->command == "outline") {
+    pool = std::make_unique<mdbls::Parser_pool>(o->threads);
+  }
 
   rapidjson::StringBuffer json_buf;
   rapidjson::Writer<rapidjson::StringBuffer> json(json_buf);
@@ -795,6 +799,11 @@ int main(int argc, char **argv) {
       rc = run_tokens(*o, text, lines, index);
     } else if (o->command == "tree") {
       rc = run_tree(*o, text, lines, index);
+    } else if (o->command == "outline") {
+      mdbls::Outline_options oo;
+      oo.version_id = o->index.version_id;
+      const auto outline = mdbls::build_outline(text, index, *pool, oo);
+      std::cout << mdbls::outline_json(outline, text, lines, file) << '\n';
     } else {
       std::string out;
       const auto sum = run_check(*o, file, text, lines, index, *pool, &out,

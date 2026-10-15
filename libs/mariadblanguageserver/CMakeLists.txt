@@ -17,8 +17,10 @@
 # MariaDB Shell comes later (see docs/plans/core-implementation.md).
 
 add_library(mariadblanguageserver STATIC
+  src/catalog.cc
   src/charset.cc
   src/line_map.cc
+  src/outline.cc
   src/sql_mode.cc
   src/statement_index.cc
   src/parser_pool.cc
@@ -26,5 +28,7 @@ add_library(mariadblanguageserver STATIC
   src/syntax_tree.cc)
 target_include_directories(mariadblanguageserver PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 find_package(Threads REQUIRED)
-target_link_libraries(mariadblanguageserver PUBLIC sqlsplitter mariadbparser Threads::Threads)
+find_package(RapidJSON CONFIG REQUIRED)
+target_link_libraries(mariadblanguageserver PUBLIC sqlsplitter mariadbparser Threads::Threads
+                      PRIVATE rapidjson)
 mdbls_target_warnings(mariadblanguageserver)

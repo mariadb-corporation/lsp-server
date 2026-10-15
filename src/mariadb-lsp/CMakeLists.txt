@@ -43,3 +43,7 @@ set_tests_properties(mariadb-lsp.check-latin1-undeclared PROPERTIES
   PASS_REGULAR_EXPRESSION "latin1_undeclared.sql:2:30: error: the file is not valid UTF-8 \\(byte 0xB4\\)")
 add_test(NAME mariadb-lsp.check-latin1-option
          COMMAND mariadb-lsp check --charset latin1 "${_fixtures}/latin1_undeclared.sql")
+add_test(NAME mariadb-lsp.outline COMMAND mariadb-lsp outline "${_fixtures}/sakila-schema.sql")
+set_tests_properties(mariadb-lsp.outline PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ddl\":35,\"applied\":35")
+add_test(NAME mariadb-lsp.tree COMMAND mariadb-lsp tree "${_fixtures}/mrs_grammar_test.sql")

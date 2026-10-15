@@ -22,9 +22,11 @@ ctest --test-dir bld
 ```bash
 mariadb-lsp check FILE...         # syntax errors as FILE:LINE:COL, exit 1 if any
 mariadb-lsp check --format json FILE...
+mariadb-lsp outline FILE          # the schema objects the file defines, as JSON
 mariadb-lsp split FILE            # the statements: position, kind, delimiter, sql_mode
 mariadb-lsp split --format json --text FILE
 mariadb-lsp tokens FILE           # the tokens of every statement
+mariadb-lsp tree FILE             # the parse tree of every statement
 ```
 
 `--sql-mode`, `--delimiter` and `--version-id` set the state at the start of the file; `SET sql_mode` and `DELIMITER` in the file are followed from there. `mariadb-lsp --help` lists all options.
@@ -37,13 +39,14 @@ Files are read as UTF-8. A Latin-1 file is converted to UTF-8 first when `--char
 | --- | --- |
 | `libs/mariadbparser/` | the MariaDB server grammar and lexer as a standalone C library ([README](libs/mariadbparser/README.md)) |
 | `libs/sqlsplitter/` | MariaDB Shell's SQL statement splitter, maintained by hand ([UPSTREAM.md](libs/sqlsplitter/UPSTREAM.md)) |
-| `libs/mariadblanguageserver/` | the language server engine: statement index, line map, sql_mode tracking, parser pool, syntax check |
-| `src/mariadb-lsp/` | the `mariadb-lsp` command: `check`, `split` and `tokens` today |
+| `libs/mariadblanguageserver/` | the language server engine: statement index, line map, sql_mode tracking, parser pool, syntax check, parse trees, schema catalog, outline |
+| `src/mariadb-lsp/` | the `mariadb-lsp` command: `check`, `outline`, `split`, `tokens`, `tree` |
 | `tests/fixtures/sql/` | SQL files used by tests (sakila schema, world, a mysqldump file) |
 | `scripts/gen_fixture_dump.py` | writes a mysqldump-style file of a given size for benchmarks |
 | `unittest/` | GoogleTest suites, built into one `run_unit_tests` binary |
 | `cmake/` | build modules, most copied from MariaDB Shell |
 | `docs/plans/` | the implementation plan |
+| `docs/outline-format.md` | the outline JSON format |
 
 Contributing information can be found in the [CONTRIBUTING.md](CONTRIBUTING.md) file.
 
