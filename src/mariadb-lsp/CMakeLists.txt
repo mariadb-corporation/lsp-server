@@ -47,3 +47,26 @@ add_test(NAME mariadb-lsp.outline COMMAND mariadb-lsp outline "${_fixtures}/saki
 set_tests_properties(mariadb-lsp.outline PROPERTIES
   PASS_REGULAR_EXPRESSION "\"ddl\":35,\"applied\":35")
 add_test(NAME mariadb-lsp.tree COMMAND mariadb-lsp tree "${_fixtures}/mrs_grammar_test.sql")
+
+# End-to-end tests of the language server (tests/e2e): Python 3, standard
+# library only.  MDBLS_E2E_LARGE_MB sets the size of the generated dump the
+# large-file tests open; MDBLS_LARGE_TESTS adds a run at 256 MB.
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME mariadb-lsp.e2e
+           COMMAND Python3::Interpreter -m unittest discover -s "${PROJECT_SOURCE_DIR}/tests/e2e" -v)
+  set_tests_properties(mariadb-lsp.e2e PROPERTIES
+    ENVIRONMENT "MARIADB_LSP=$<TARGET_FILE:mariadb-lsp>;MDBLS_E2E_LARGE_MB=16"
+    TIMEOUT 300)
+  option(MDBLS_LARGE_TESTS "Run the end-to-end tests on a 256 MB dump too" OFF)
+  if(MDBLS_LARGE_TESTS)
+    add_test(NAME mariadb-lsp.e2e-large
+             COMMAND Python3::Interpreter -m unittest discover -s "${PROJECT_SOURCE_DIR}/tests/e2e"
+                     -k Large_file -v)
+    set_tests_properties(mariadb-lsp.e2e-large PROPERTIES
+      ENVIRONMENT "MARIADB_LSP=$<TARGET_FILE:mariadb-lsp>;MDBLS_E2E_LARGE_MB=256"
+      TIMEOUT 900)
+  endif()
+else()
+  message(STATUS "Python 3 not found: the language server's end-to-end tests are skipped")
+endif()

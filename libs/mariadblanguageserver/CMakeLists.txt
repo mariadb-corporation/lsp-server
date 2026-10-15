@@ -21,6 +21,9 @@ add_library(mariadblanguageserver STATIC
   src/charset.cc
   src/document.cc
   src/line_map.cc
+  src/lsp/features.cc
+  src/lsp/server.cc
+  src/lsp/transport.cc
   src/outline.cc
   src/semantic_tokens.cc
   src/sql_mode.cc
@@ -28,7 +31,8 @@ add_library(mariadblanguageserver STATIC
   src/parser_pool.cc
   src/syntax_check.cc
   src/syntax_tree.cc)
-target_include_directories(mariadblanguageserver PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(mariadblanguageserver PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
+                           PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 find_package(Threads REQUIRED)
 find_package(RapidJSON CONFIG REQUIRED)
 target_link_libraries(mariadblanguageserver PUBLIC sqlsplitter mariadbparser Threads::Threads

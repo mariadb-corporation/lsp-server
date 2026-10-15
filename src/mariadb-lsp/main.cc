@@ -17,11 +17,12 @@
 
 // mariadb-lsp: the MariaDB language server and its command-line tools.
 //
-//   mariadb-lsp check  FILE...  syntax errors, or success
-//   mariadb-lsp split  FILE     the statement index of a SQL file
-//   mariadb-lsp tokens FILE     the tokens of every statement
-//
-// The LSP mode (`lsp`) and `outline` follow in later phases.
+//   mariadb-lsp lsp              the language server, on stdin and stdout
+//   mariadb-lsp check   FILE...  syntax errors, or success
+//   mariadb-lsp outline FILE     the schema objects a file defines, as JSON
+//   mariadb-lsp split   FILE     the statement index of a SQL file
+//   mariadb-lsp tokens  FILE     the tokens of every statement
+//   mariadb-lsp tree    FILE     the parse tree of every statement
 
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -40,10 +41,18 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 #include "mdbls/charset.h"
 #include "mdbls/line_map.h"
+#include "mdbls/lsp/server.h"
+#include "mdbls/lsp/transport.h"
 #include "mdbls/outline.h"
 #include "mdbls/parser_pool.h"
+#include "mdbls/sql_mode.h"
 #include "mdbls/statement_index.h"
 #include "mdbls/syntax_check.h"
 #include "mdbls/syntax_tree.h"
@@ -57,8 +66,10 @@ constexpr int k_exit_usage = 2;
 
 const char *const k_usage =
     "usage: mariadb-lsp <command> [options] FILE|-...\n"
+    "       mariadb-lsp lsp [--stdio] [--threads N] [--log FILE]\n"
     "\n"
     "commands:\n"
+    "  lsp      run the language server: LSP over stdin and stdout\n"
     "  check    check the syntax of SQL files: prints the errors, or nothing\n"
     "           (with --format json, a summary); exit 0 when there are none,\n"
     "           1 when there are\n"
@@ -80,6 +91,8 @@ const char *const k_usage =
     "  --text             split: include each statement's text in the output\n"
     "  --threads N        check: parser threads (default: one per CPU core)\n"
     "  --max-errors N     check: stop listing errors after N per file (default 100)\n"
+    "  --log FILE         lsp: write a log to FILE\n"
+    "  --stdio            lsp: talk on stdin and stdout (the only transport)\n"
     "  --stats            print sizes and timings to stderr\n"
     "  --help             this text\n"
     "\n"
@@ -99,6 +112,7 @@ struct Options {
   bool json = false;
   bool text = false;
   bool stats = false;
+  std::string log;
 };
 
 using Clock = std::chrono::steady_clock;
@@ -603,6 +617,12 @@ std::optional<Options> parse_args(int argc, char **argv) {
         return std::nullopt;
       }
       o.json = *v == "json";
+    } else if (arg == "--log") {
+      auto v = value();
+      if (!v) return std::nullopt;
+      o.log = *v;
+    } else if (arg == "--stdio") {
+      // The default and only transport.
     } else if (arg == "--text") {
       o.text = true;
     } else if (arg == "--stats") {
@@ -631,11 +651,18 @@ std::optional<Options> parse_args(int argc, char **argv) {
     }
   }
   if (o.command != "split" && o.command != "tokens" && o.command != "check" &&
-      o.command != "tree" && o.command != "outline") {
+      o.command != "tree" && o.command != "outline" && o.command != "lsp") {
     std::cerr << (o.command.empty() ? std::string("mariadb-lsp: no command given\n")
                                     : "mariadb-lsp: unknown command " + o.command + "\n")
               << k_usage;
     return std::nullopt;
+  }
+  if (o.command == "lsp") {
+    if (!o.files.empty()) {
+      std::cerr << "mariadb-lsp: lsp takes no files\n";
+      return std::nullopt;
+    }
+    return o;
   }
   if (o.files.empty()) {
     std::cerr << "mariadb-lsp: no input file (use - for stdin)\n";
@@ -648,11 +675,36 @@ std::optional<Options> parse_args(int argc, char **argv) {
   return o;
 }
 
+int run_lsp(const Options &o) {
+#ifdef _WIN32
+  _setmode(_fileno(stdin), _O_BINARY);
+  _setmode(_fileno(stdout), _O_BINARY);
+#endif
+  std::ofstream log;
+  mdbls::lsp::Server_options so;
+  so.threads = o.threads;
+  so.defaults = o.index;
+  so.defaults.sql_mode = mdbls::normalize_sql_mode(o.index.sql_mode);
+  if (!o.log.empty()) {
+    log.open(o.log, std::ios::app);
+    if (!log) {
+      std::cerr << "mariadb-lsp: cannot open " << o.log << "\n";
+      return k_exit_usage;
+    }
+    so.log = &log;
+  }
+  mdbls::lsp::Fd_input in(0);
+  mdbls::lsp::Fd_output out(1);
+  mdbls::lsp::Server server(in, out, so);
+  return server.run();
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
   const auto o = parse_args(argc, argv);
   if (!o) return k_exit_usage;
+  if (o->command == "lsp") return run_lsp(*o);
 
   std::unique_ptr<mdbls::Parser_pool> pool;
   if (o->command == "check" || o->command == "outline") {
