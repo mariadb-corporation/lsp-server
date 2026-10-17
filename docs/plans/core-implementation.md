@@ -1005,7 +1005,7 @@ identifiers; references and rename stay within one document.
   passes; completion p95 *target* under 20 ms at 1 MB documents; a live catalog test
   against a sandbox server started by `mariadb-shell` passes.
 
-### P6 — VS Code integration (1–2 weeks, in mariadb-shell-plugins/code_ext)
+### P6 — VS Code integration (in vscode-extension repo)
 
 - Add `vscode-languageclient`; locate `mariadb-lsp` next to the resolved
   `mariadb-shell` binary (or `mariadb.lsp.path`); `documentSelector` for `mariadb-sql`

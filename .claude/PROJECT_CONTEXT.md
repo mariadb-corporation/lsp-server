@@ -1,0 +1,80 @@
+# Project Context
+
+## Project
+
+MariaDB LSP Server (`lsp-server`): a C++ language server for MariaDB SQL, plus a CLI, part of MariaDB Shell and the MariaDB AI Plugins. Goals: LSP features (diagnostics, completion, hover, symbols, …) in VS Code (the separate `vscode-extension` repo) and an in-memory object model of the schemas in a SQL file (outline JSON now; ALTER generation and EER diagrams later). Must be fast on single statements while typing and on 256 MB dumps. The plan is `docs/plans/core-implementation.md` (phases P0–P7, decisions in §5, a "Status" paragraph under each phase).
+
+## Layout
+
+| Path | What it is |
+| --- | --- |
+| `docs/plans/core-implementation.md` | The implementation plan; each phase carries its status paragraph |
+| `docs/language-server.md`, `docs/outline-format.md` | The server's capabilities, options and `mariadb/*` messages; the outline JSON format 1 |
+| `libs/mariadbparser/` | MariaDB server grammar + lexer as a standalone C library (see its `README.md`, `UPSTREAM.md`) |
+| `libs/mariadbparser/generated/` | Stubbed grammar `yy_stub.yy` (REST SQL merged in), lexer slice, keyword tables; committed, maintained by hand |
+| `libs/mariadbparser/tools/` | `stub.py`, `lexslice.py`, `mrs_merge.py`, `common.py`: one-shot re-extraction tools, never run by the build |
+| `libs/mariadbparser/tests/lex-fixtures/` | Lexer cases for the unit test |
+| `libs/mariadbparser/docs/thd.md` | Ledger of server state the lexer shim (`src/lexshim.h`) models |
+| `libs/sqlsplitter/` | The shell's `Sql_splitter`, vendored by hand (`UPSTREAM.md`: pin, deviations, two bug fixes to send upstream) |
+| `libs/mariadblanguageserver/` | The engine: `statement_index`, `line_map`, `sql_mode`, `parser_pool`, `syntax_check`, `syntax_tree`, `catalog`, `outline`, `document`, `semantic_tokens`, `charset`; P5: `sql_names` (name classification + tables in scope from the parse tree, token fallback), `completion`, `navigation` (`Name_resolver`, hover, references, signature help, `unknown_names`), `catalog_view` (layers doc → workspace → live), `keywords` (keyword table, reserved words, quoting, built-in functions), `workspace_catalog`, `connection_uri`, `secret_store`, `live_catalog`; the LSP server in `src/lsp/` (`server`, `transport`, `features`, `language_features` for the P5 requests) |
+| `libs/mariadblanguageserver/src/builtin_functions.inc` | Built-in function names, call forms, summaries; written by `scripts/gen_builtin_functions.py` from the server tree (registries + `scripts/fill_help_tables.sql`), committed |
+| `src/mariadb-lsp/` | The CLI: `lsp`, `check`, `outline`, `split`, `tokens`, `tree`, `complete --at L:C`, `connections`; `--connection URI`, `--shell-bin-dir` |
+| `tests/fixtures/sql/`, `tests/e2e/` | SQL fixtures (sakila, world, a mysqldump file); Python LSP client + end-to-end tests (ctest `mariadb-lsp.e2e`); `test_language.py` (P5, incl. 1 MB completion latency and a live-server test), `sandbox.py` (throwaway `mariadbd` + private plaintext secret store) |
+| `scripts/gen_fixture_dump.py`, `scripts/gen_builtin_functions.py` | Benchmark dump generator; one-shot built-in function table generator |
+| `cmake/` | Build modules, mostly copied from mariadb-shell (`bootstrap_vcpkg`, `bison`, `bootstrap_mariadb`); own: `compiler`, `mariadb_client`, `mariadb_pin` |
+| `unittest/` | GoogleTest, one `run_unit_tests` binary (`mariadbparser/`, `sqlsplitter/`, `mariadblanguageserver/`, `client/`); `mariadblanguageserver/test_util.h` reads fixtures |
+| `.github/workflows/` | `ci.yml` (after shell-ci.yml: self-hosted Linux, macOS, Windows jobs), `devtools-ci-start.yml` (copied) |
+| `.claude/commands/` | `checkpoint`, `read-checkpoint` |
+
+## Decisions (from the user, 2026-10-15)
+
+- **Work starts from `main`.** The `architecture-review` branch's docs/design are rejected ("limited knowledge, bad ideas"); only the parser's extraction core was taken from it. No ANTLR anywhere.
+- **Build like mariadb-shell:** vcpkg manifest via `-DWITH_VCPKG_TRIPLET`, C++23, gtest `run_unit_tests`, copied cmake modules.
+- **Client library from the server checkout as the shell does** (static `libmariadbclient` + mysys/strings/dbug), not vcpkg `libmariadb` (too old; rest-daemon still uses vcpkg, no Rennox update exists).
+- **Parser maintained by hand.** Generate once, commit `generated/`, apply upstream diffs by hand, record deviations in `UPSTREAM.md`. The value of the extracted parser vs. sync cost is still doubted by the user; re-extraction deferred.
+- **REST SQL merged into libmariadbparser** by hand (`mrs_merge.py` did it once; shell's `mysqlshdk/libs/mrs/parser.yy`, pinned shell commit `4f45397`). No `MDBP_WITH_MRS` switch: bison has no conditional sections and unused rules cost nothing.
+- **Live connections by URI** as the MCP plugin does; passwords read directly from the shell's secret store (`mariadb-secret-store-<helper>` next to `mariadb-shell`, JSON `{SecretType, SecretID}`; keys `GUI:CONN:<uri>`, `MCP:CONN:<uri>`, or `password`/`user@host[:port]`). Plan §2.11.
+- **CLI:** `mariadb-lsp check FILE` (errors or success, exit 1 if any) and `mariadb-lsp outline FILE` (schema JSON); `split`, `tokens`, `tree` for inspection.
+
+## Current State
+
+- **P0–P5 done on macOS** (details in the plan's status paragraphs, numbers in `docs/language-server.md` "Measured", P5 mechanics in its "Completion" and "Live connections" sections). The server has reader/writer/event-loop/request-pool/parser-pool threads, incremental sync with per-statement verdicts that survive edits, diagnostics, document symbols, folding, selection ranges, semantic tokens, completion, hover, definition, highlight, references and rename (document scope), signature help, workspace symbols, `catalogFiles` workspace catalog, live catalogs per connection URI, `mariadb/documentContext|viewport|outline|parseProgress|refreshCatalog`, work-done progress. libmariadbparser is API 2.4 (`mdbp_keyword_count/at`).
+- **Live catalog behaviour:** one thread per connection; connects, reads `information_schema`, disconnects (no kept session); server `sql_mode`/version apply unless `documentContext` sets them; refresh interval off by default (`catalogRefreshSeconds`); errors via `window/showMessage` once; invalid URIs are refused, never logged as given. Secret store helpers run one at a time (`run_program` is serialized, pipes close-on-exec, 60 s timeout).
+- **Pin single source:** `cmake/mariadb_pin.cmake` reads the `| MariaDB server` row of `libs/mariadbparser/UPSTREAM.md`; bootstrap re-runs when it moves.
+- **Shared helpers to use rather than re-implement:** `src/text_util.h` (`iequals`, `lower`, `upper`, `starts_with_word`, `istarts_with`, `icontains`, `collapse`, `trim`, `unquote_identifier`, `join`, `percent_decode/encode`), `keywords.h` (`is_name_symbol`, `is_left_paren`, `quote_identifier`, `backtick_quote`, `builtin_markdown`), `Column::attributes`, `Routine::parameter_list`, `table_for_qualifier` (sql_names.h), public `mdbls/lsp/json_position.h` (`write_position`, `write_range`; makes `rapidjson` a PUBLIC link dependency of the library), `Unchecked_notes` in `syntax_check.h` (the "statement not checked" messages for server and CLI), `Parser_pool::run_all` (submit N jobs and wait for just those; never call from a pool job), `Parser_cache::get` (allocation-free lookup), `k_default_version_id` in `sql_mode.h`, `Statement_index::build_parallel(threads = 0)` = one per core.
+- **Known duplication left on purpose (behaviour differs, so merging changes results):** five comment/first-keyword scanners (`statement_index.cc classify`, `sql_mode.cc tokenize`, `catalog.cc may_change_catalog`, `semantic_tokens.cc gap_comments`, `charset.cc next_word`, plus `features.cc starts_with_word` in folding) with different `/*!NNNNN` and `--` rules; string unquoting (`catalog.cc unquote_string` decodes `\n`, `sql_mode.cc read_quoted` does not); token-class name lists in `semantic_tokens.cc` and `syntax_check.cc` (`HEX_STRING` is a string in one, a number in the other).
+- **Open from P0–P4:** CI has never run (needs the shell's GCP secrets in this repo); Linux and Windows untested (Windows ported, job written); shell git hooks not adopted (copyright check would block imported sources); `run_unit_tests.py`; cpack (P7); the bounded give-up region of plan §2.6 (an edit that opens a string/comment re-splits to the end of the file; 5–24 ms measured on a dump); semantic tokens do not classify identifiers (the catalog view now exists to do it); a JSON Schema for the outline format; reading objects out of statements with a syntax error.
+- **Open from P5:** the secret store's Windows process code has never run; references and rename are document-scope only; `schema_in_use` scans back over all statements per request (cache `USE` positions in the index); catalog name lookups are linear (`find_named`); the workspace reader falls back to latin1 for non-UTF-8 files while the CLI refuses unless told (charset policy not shared); saving one catalog file rebuilds the whole workspace catalog.
+- **Plan decisions still unanswered by the user** (plan §5): REST as keyword after USE/GRANT/REVOKE, offline tree from derivation, binary location, incremental sync, C++23+RapidJSON, also reading shell `password` credentials (built: GUI → MCP → shell `password`), SSH tunnels deferred (built: refused).
+
+## Next steps
+
+1. Semantic tokens classifying identifiers (tables, columns, aliases) through `Statement_names` + `Catalog_view`.
+2. Export the parser's default release id through `mdbparse.h` (`MDBP_LEX_DEFAULT_VERSION_ID` in `src/mdbp_lex.h` is private) and make `mdbls::k_default_version_id` use it, so the splitter and the parser cannot read versioned comments differently.
+3. One shared "leading words of a statement" helper applying the versioned-comment rule with the index's `version_id`, replacing the scanners listed above. Known symptom: mysqldump's `/*!50003 CREATE*/ /*!50017 DEFINER=…*/ /*!50003 TRIGGER … BEGIN … END` gets no `BEGIN…END` folds because `starts_with_word` skips no comments.
+4. One token-class table keyed by grammar symbol id (as `catalog.cc` does with `SYM()`/`catalog_symbols.inc`) for `semantic_tokens.cc` and `syntax_check.cc`; expose "came from `sql_functions[]`" from the lexer so function-call detection stops guessing from `(`.
+5. Incremental caches when they show in profiles: per-statement semantic tokens and DDL trees carried through `Index_splice`; `Sql_mode_tracker` checkpoints (a mysqldump saves/restores sql_mode around every routine, so an edit near the end replays thousands of statements); splice `Statement_index` in place when `use_count()==1`; keep statement verdicts when the splitter reports an error instead of rebuilding everything; diagnostics message/range built once in `apply_checks` rather than in every `publish()`; catalog name lookups via hash maps (O(N²) today); `USE` positions in `Statement_index` so `schema_in_use` stops scanning back.
+6. Export only the public symbols on macOS and Windows (today `WINDOWS_EXPORT_ALL_SYMBOLS` and no `-exported_symbols_list`; the Linux version script is `src/libmariadbparser.map`); make `mdbp_once` an out-of-line function so `mdbp_once.h` stops pulling `<windows.h>`.
+7. P6 (VS Code extension, in the separate `vscode-extension` repo), P7 (hardening, packaging).
+
+## Gotchas / things not to repeat
+
+- **Every rule in `yy_stub.yy` needs exactly one `{ MDBP_R(n); }` action**, or its reductions vanish from the derivation (rule number is `yyn - 1`). `mrs_merge.py` anchors on these numbers as literal text, so regenerating the stub breaks its anchors; it is a one-shot tool.
+- **`MDBP_LEX_DEFAULT_VERSION_ID` (`src/mdbp_lex.h`, 130100) and `mdbls::k_default_version_id` (`include/mdbls/sql_mode.h`) must follow the pin's VERSION by hand, together** (next step 2 ties them).
+- **Don't point `MARIADB_BOOTSTRAP_DIR` at `../mariadb-server`**: the shell's build uses that checkout at `main`; ours is `../mariadb-server-lsp` at the pin.
+- **The pinned server tree for re-extraction** is fetched with `git fetch --depth 1 origin <sha>`; a shallow clone of an older commit does not have it.
+- **Worktree agents start from `main`**, not the working branch; they had to reset onto it. A build inside `.claude/worktrees/` cloned vcpkg into `.claude/worktrees/vcpkg` (bootstrap default `../vcpkg`); pass `VCPKG_ROOT` or build outside the worktree.
+- **VS Code CMake Tools:** `cmake.sourceDirectory` must be the repo root (not `libs/mariadbparser`, which cannot configure alone) and `cmake.configureSettings` must carry `WITH_VCPKG_TRIPLET`, or `find_package(RapidJSON)` fails. CMake reads the vcpkg toolchain only on a fresh configure, and switching the compiler kit wipes the cache, so after a kit change use "Delete Cache and Reconfigure".
+- **The bison output needs `-Wno-unused-but-set-variable`** (clang `yynerrs`); the extracted lexer is compiled without `-Werror`, our own code with the shell's warning set via `mdbls_target_warnings()`.
+- **Lex fixtures with invalid UTF-8 must expect `MDBP_UNSUPPORTED`** (library contract), not the server lexer's tokens.
+- **`Parser_cache::get` resets the parser when `mdbp_parser_set_version_id` fails**; any hand-rolled cache that ignores that return value drifts from `check`/`tree`/`outline`.
+- **`Catalog` lookups that can `push_back` into `m_schemas` (`c_.schema(...)`) invalidate `Schema&` references** held across them (`CREATE TABLE … LIKE` once read freed memory this way).
+- **Expected set after a complete statement:** `mdbp_parse_sql` gives none when the prefix is accepted, and appending an unterminated quote makes the lexer emit a token the grammar lacks (MDBP_UNSUPPORTED, no expected set). Re-feed the parse's own tokens to `mdbp_parse_tokens` with `ABORT_SYM` appended instead.
+- **Non-reserved keyword probing costs ~100 µs per keyword** (LAC computes the full expected set on each rejection): probe only keywords matching the typed prefix, cache per prefix (`keyword_verdicts`), skip with an empty prefix and mark the list incomplete.
+- **Keyword terminal names differ from spellings** (`PARSE_VCOL_EXPR` → `PARSE_VCOL_EXPR_SYM`): look terminals up by `mdbp_keyword_at`, not by guessing names.
+- **Request-pool jobs must not submit to the request pool** (null/destroyed at shutdown): post to the inbox and let the loop thread submit.
+- **`SELECT ... INTO var` is not a table**: `INTO` names a table only after INSERT/REPLACE (`Token_view::into_table`).
+- **Live tests:** the plaintext helper honours `MARIADB_SHELL_USER_CONFIG_HOME` (file `.mariadb-secret-store-plaintext.json` there), so tests use a private store; the sandbox's socket path must stay under 104 bytes on macOS, hence a short temp dir; root needs `--auth-root-authentication-method=normal`.
+- **Importing TestCase classes into another e2e module runs them twice** in discovery; import only constants and the test-less `Lsp_test` base.
+- **No `Co-Authored-By` lines in commits** (user rule, `~/.claude/CLAUDE.md`); four early commits had them and were rewritten.
+- `.claude/` is untracked in this repo.
