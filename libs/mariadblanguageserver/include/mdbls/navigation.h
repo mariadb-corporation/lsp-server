@@ -57,6 +57,12 @@ struct Object_id {
   std::string name;
 
   bool operator==(const Object_id &o) const;
+  // Defined in the statement that uses it (alias, CTE, variable): its
+  // references and renames stay inside it.
+  bool statement_local() const {
+    return kind == Target_kind::table_alias || kind == Target_kind::select_alias ||
+           kind == Target_kind::cte || kind == Target_kind::variable;
+  }
 };
 
 struct Resolution {
@@ -74,15 +80,9 @@ struct Resolution {
   std::optional<Range> local_definition;
   Table_ref table_ref;  // an alias's table, or the table a column was found in
   Variable variable;
-  std::string type;     // a select alias's or variable's type, when known
 
   bool found() const { return id.kind != Target_kind::none; }
-  // Defined in the same statement (alias, CTE, variable): references and
-  // renames stay inside it.
-  bool statement_local() const {
-    return id.kind == Target_kind::table_alias || id.kind == Target_kind::select_alias ||
-           id.kind == Target_kind::cte || id.kind == Target_kind::variable;
-  }
+  bool statement_local() const { return id.statement_local(); }
 };
 
 // Looks names of one statement up in the catalogs.  The statement's
@@ -100,6 +100,10 @@ class Name_resolver {
  private:
   void resolve_table(Resolution &r, const std::string &schema, const std::string &name) const;
   void resolve_column(Resolution &r) const;
+  // r names `t` by its alias (its table's details too).
+  void as_alias(Resolution &r, const Table_ref &t) const;
+  // r names the statement's CTE `name`, if it has one.
+  bool as_cte(Resolution &r, std::string_view name) const;
 
   const Catalog_view &m_catalogs;
   const Statement_names &m_names;

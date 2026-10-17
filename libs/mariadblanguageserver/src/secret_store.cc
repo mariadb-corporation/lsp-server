@@ -27,6 +27,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <tuple>
 #include <mutex>
 
 #include "mdbls/connection_uri.h"
@@ -430,29 +431,55 @@ Secret_store::Secret_store(Secret_store_options options) {
   m_path = path.string();
 }
 
-std::optional<std::string> Secret_store::get(const Secret_spec &spec, std::string *error) const {
-  if (m_path.empty()) {
-    if (error != nullptr) *error = m_error;
+namespace {
+
+// The helper's JSON answer to `command`, or nullopt with `error` set.
+std::optional<rapidjson::Document> ask(const std::string &path, const std::string &not_found,
+                                       const char *command, const std::string &input,
+                                       std::string *error) {
+  auto fail = [&](std::string e) -> std::optional<rapidjson::Document> {
+    if (error != nullptr) *error = std::move(e);
     return std::nullopt;
-  }
+  };
+  if (path.empty()) return fail(not_found);
   int code = 0;
-  const auto out = run_program(m_path, {"get"}, spec_json(spec.type, &spec.id), &code);
-  if (!out) {
-    if (error != nullptr) *error = "cannot run " + m_path;
-    return std::nullopt;
-  }
-  if (code != 0) {
-    if (error != nullptr) *error = helper_message(*out, code);
-    return std::nullopt;
-  }
+  const auto out = run_program(path, {command}, input, &code);
+  if (!out) return fail("cannot run " + path);
+  if (code != 0) return fail(helper_message(*out, code));
   rapidjson::Document d;
   d.Parse(out->c_str(), out->size());
-  if (d.HasParseError() || !d.IsObject()) {
-    if (error != nullptr) *error = "the secret store helper's answer is not JSON";
-    return std::nullopt;
+  if (d.HasParseError()) return fail("the secret store helper's answer is not JSON");
+  return d;
+}
+
+// The connections the stored generic secrets are for: (kind, URI as
+// stored, secret), in lookup order.
+std::vector<std::tuple<const char *, std::string, const Secret_spec *>> stored_connections(
+    const std::vector<Secret_spec> &specs) {
+  std::vector<std::tuple<const char *, std::string, const Secret_spec *>> out;
+  for (const auto &[kind, prefix] : k_prefixes) {
+    const size_t n = std::strlen(prefix);
+    for (const auto &s : specs) {
+      if (s.type != "generic" || s.id.compare(0, n, prefix) != 0) continue;
+      std::string uri = s.id.substr(n);
+      // Older keys carried a folder: MCP:CONN:/Sandboxes:<uri>.
+      if (!uri.empty() && uri[0] == '/') {
+        const size_t colon = uri.find(':');
+        if (colon != std::string::npos) uri.erase(0, colon + 1);
+      }
+      out.emplace_back(kind, std::move(uri), &s);
+    }
   }
-  const auto it = d.FindMember("Secret");
-  if (it == d.MemberEnd() || !it->value.IsString()) {
+  return out;
+}
+
+}  // namespace
+
+std::optional<std::string> Secret_store::get(const Secret_spec &spec, std::string *error) const {
+  const auto d = ask(m_path, m_error, "get", spec_json(spec.type, &spec.id), error);
+  if (!d) return std::nullopt;
+  const auto it = d->IsObject() ? d->FindMember("Secret") : d->MemberEnd();
+  if (!d->IsObject() || it == d->MemberEnd() || !it->value.IsString()) {
     if (error != nullptr) *error = "the secret store helper's answer has no secret";
     return std::nullopt;
   }
@@ -461,29 +488,15 @@ std::optional<std::string> Secret_store::get(const Secret_spec &spec, std::strin
 
 std::optional<std::vector<Secret_spec>> Secret_store::list(const std::string &type,
                                                            std::string *error) const {
-  if (m_path.empty()) {
-    if (error != nullptr) *error = m_error;
-    return std::nullopt;
-  }
-  int code = 0;
-  const auto out =
-      run_program(m_path, {"list"}, type.empty() ? std::string() : spec_json(type, nullptr), &code);
-  if (!out) {
-    if (error != nullptr) *error = "cannot run " + m_path;
-    return std::nullopt;
-  }
-  if (code != 0) {
-    if (error != nullptr) *error = helper_message(*out, code);
-    return std::nullopt;
-  }
-  rapidjson::Document d;
-  d.Parse(out->c_str(), out->size());
-  if (d.HasParseError() || !d.IsArray()) {
+  const auto d = ask(m_path, m_error, "list", type.empty() ? std::string() : spec_json(type, nullptr),
+                     error);
+  if (!d) return std::nullopt;
+  if (!d->IsArray()) {
     if (error != nullptr) *error = "the secret store helper's list is not a JSON array";
     return std::nullopt;
   }
   std::vector<Secret_spec> specs;
-  for (const auto &e : d.GetArray()) {
+  for (const auto &e : d->GetArray()) {
     if (!e.IsObject()) continue;
     const auto t = e.FindMember("SecretType");
     const auto i = e.FindMember("SecretID");
@@ -499,19 +512,7 @@ std::vector<Stored_connection> Secret_store::connections(std::string *error) con
   std::vector<Stored_connection> out;
   const auto specs = list("generic", error);
   if (!specs) return out;
-  for (const auto &[kind, prefix] : k_prefixes) {
-    const size_t n = std::strlen(prefix);
-    for (const auto &s : *specs) {
-      if (s.type != "generic" || s.id.compare(0, n, prefix) != 0) continue;
-      std::string uri = s.id.substr(n);
-      // Older keys carried a folder: MCP:CONN:/Sandboxes:<uri>.
-      if (!uri.empty() && uri[0] == '/') {
-        const size_t colon = uri.find(':');
-        if (colon != std::string::npos) uri.erase(0, colon + 1);
-      }
-      out.push_back({kind, uri});
-    }
-  }
+  for (auto &[kind, uri, spec] : stored_connections(*specs)) out.push_back({kind, std::move(uri)});
   return out;
 }
 
@@ -524,20 +525,11 @@ std::optional<std::string> Secret_store::password_for(std::string_view uri, std:
   }
   std::string list_error;
   if (const auto specs = list("generic", &list_error)) {
-    for (const auto &[kind, prefix] : k_prefixes) {
-      const size_t n = std::strlen(prefix);
-      for (const auto &s : *specs) {
-        if (s.type != "generic" || s.id.compare(0, n, prefix) != 0) continue;
-        std::string stored = s.id.substr(n);
-        if (!stored.empty() && stored[0] == '/') {
-          const size_t colon = stored.find(':');
-          if (colon != std::string::npos) stored.erase(0, colon + 1);
-        }
-        if (normalize_connection_uri(stored) != want) continue;
-        if (auto secret = get(s, error)) {
-          if (source != nullptr) *source = std::string(kind) + " connection " + stored;
-          return decode_shell_secret(*secret);
-        }
+    for (const auto &[kind, stored, spec] : stored_connections(*specs)) {
+      if (normalize_connection_uri(stored) != want) continue;
+      if (auto secret = get(*spec, error)) {
+        if (source != nullptr) *source = std::string(kind) + " connection " + stored;
+        return decode_shell_secret(*secret);
       }
     }
   } else if (m_path.empty()) {

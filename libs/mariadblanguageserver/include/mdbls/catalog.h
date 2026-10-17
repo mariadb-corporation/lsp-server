@@ -53,6 +53,9 @@ struct Column {
   std::optional<std::string> collation;
   std::optional<std::string> generated;      // the generation expression
   Origin origin;
+
+  // "varchar(20) NOT NULL DEFAULT 'x' AUTO_INCREMENT"
+  std::string attributes() const;
 };
 
 struct Index {
@@ -113,6 +116,9 @@ struct Routine {
   std::vector<Parameter> parameters;
   std::string returns;                 // functions only
   Origin origin;
+
+  // "IN a INT, b TEXT"
+  std::string parameter_list() const;
 };
 
 struct Trigger {

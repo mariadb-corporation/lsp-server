@@ -27,36 +27,6 @@ namespace mdbls {
 
 namespace {
 
-// Runs of blanks become one space; leading and trailing blanks go.
-std::string collapse(std::string_view s) {
-  std::string out;
-  bool space = false;
-  for (const char c : s) {
-    if (std::isspace(static_cast<unsigned char>(c))) {
-      space = !out.empty();
-    } else {
-      if (space) out.push_back(' ');
-      space = false;
-      out.push_back(c);
-    }
-  }
-  return out;
-}
-
-// `name`, "name" (ANSI_QUOTES) and plain names, without their quotes.
-std::string unquote_identifier(std::string_view s) {
-  if (s.size() >= 2 && (s.front() == '`' || s.front() == '"') && s.back() == s.front()) {
-    const char q = s.front();
-    std::string out;
-    for (size_t i = 1; i + 1 < s.size(); ++i) {
-      out.push_back(s[i]);
-      if (s[i] == q && i + 2 < s.size() && s[i + 1] == q) ++i;  // doubled quote
-    }
-    return out;
-  }
-  return std::string(s);
-}
-
 // A string literal's contents: 'it''s' and 'it\'s' give it's.
 std::string unquote_string(std::string_view s) {
   if (s.size() < 2 || (s.front() != '\'' && s.front() != '"') || s.back() != s.front()) {
@@ -128,6 +98,23 @@ constexpr const char *k_sym_names[] = {
 Column *Table::column(std::string_view n) {
   auto it = find_named(columns, n);
   return it == columns.end() ? nullptr : &*it;
+}
+
+std::string Column::attributes() const {
+  std::string out = type;
+  if (!nullable) out += " NOT NULL";
+  if (default_value) out += " DEFAULT " + *default_value;
+  if (auto_increment) out += " AUTO_INCREMENT";
+  return out;
+}
+
+std::string Routine::parameter_list() const {
+  std::string out;
+  for (const auto &p : parameters) {
+    if (!out.empty()) out += ", ";
+    out += (p.mode.empty() ? "" : p.mode + " ") + p.name + " " + p.type;
+  }
+  return out;
 }
 
 const Column *Table::column(std::string_view n) const {

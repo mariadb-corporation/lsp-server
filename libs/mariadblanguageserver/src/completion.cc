@@ -20,7 +20,6 @@
 #include <algorithm>
 #include <cctype>
 #include <deque>
-#include <map>
 #include <set>
 #include <unordered_map>
 
@@ -38,10 +37,6 @@ constexpr std::string_view k_sentinel = "mdb_cursor_";
 bool is_ident_byte(char ch) {
   const auto c = static_cast<unsigned char>(ch);
   return std::isalnum(c) || c == '_' || c == '$' || c >= 0x80;
-}
-
-bool istarts_with(std::string_view s, std::string_view prefix) {
-  return s.size() >= prefix.size() && iequals(s.substr(0, prefix.size()), prefix);
 }
 
 // What parsing a statement prefix says about the position after it.
@@ -122,8 +117,16 @@ Prefix_parse parse_prefix(mdbp_parser *p, std::string_view sql) {
   mdbp_result r;
   const mdbp_status st = mdbp_parse_sql(p, sql.data(), sql.size(), &r);
   if (st == MDBP_INTERNAL || r.tokens == nullptr) return out;
-  if (r.eof_token != nullptr && std::string_view(r.eof_token) == "ABORT_SYM") {
-    out.state = Prefix_parse::State::in_literal;  // an open string or comment
+  // In an open string, or a comment (the lexer drops comments, so text
+  // after the last token that is not blank is one).
+  bool in_literal = r.eof_token != nullptr && std::string_view(r.eof_token) == "ABORT_SYM";
+  size_t last_end = 0;
+  for (size_t i = 0; i < r.ntokens; ++i) {
+    if (r.tokens[i].byte_end > r.tokens[i].byte_start) last_end = static_cast<size_t>(r.tokens[i].byte_end);
+  }
+  in_literal = in_literal || !trim(sql.substr(std::min(last_end, sql.size()))).empty();
+  if (in_literal) {
+    out.state = Prefix_parse::State::in_literal;
     return out;
   }
   for (size_t i = 0; i < r.ntokens; ++i) {
@@ -151,21 +154,6 @@ Prefix_parse parse_prefix(mdbp_parser *p, std::string_view sql) {
   return out;
 }
 
-// Whether `sql` ends inside a comment (the lexer drops comments, so the
-// text after the last token is not blank).
-bool ends_in_comment(mdbp_parser *p, std::string_view sql) {
-  mdbp_result r;
-  if (mdbp_lex_sql(p, sql.data(), sql.size(), &r) != MDBP_OK || r.tokens == nullptr) return false;
-  size_t last_end = 0;
-  for (size_t i = 0; i < r.ntokens; ++i) {
-    if (r.tokens[i].byte_end > r.tokens[i].byte_start) last_end = static_cast<size_t>(r.tokens[i].byte_end);
-  }
-  for (size_t i = last_end; i < sql.size(); ++i) {
-    if (!std::isspace(static_cast<unsigned char>(sql[i]))) return true;
-  }
-  return false;
-}
-
 class Builder {
  public:
   explicit Builder(Completion_list &out) : out_(out) {}
@@ -187,13 +175,8 @@ class Builder {
       it.insert_text = std::move(insert);
     } else if (kind == Completion_kind::keyword) {
       it.insert_text = label;
-    } else if (quoted_) {
-      std::string q = "`";
-      for (const char c : label) {
-        q.push_back(c);
-        if (c == '`') q.push_back('`');
-      }
-      it.insert_text = q + "`";
+    } else if (out_.quoted) {
+      it.insert_text = backtick_quote(label);
     } else {
       it.insert_text = quote_identifier(label);
     }
@@ -202,21 +185,11 @@ class Builder {
     out_.items.push_back(std::move(it));
   }
 
-  void set_quoted(bool q) { quoted_ = q; }
 
  private:
   Completion_list &out_;
   std::set<std::string> seen_;
-  bool quoted_ = false;
 };
-
-std::string column_detail(const Column &c) {
-  std::string d = c.type;
-  if (!c.nullable) d += " NOT NULL";
-  if (c.default_value) d += " DEFAULT " + *c.default_value;
-  if (c.auto_increment) d += " AUTO_INCREMENT";
-  return d;
-}
 
 std::string layer_name(const Catalog_layer *l) {
   if (l == nullptr) return {};
@@ -335,6 +308,7 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
     const auto before = text.substr(begin, word_begin - 1 - begin);
     if (std::count(before.begin(), before.end(), '`') % 2 == 0) {
       quoted = true;
+      out.quoted = true;
       --word_begin;
     }
   }
@@ -355,11 +329,9 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
   mdbp_parser *plain = cache.get(mode, options.version_id, false);
   if (plain == nullptr) return out;
   const std::string_view sql_prefix = text.substr(begin, word_begin - begin);
-  if (ends_in_comment(plain, sql_prefix)) return out;
   const Prefix_parse pp = parse_prefix(plain, sql_prefix);
   if (pp.state == Prefix_parse::State::in_literal) return out;
   const bool keywords_known = pp.state == Prefix_parse::State::ok;
-  out.keywords_known = keywords_known;
 
   static const int k_ident = grammar::symbol("IDENT");
   static const int k_ident_quoted = grammar::symbol("IDENT_QUOTED");
@@ -370,34 +342,34 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
                   [](int s) { return s == k_ident || s == k_ident_quoted; });
 
   Builder b(out);
-  b.set_quoted(quoted);
 
   // ---- names
   if (names_fit && at) {
     mdbp_parser *tp = cache.get(mode, options.version_id, true);
-    const std::string head(text.substr(begin, word_begin - begin));
-    std::string full = head;
-    full += k_sentinel;
-    full += text.substr(word_end, body_end - word_end);
-    std::string truncated = head;
-    truncated += k_sentinel;
     // Offsets in `full` and `truncated` equal the document's up to the
     // sentinel, which sits at word_begin.
+    std::string truncated(text.substr(begin, word_begin - begin));
+    truncated += k_sentinel;
+    const std::string full = truncated + std::string(text.substr(word_end, body_end - word_end));
     const Statement_names a(tp, full, begin);
-    std::optional<Statement_names> bt;
     Name_ref ref;
     if (a.accepted()) {
       ref = a.name_at(word_begin);
     } else {
-      bt.emplace(tp, truncated, begin);
-      ref = bt->accepted() ? bt->name_at(word_begin) : a.name_at(word_begin);
+      const Statement_names bt(tp, truncated, begin);
+      ref = bt.accepted() ? bt.name_at(word_begin) : a.name_at(word_begin);
     }
     out.context = ref.kind;
     if (ref.defining) out.context = Name_kind::none;
 
-    // The tables a column can come from.  Their ranges past the sentinel
-    // are off by the sentinel's length; only the names are used.
-    const auto tables = a.parsed() ? a.tables_at(word_begin) : std::vector<Table_ref>{};
+    // The tables a column can come from, found when needed.  Their ranges
+    // past the sentinel are off by the sentinel's length; only the names
+    // are used.
+    std::optional<std::vector<Table_ref>> tables_found;
+    auto tables = [&]() -> const std::vector<Table_ref> & {
+      if (!tables_found) tables_found = a.parsed() ? a.tables_at(word_begin) : std::vector<Table_ref>{};
+      return *tables_found;
+    };
 
     struct Col {
       std::string name;
@@ -408,7 +380,7 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
                                 std::vector<Col> *cols) {
       if (hit.table != nullptr) {
         for (const auto &c : hit.table->columns) {
-          cols->push_back({c.name, column_detail(c),
+          cols->push_back({c.name, c.attributes(),
                            "Column of `" + table + "`" +
                                (c.comment ? ": " + *c.comment : std::string())});
         }
@@ -425,22 +397,22 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
       }
       columns_of_table(catalogs.find_table(t.schema, t.name), t.name, cols);
     };
+    // One item per name (the builder drops repeats): the first table's.
     auto add_columns = [&](const std::vector<Col> &cols, int rank) {
-      // One item per name; the tables it is in go to the detail.
-      std::map<std::string, std::vector<const Col *>> by_name;
-      std::vector<std::string> order;
-      for (const auto &c : cols) {
-        auto &v = by_name[lower(c.name)];
-        if (v.empty()) order.push_back(c.name);
-        v.push_back(&c);
-      }
-      for (const auto &name : order) {
-        const auto &v = by_name[lower(name)];
-        b.add(name, Completion_kind::column, rank, v.front()->detail, v.front()->doc);
+      for (const auto &c : cols) b.add(c.name, Completion_kind::column, rank, c.detail, c.doc);
+    };
+    // The tables in scope by the name the query uses for them.
+    auto add_visible_tables = [&](int rank) {
+      for (const auto &t : tables()) {
+        if (!t.visible_name().empty()) {
+          b.add(t.visible_name(), Completion_kind::alias, rank,
+                t.alias.empty() ? "table" : "alias of " + (t.name.empty() ? "a subquery" : t.name));
+        }
       }
     };
     auto add_tables = [&](std::string_view schema, int rank) {
       catalogs.for_each_table(schema, [&](const Catalog_view::Table_hit &h) {
+        if (!b.matches(h.table != nullptr ? h.table->name : h.view->name)) return;
         if (h.table != nullptr) {
           b.add(h.table->name, Completion_kind::table, rank,
                 std::string(h.table->temporary ? "temporary table" : "table") +
@@ -457,13 +429,9 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
     };
     auto add_routines = [&](std::string_view schema, const char *kind, int rank) {
       catalogs.for_each_routine(schema, [&](const Catalog_view::Routine_hit &h) {
-        if (h.routine->kind != kind) return;
-        std::string params;
-        for (const auto &p : h.routine->parameters) {
-          params += (params.empty() ? "" : ", ") + (p.mode.empty() ? "" : p.mode + " ") + p.name +
-                    " " + p.type;
-        }
-        std::string detail = std::string(kind) + " " + h.routine->name + "(" + params + ")";
+        if (h.routine->kind != kind || !b.matches(h.routine->name)) return;
+        std::string detail =
+            std::string(kind) + " " + h.routine->name + "(" + h.routine->parameter_list() + ")";
         if (!h.routine->returns.empty()) detail += " RETURNS " + h.routine->returns;
         if (std::string_view(kind) == "function" && !quoted) {
           const std::string name = quote_identifier(h.routine->name);
@@ -478,16 +446,11 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
       if (quoted) return;
       for (const auto &f : builtin_functions()) {
         if (!b.matches(f.name)) continue;
-        const std::string name(f.name);
-        std::string doc;
-        if (!f.forms.empty()) doc = "```sql\n" + std::string(f.forms) + "\n```\n";
-        if (!f.summary.empty()) doc += std::string(f.summary);
-        if (!f.url.empty()) doc += "\n\n[MariaDB documentation](" + std::string(f.url) + ")";
-        const std::string label = options.upper_case_keywords ? name : lower(name);
+        const std::string label = options.upper_case_keywords ? std::string(f.name) : lower(f.name);
         const auto nl = f.forms.find('\n');
         b.add(label, Completion_kind::function, rank,
               std::string(f.forms.substr(0, nl == std::string_view::npos ? f.forms.size() : nl)),
-              doc, options.snippets ? label + "($0)" : label, options.snippets);
+              builtin_markdown(f), options.snippets ? label + "($0)" : label, options.snippets);
       }
     };
 
@@ -523,12 +486,7 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
         }
         break;
       case Name_kind::qualifier:
-        for (const auto &t : tables) {
-          if (!t.visible_name().empty()) {
-            b.add(t.visible_name(), Completion_kind::alias, 1,
-                  t.alias.empty() ? "table" : "alias of " + (t.name.empty() ? "a subquery" : t.name));
-          }
-        }
+        add_visible_tables(1);
         break;
       case Name_kind::column: {
         std::vector<Col> cols;
@@ -551,32 +509,11 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
         }
         if (ref.qualifiers.size() == 1) {
           const std::string &q = ref.qualifiers[0];
-          bool found = false;
-          for (const auto &t : tables) {
-            if (iequals(t.visible_name(), q)) {
-              columns_of_ref(t, &cols);
-              found = true;
-              break;
-            }
-          }
-          if (!found) {
-            for (const auto &t : tables) {
-              if (iequals(t.name, q)) {
-                columns_of_ref(t, &cols);
-                found = true;
-                break;
-              }
-            }
-          }
-          if (!found) {
-            for (const auto &c : a.ctes()) {
-              if (iequals(c.name, q)) {
-                columns_of_ref(c, &cols);
-                found = true;
-              }
-            }
-          }
-          if (!found) {
+          const Table_ref *t = table_for_qualifier(tables(), a.ctes(), q);
+          bool found = t != nullptr;
+          if (t != nullptr) {
+            columns_of_ref(*t, &cols);
+          } else {
             const auto hit = catalogs.find_table("", q);
             columns_of_table(hit, q, &cols);
             found = hit.table != nullptr || hit.view != nullptr;
@@ -594,18 +531,13 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
           add_columns(cols, 1);
           break;
         }
-        for (const auto &t : tables) columns_of_ref(t, &cols);
+        for (const auto &t : tables()) columns_of_ref(t, &cols);
         add_columns(cols, 1);
         for (const auto &al : a.select_aliases_at(word_begin)) {
           b.add(al, Completion_kind::alias, 1, "select alias");
         }
         for (const auto &v : a.variables()) b.add(v.name, Completion_kind::variable, 2, v.type);
-        for (const auto &t : tables) {
-          if (!t.visible_name().empty()) {
-            b.add(t.visible_name(), Completion_kind::alias, 3,
-                  t.alias.empty() ? "table" : "alias of " + (t.name.empty() ? "a subquery" : t.name));
-          }
-        }
+        add_visible_tables(3);
         add_routines("", "function", 4);
         add_builtins(5);
         break;
@@ -644,11 +576,9 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
       verdicts.emplace(sym, yes);
       return yes;
     };
-    // Keywords the server uses for its own purposes, never typed.
-    static const int k_internal = grammar::symbol("PARSE_VCOL_EXPR_SYM");
     for (const int sym : pp.expected) {
       const auto &spellings = keyword_spellings(sym);
-      if (spellings.empty() || sym == k_internal) continue;
+      if (spellings.empty()) continue;
       bool any = false;
       for (const auto sp : spellings) any = any || b.matches(sp);
       if (!any || !meaningful(sym)) continue;

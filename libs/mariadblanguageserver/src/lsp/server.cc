@@ -774,7 +774,7 @@ struct Server::Impl {
       ref.live = live_catalog(default_connection);
       Index_options o = ref.doc.options();
       apply_server_options(ref, o);
-      if (o != ref.doc.options()) ref.doc.set_options(o);
+      set_options(ref, o, false);
     }
     documents[*uri] = std::move(d);
     log("open " + *uri + " (" + std::to_string(bytes) + " bytes, " +
@@ -842,11 +842,15 @@ struct Server::Impl {
     Index_options o = d->doc.options();
     read_index_options(params, o);
     apply_server_options(*d, o);
-    if (o != d->doc.options()) {
-      cancel_passes(*d);
-      d->doc.set_options(o);
-      start_checks(*d);
-    }
+    set_options(*d, o, true);
+  }
+
+  // New options for `d`: indexed again, and checked again when `check`.
+  void set_options(Open_document &d, const Index_options &o, bool check) {
+    if (o == d.doc.options()) return;
+    cancel_passes(d);
+    d.doc.set_options(o);
+    if (check) start_checks(d);
   }
 
   // The sql_mode and version of the document's connection, where the
@@ -865,8 +869,20 @@ struct Server::Impl {
   // ---- catalogs
 
   std::shared_ptr<Live_catalog> live_catalog(const std::string &uri) {
-    // Never the URI as given: it may hold a password.
-    const std::string key = normalize_connection_uri(uri).value_or("<invalid connection URI>");
+    const auto normalized = normalize_connection_uri(uri);
+    if (!normalized) {
+      // Not shown as given: it may hold a password.
+      notify("window/showMessage", [&](Json_writer &w) {
+        w.StartObject();
+        w.Key("type");
+        w.Int(2);
+        w.Key("message");
+        w.String("MariaDB: the document's connection is not a connection URI");
+        w.EndObject();
+      });
+      return nullptr;
+    }
+    const std::string &key = *normalized;
     if (const auto it = live.find(key); it != live.end()) return it->second;
     Live_catalog_options o;
     o.secrets = secrets;
@@ -903,11 +919,7 @@ struct Server::Impl {
       if (d->live != lc) continue;
       Index_options o = d->doc.options();
       apply_server_options(*d, o);
-      if (o != d->doc.options()) {
-        cancel_passes(*d);
-        d->doc.set_options(o);
-        start_checks(*d);
-      }
+      set_options(*d, o, true);
     }
   }
 
@@ -943,8 +955,9 @@ struct Server::Impl {
   void on_did_change_configuration(const Json &params) {
     const Json *settings = path(params, {"settings", "mariadb"});
     if (settings == nullptr || !settings->IsObject()) return;
+    const auto entries = catalog_entries;
     apply_settings(*settings);
-    rebuild_workspace();
+    if (catalog_entries != entries) rebuild_workspace();
   }
 
   void on_refresh_catalog(const std::string &id, const Json &params) {
@@ -977,10 +990,10 @@ struct Server::Impl {
   // The document's outline for a request job.  `fresh`: of this very
   // snapshot (definitions need its offsets).  Otherwise the last one built
   // will do, and a newer one is folded in the background.
-  std::shared_ptr<const Outline> document_outline(const Snapshot &snap,
-                                                  const std::shared_ptr<const Snapshot> &keep,
+  std::shared_ptr<const Outline> document_outline(const std::shared_ptr<const Snapshot> &keep,
                                                   const std::shared_ptr<Outline_cache> &cache,
                                                   bool fresh) {
+    const Snapshot &snap = *keep;
     if (fresh) return outline_of(snap, *cache);
     std::shared_ptr<const Outline> have;
     bool schedule = false;
@@ -1023,7 +1036,7 @@ struct Server::Impl {
     auto src = sources(*d);
     run_request(id, [this, src = std::move(src), pos = *pos, fresh, f = std::move(f)](
                         Json_writer &w, Parser_cache &cache) mutable {
-      src.catalogs.document = document_outline(*src.snapshot, src.snapshot, src.outline, fresh);
+      src.catalogs.document = document_outline(src.snapshot, src.outline, fresh);
       f(w, *src.snapshot, pos, src.catalogs, cache);
     });
   }
@@ -1432,7 +1445,6 @@ struct Server::Impl {
 
   void on_completion(const std::string &id, Open_document *d, const Json &params) {
     Completion_options o;
-    o.version_id = d != nullptr ? d->doc.options().version_id : k_default_version_id;
     o.upper_case_keywords = upper_keywords;
     o.snippets = snippets;
     position_request(id, d, params, false,
@@ -1516,7 +1528,7 @@ struct Server::Impl {
       std::vector<Symbol_document> out;
       for (const auto &[uri, snap, cache] : docs) {
         // Fresh: the locations are computed from this snapshot's text.
-        out.push_back({uri, snap, document_outline(*snap, snap, cache, true)});
+        out.push_back({uri, snap, document_outline(snap, cache, true)});
       }
       workspace_symbols(w, query, out, ws.get(), 1000);
     });

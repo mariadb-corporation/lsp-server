@@ -137,10 +137,10 @@ class Client:
 
     # ---- lifecycle
 
-    def initialize(self, options=None, capabilities=None):
+    def initialize(self, options=None, capabilities=None, root_uri=None):
         result = self.request("initialize", {
             "processId": os.getpid(),
-            "rootUri": None,
+            "rootUri": root_uri,
             "capabilities": capabilities or {},
             "initializationOptions": {"debounceMs": 0, **(options or {})},
         })

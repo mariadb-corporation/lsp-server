@@ -89,10 +89,6 @@ class Catalog_view {
   void for_each_routine(std::string_view schema,
                         const std::function<void(const Routine_hit &)> &f) const;
 
-  // The column names of a table or view: a view's explicit column list,
-  // else nothing (its SELECT is not resolved).
-  static std::vector<std::string> column_names(const Table_hit &hit);
-
  private:
   // The schemas of `layer` that `schema` ("" = current) means.
   std::vector<const Schema *> schemas_for(const Catalog_layer &layer,

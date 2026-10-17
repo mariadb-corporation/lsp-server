@@ -36,6 +36,13 @@ const std::vector<std::string_view> &keyword_spellings(int symbol);
 // parser whether it accepts the keyword as a table name.
 bool is_nonreserved_keyword(int symbol);
 
+// IDENT, IDENT_QUOTED, or a non-reserved keyword: a token that can be a
+// name.
+bool is_name_symbol(int symbol);
+
+// '(' or one of the lexer's spellings of it (LEFT_PAREN_ALT, ...).
+bool is_left_paren(int symbol);
+
 // Whether `word` must be quoted to be read as a name: it is empty, holds a
 // character other than a letter, digit, '_' or '$' (or any byte >= 0x80,
 // which is allowed), is all digits, or is a reserved keyword.
@@ -44,6 +51,8 @@ bool needs_quoting(std::string_view word);
 // `name` as it must be written: as is, or in backticks with backticks
 // doubled.
 std::string quote_identifier(std::string_view name);
+// `name` in backticks, backticks doubled, whether it needs them or not.
+std::string backtick_quote(std::string_view name);
 
 // A built-in function, from scripts/gen_builtin_functions.py.  `forms` holds
 // the call forms the server's help tables give, one per line ("" when the
@@ -56,6 +65,9 @@ struct Builtin_function {
 };
 
 std::span<const Builtin_function> builtin_functions();
+
+// Markdown describing `f`: its call forms (when `forms`), summary and link.
+std::string builtin_markdown(const Builtin_function &f, bool forms = true);
 // The function called `name` (any case), or nullptr.
 const Builtin_function *builtin_function(std::string_view name);
 

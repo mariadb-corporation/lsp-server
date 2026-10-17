@@ -171,7 +171,6 @@ void completion(Json_writer &w, const Snapshot &s, Position pos, const Catalog_s
   const uint32_t offset = s.lines->offset(*s.text, pos);
   const Catalog_view view = catalog_view(s, c, offset);
   const auto list = complete(*s.text, *s.index, offset, view, cache, options);
-  const bool quoted = list.replace_begin < s.text->size() && (*s.text)[list.replace_begin] == '`';
   w.StartObject();
   w.Key("isIncomplete");
   w.Bool(list.incomplete);
@@ -188,7 +187,7 @@ void completion(Json_writer &w, const Snapshot &s, Position pos, const Catalog_s
       markdown(w, it.documentation);
     }
     str(w, "sortText", it.sort_text);
-    if (quoted) str(w, "filterText", "`" + it.label);
+    if (list.quoted) str(w, "filterText", "`" + it.label);
     w.Key("textEdit");
     w.StartObject();
     w.Key("range");
@@ -229,34 +228,39 @@ void definition(Json_writer &w, const Snapshot &s, const std::string &uri, Posit
     return;
   }
   const auto &r = at->resolution;
-  if (r.local_definition) {
-    w.StartArray();
-    location(w, uri, *s.text, *s.lines, *r.local_definition);
-    w.EndArray();
-    return;
-  }
+  // Where to point: the statement's own definition, else the catalog's, in
+  // this document or a workspace file.
+  const std::string *where_uri = nullptr;
+  std::string_view where_text;
+  const Line_map *where_lines = nullptr;
+  Range where;
   const Origin *o = origin_of(r);
-  if (o == nullptr || r.layer == nullptr || o->name.end <= o->name.begin) {
+  if (r.local_definition) {
+    where = *r.local_definition;
+    where_uri = &uri;
+  } else if (o != nullptr && r.layer != nullptr && o->name.end > o->name.begin) {
+    where = o->name;
+    if (r.layer->kind == Layer_kind::document) {
+      where_uri = &uri;
+    } else if (r.layer->kind == Layer_kind::workspace && c.workspace &&
+               o->source < c.workspace->files.size()) {
+      const auto &f = c.workspace->files[o->source];
+      where_uri = &f.uri;
+      where_text = f.text;
+      where_lines = &f.lines;
+    }
+  }
+  if (where_uri == &uri) {
+    where_text = *s.text;
+    where_lines = s.lines.get();
+  }
+  if (where_uri == nullptr || where.end > where_text.size()) {
     w.Null();
     return;
   }
-  if (r.layer->kind == Layer_kind::document && o->name.end <= s.text->size()) {
-    w.StartArray();
-    location(w, uri, *s.text, *s.lines, o->name);
-    w.EndArray();
-    return;
-  }
-  if (r.layer->kind == Layer_kind::workspace && c.workspace &&
-      o->source < c.workspace->files.size()) {
-    const auto &f = c.workspace->files[o->source];
-    if (o->name.end <= f.text.size()) {
-      w.StartArray();
-      location(w, f.uri, f.text, f.lines, o->name);
-      w.EndArray();
-      return;
-    }
-  }
-  w.Null();
+  w.StartArray();
+  location(w, *where_uri, where_text, *where_lines, where);
+  w.EndArray();
 }
 
 void references(Json_writer &w, const Snapshot &s, const std::string &uri, Position pos,
@@ -386,89 +390,63 @@ void signature_help(Json_writer &w, const Snapshot &s, Position pos, const Catal
 void workspace_symbols(Json_writer &w, std::string_view query,
                        const std::vector<Symbol_document> &documents,
                        const Workspace_catalog *workspace, size_t max_symbols) {
+  struct File {
+    const std::string *uri = nullptr;  // nullptr: list nothing from it
+    std::string_view text;
+    const Line_map *lines = nullptr;
+  };
   size_t n = 0;
-  auto matches = [&](std::string_view name) {
-    if (query.empty()) return true;
-    const std::string l = lower(name), q = lower(query);
-    return l.find(q) != std::string::npos;
-  };
-  auto symbol = [&](const std::string &name, int kind, const std::string &container,
-                    const std::string &uri, std::string_view text, const Line_map &lines,
-                    const Origin &o) {
-    if (n >= max_symbols || !matches(name)) return;
-    if (o.name.end <= o.name.begin || o.name.end > text.size()) return;
-    ++n;
-    w.StartObject();
-    str(w, "name", name);
-    w.Key("kind");
-    w.Int(kind);
-    if (!container.empty()) str(w, "containerName", container);
-    w.Key("location");
-    location(w, uri, text, lines, o.name);
-    w.EndObject();
-  };
-  // Every object of `catalog` whose origin is in source `source`; `file`
-  // gives a source's uri, text and lines.
-  auto catalog_symbols = [&](const Catalog &catalog, auto &&file) {
+  // One catalog's objects, `file(source)` giving where an origin points.
+  auto list = [&](const Catalog &catalog, auto &&file) {
+    auto symbol = [&](const std::string &name, int kind, const std::string &container,
+                      const Origin &o) {
+      if (n >= max_symbols || !icontains(name, query)) return;
+      const File f = file(o.source);
+      if (f.uri == nullptr || o.name.end <= o.name.begin || o.name.end > f.text.size()) return;
+      ++n;
+      w.StartObject();
+      str(w, "name", name);
+      w.Key("kind");
+      w.Int(kind);
+      if (!container.empty()) str(w, "containerName", container);
+      w.Key("location");
+      location(w, *f.uri, f.text, *f.lines, o.name);
+      w.EndObject();
+    };
     for (const auto &sc : catalog.schemas()) {
-      if (sc.declared) {
-        const auto [uri, text, lines] = file(sc.origin.source);
-        if (uri != nullptr) symbol(sc.name, 3, "", *uri, text, *lines, sc.origin);
-      }
-      const std::string container = sc.name;
+      if (n >= max_symbols) return;
+      if (sc.declared) symbol(sc.name, 3, "", sc.origin);
       for (const auto &t : sc.tables) {
-        const auto [uri, text, lines] = file(t.origin.source);
-        if (uri == nullptr) continue;
-        symbol(t.name, 5, container, *uri, text, *lines, t.origin);
-        for (const auto &col : t.columns) {
-          const auto [curi, ctext, clines] = file(col.origin.source);
-          if (curi != nullptr && !query.empty()) {
-            symbol(col.name, 8, (container.empty() ? "" : container + ".") + t.name, *curi, ctext,
-                   *clines, col.origin);
-          }
-        }
+        symbol(t.name, 5, sc.name, t.origin);
+        if (query.empty()) continue;  // columns only when asked for
+        const std::string container = (sc.name.empty() ? "" : sc.name + ".") + t.name;
+        for (const auto &col : t.columns) symbol(col.name, 8, container, col.origin);
       }
-      for (const auto &v : sc.views) {
-        const auto [uri, text, lines] = file(v.origin.source);
-        if (uri != nullptr) symbol(v.name, 11, container, *uri, text, *lines, v.origin);
-      }
-      for (const auto &r : sc.routines) {
-        const auto [uri, text, lines] = file(r.origin.source);
-        if (uri != nullptr) symbol(r.name, symbol_kind_of_routine(r), container, *uri, text, *lines, r.origin);
-      }
-      for (const auto &t : sc.triggers) {
-        const auto [uri, text, lines] = file(t.origin.source);
-        if (uri != nullptr) symbol(t.name, 24, container, *uri, text, *lines, t.origin);
-      }
-      for (const auto &e : sc.events) {
-        const auto [uri, text, lines] = file(e.origin.source);
-        if (uri != nullptr) symbol(e.name, 24, container, *uri, text, *lines, e.origin);
-      }
-      for (const auto &q : sc.sequences) {
-        const auto [uri, text, lines] = file(q.origin.source);
-        if (uri != nullptr) symbol(q.name, 14, container, *uri, text, *lines, q.origin);
-      }
+      for (const auto &v : sc.views) symbol(v.name, 11, sc.name, v.origin);
+      for (const auto &r : sc.routines) symbol(r.name, symbol_kind_of_routine(r), sc.name, r.origin);
+      for (const auto &t : sc.triggers) symbol(t.name, 24, sc.name, t.origin);
+      for (const auto &e : sc.events) symbol(e.name, 24, sc.name, e.origin);
+      for (const auto &q : sc.sequences) symbol(q.name, 14, sc.name, q.origin);
     }
   };
-  using File = std::tuple<const std::string *, std::string_view, const Line_map *>;
   w.StartArray();
   for (const auto &d : documents) {
     if (!d.outline || !d.snapshot) continue;
-    catalog_symbols(d.outline->catalog, [&](uint32_t) -> File {
-      return {&d.uri, *d.snapshot->text, d.snapshot->lines.get()};
-    });
+    const File f{&d.uri, *d.snapshot->text, d.snapshot->lines.get()};
+    list(d.outline->catalog, [&](uint32_t) { return f; });
   }
   if (workspace != nullptr) {
-    catalog_symbols(workspace->outline.catalog, [&](uint32_t source) -> File {
-      if (source >= workspace->files.size()) return {nullptr, {}, nullptr};
-      const auto &f = workspace->files[source];
-      // An open document's own symbols are listed already.  Compared as
-      // paths: a client may spell the URI differently (case, encoding).
-      for (const auto &d : documents) {
-        if (d.uri == f.uri || file_uri_to_path(d.uri) == f.path) return {nullptr, {}, nullptr};
-      }
-      return {&f.uri, f.text, &f.lines};
-    });
+    // A workspace file that is open is listed from its document already;
+    // compared as paths, since a client may spell the URI differently.
+    std::vector<File> files;
+    for (const auto &wf : workspace->files) {
+      const bool open = std::any_of(documents.begin(), documents.end(), [&](const Symbol_document &d) {
+        return d.uri == wf.uri || file_uri_to_path(d.uri) == wf.path;
+      });
+      files.push_back(open ? File{} : File{&wf.uri, wf.text, &wf.lines});
+    }
+    list(workspace->outline.catalog,
+         [&](uint32_t source) { return source < files.size() ? files[source] : File{}; });
   }
   w.EndArray();
 }

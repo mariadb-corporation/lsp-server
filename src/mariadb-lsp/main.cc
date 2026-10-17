@@ -850,8 +850,7 @@ bool read_connection(Options &o) {
   std::optional<std::string> password = uri->password;
   if (!password) {
     const mdbls::Secret_store store({o.shell_bin_dir, ""});
-    std::string source;
-    password = store.password_for(o.connection, &source, &error);
+    password = store.password_for(o.connection, nullptr, &error);
     if (!password) {
       std::cerr << "mariadb-lsp: --connection " << redacted(o.connection) << ": " << error << "\n";
       return false;

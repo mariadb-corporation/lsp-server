@@ -29,11 +29,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(__file__))
 from lsp_client import Client, Lsp_error  # noqa: E402
 import sandbox  # noqa: E402
-
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-FIXTURES = ROOT / "tests" / "fixtures" / "sql"
-BINARY = os.environ.get("MARIADB_LSP", str(ROOT / "build" / "bin" / "mariadb-lsp"))
-URI = "file:///test.sql"
+from test_lsp import BINARY, URI, Lsp_test  # noqa: E402
 
 SCHEMA = """CREATE DATABASE shop;
 USE shop;
@@ -45,19 +41,16 @@ CREATE FUNCTION order_count(c INT) RETURNS INT RETURN 1;
 """
 
 
-def split_cursor(text):
-    """`text` without its '|', and the LSP position of the '|'."""
-    at = text.index("|")
-    before = text[:at]
-    line = before.count("\n")
-    character = len(before) - (before.rfind("\n") + 1)
-    return text[:at] + text[at + 1:], {"line": line, "character": character}
-
-
 def position_of(text, needle, offset=0):
     at = text.index(needle) + offset
     before = text[:at]
     return {"line": before.count("\n"), "character": len(before) - (before.rfind("\n") + 1)}
+
+
+def split_cursor(text):
+    """`text` without its '|', and the LSP position of the '|'."""
+    at = text.index("|")
+    return text[:at] + text[at + 1:], position_of(text, "|")
 
 
 def range_text(text, r):
@@ -68,13 +61,7 @@ def range_text(text, r):
     return None
 
 
-class Language_test(unittest.TestCase):
-    def setUp(self):
-        self.client = Client(BINARY)
-
-    def tearDown(self):
-        self.assertEqual(self.client.close(), 0)
-
+class Language_test(Lsp_test):
     def open_at(self, sql, options=None, capabilities=None):
         """Opens SCHEMA + sql; returns (text, position of the |)."""
         c = self.client
@@ -217,14 +204,7 @@ class Workspace(unittest.TestCase):
         shutil.rmtree(self.dir, ignore_errors=True)
 
     def initialize(self):
-        c = self.client
-        c.request("initialize", {
-            "processId": os.getpid(),
-            "rootUri": self.dir.as_uri(),
-            "capabilities": {},
-            "initializationOptions": {"debounceMs": 0, "catalogFiles": ["db"]},
-        })
-        c.notify("initialized", {})
+        self.client.initialize({"catalogFiles": ["db"]}, root_uri=self.dir.as_uri())
 
     def complete_until(self, text, pos, label, timeout=20):
         """The workspace catalog is read in the background."""

@@ -73,7 +73,8 @@ const Keyword_tables &tables() {
       mdbp_keyword k;
       if (!mdbp_keyword_at(i, &k) || k.symbol < 0 || k.terminal == nullptr) continue;
       const std::string_view spelling(k.spelling);
-      if (!is_word(spelling) || k.function) continue;
+      // PARSE_VCOL_EXPR is the server's own, never typed.
+      if (!is_word(spelling) || k.function || spelling == "PARSE_VCOL_EXPR") continue;
       auto &v = out.spellings[k.symbol];
       if (std::find(v.begin(), v.end(), spelling) == v.end()) v.push_back(spelling);
       out.words.emplace(upper(spelling), k.symbol);
@@ -121,8 +122,30 @@ bool needs_quoting(std::string_view word) {
   return it != t.words.end() && !is_nonreserved_keyword(it->second);
 }
 
+bool is_name_symbol(int symbol) {
+  static const int ident = grammar::symbol("IDENT");
+  static const int quoted = grammar::symbol("IDENT_QUOTED");
+  return symbol == ident || symbol == quoted || is_nonreserved_keyword(symbol);
+}
+
+bool is_left_paren(int symbol) {
+  // By symbol: '(' and every LEFT_PAREN_* terminal, found once.
+  static const std::vector<uint8_t> parens = [] {
+    std::vector<uint8_t> v(static_cast<size_t>(mdbp_grammar_symbol_count()), 0);
+    for (size_t s = 0; s < v.size(); ++s) {
+      const std::string_view n = grammar::name(static_cast<int>(s));
+      if (n == "'('" || n.substr(0, 10) == "LEFT_PAREN") v[s] = 1;
+    }
+    return v;
+  }();
+  return symbol >= 0 && static_cast<size_t>(symbol) < parens.size() && parens[static_cast<size_t>(symbol)];
+}
+
 std::string quote_identifier(std::string_view name) {
-  if (!needs_quoting(name)) return std::string(name);
+  return needs_quoting(name) ? backtick_quote(name) : std::string(name);
+}
+
+std::string backtick_quote(std::string_view name) {
   std::string out = "`";
   for (const char c : name) {
     out.push_back(c);
@@ -133,6 +156,14 @@ std::string quote_identifier(std::string_view name) {
 }
 
 std::span<const Builtin_function> builtin_functions() { return k_functions; }
+
+std::string builtin_markdown(const Builtin_function &f, bool forms) {
+  std::string out;
+  if (forms && !f.forms.empty()) out = "```sql\n" + std::string(f.forms) + "\n```\n";
+  out += f.summary;
+  if (!f.url.empty()) out += "\n\n[MariaDB documentation](" + std::string(f.url) + ")";
+  return out;
+}
 
 const Builtin_function *builtin_function(std::string_view name) {
   static const std::unordered_map<std::string, const Builtin_function *> by_name = [] {

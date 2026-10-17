@@ -21,7 +21,6 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
-#include <iterator>
 #include <set>
 #include <system_error>
 
@@ -31,17 +30,6 @@
 namespace mdbls {
 
 namespace fs = std::filesystem;
-
-namespace {
-
-int hex_value(char c) {
-  if (c >= '0' && c <= '9') return c - '0';
-  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-  return -1;
-}
-
-}  // namespace
 
 std::string file_uri_to_path(std::string_view uri) {
   constexpr std::string_view k_scheme = "file://";
@@ -53,16 +41,9 @@ std::string file_uri_to_path(std::string_view uri) {
   const auto host = uri.substr(0, slash);
   if (!host.empty() && !iequals(host, "localhost")) return {};
   uri.remove_prefix(slash);
-  std::string out;
-  for (size_t i = 0; i < uri.size(); ++i) {
-    if (uri[i] == '%' && i + 2 < uri.size() && hex_value(uri[i + 1]) >= 0 &&
-        hex_value(uri[i + 2]) >= 0) {
-      out.push_back(static_cast<char>(hex_value(uri[i + 1]) * 16 + hex_value(uri[i + 2])));
-      i += 2;
-    } else {
-      out.push_back(uri[i]);
-    }
-  }
+  auto decoded = percent_decode(uri);
+  if (!decoded) return {};
+  std::string out = std::move(*decoded);
   // file:///c:/x -> c:/x
   if (out.size() >= 3 && out[0] == '/' && std::isalpha(static_cast<unsigned char>(out[1])) &&
       out[2] == ':') {
@@ -76,25 +57,18 @@ std::string path_to_file_uri(std::string_view path) {
   std::replace(p.begin(), p.end(), '\\', '/');
   std::string out = "file://";
   if (p.empty() || p[0] != '/') out.push_back('/');
-  static const char *hex = "0123456789ABCDEF";
-  for (const char ch : p) {
-    const auto c = static_cast<unsigned char>(ch);
-    if (std::isalnum(c) || c == '/' || c == '-' || c == '_' || c == '.' || c == '~') {
-      out.push_back(ch);
-    } else {
-      out.push_back('%');
-      out.push_back(hex[c >> 4]);
-      out.push_back(hex[c & 15]);
-    }
-  }
+  out += percent_encode(p, "/");
   return out;
 }
 
 bool read_sql_file(const std::string &path, std::string *text) {
-  std::ifstream in(path, std::ios::binary);
+  std::ifstream in(path, std::ios::binary | std::ios::ate);
   if (!in) return false;
-  text->assign(std::istreambuf_iterator<char>(in), {});
-  if (in.bad()) return false;
+  const auto size = in.tellg();
+  if (size < 0) return false;
+  text->resize(static_cast<size_t>(size));
+  in.seekg(0);
+  if (!in.read(text->data(), static_cast<std::streamsize>(text->size()))) return false;
   if (first_invalid_utf8(*text)) *text = latin1_to_utf8(*text);
   return true;
 }

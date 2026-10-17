@@ -18,7 +18,6 @@
 #include "mdbls/sql_names.h"
 
 #include <algorithm>
-#include <cstring>
 
 #include "mdbls/keywords.h"
 #include "mdbparse.h"
@@ -40,26 +39,23 @@ struct Name_syms {
   S(table_ident) S(simple_ident) S(simple_ident_nospvar) S(field_ident) S(key_part_simple)
   S(insert_ident) S(select_alias) S(ident_table_alias) S(table_alias_clause) S(table_alias_ref)
   S(table_ident_opt_wild) S(select_sublist_qualified_asterisk) S(function_call_generic)
-  S(sp_name) S(call) S(use) S(create) S(alter) S(drop) S(rename) S(table_to_table)
-  S(create_like) S(references) S(ref_list) S(using_list) S(view_list) S(alter_list_item)
+  S(sp_name) S(call) S(use) S(create) S(alter) S(drop) S(table_to_table)
+  S(references) S(ref_list) S(using_list) S(view_list) S(alter_list_item)
   S(field_spec) S(key_def) S(sp_param_name) S(sp_decl_ident) S(sp_decl_idents)
   S(sp_decl_idents_init_vars) S(with_element_head) S(with_list_element) S(with_column_list)
-  S(ident_sys_alloc) S(option_value_no_option_type) S(trigger_tail) S(create_routine)
-  S(drop_routine) S(event_tail) S(optionally_qualified_column_ident) S(order_ident)
-  S(update_elem)
+  S(ident_sys_alloc) S(option_value_no_option_type) S(trigger_tail) S(event_tail)
+  S(optionally_qualified_column_ident)
   // scopes and tables
   S(query_specification) S(query_expression_body_ext) S(update) S(insert) S(replace)
   S(table_primary_ident) S(table_primary_derived) S(table_name_with_opt_use_partition)
-  S(delete_single_table) S(insert_table) S(select_item) S(select_item_list) S(expr)
-  S(sp_param_name_and_mode) S(type_with_opt_collate) S(field_type) S(sp_decl_variable_list)
+  S(delete_single_table) S(select_item) S(select_item_list) S(expr) S(sp_param_name_and_mode)
   // tokens
-  S(TABLE_SYM) S(VIEW_SYM) S(SEQUENCE_SYM) S(INDEX_SYM) S(DATABASE) S(TRIGGER_SYM) S(EVENT_SYM)
-  S(IDENT) S(IDENT_QUOTED) S(END_OF_INPUT)
+  S(TABLE_SYM) S(VIEW_SYM) S(SEQUENCE_SYM) S(INDEX_SYM) S(DATABASE)
 #undef S
   int delete_ = grammar::symbol("delete");
   int dot = grammar::symbol("'.'");
   int comma = grammar::symbol("','");
-  int lparen = grammar::symbol("'('");
+  int semicolon = grammar::symbol("';'");
   int rparen = grammar::symbol("')'");
 };
 
@@ -68,30 +64,72 @@ const Name_syms &syms() {
   return s;
 }
 
-bool starts_with(const char *s, const char *prefix) {
-  return std::strncmp(s, prefix, std::strlen(prefix)) == 0;
-}
-
-bool is_left_paren(int symbol) {
-  return symbol >= 0 && (symbol == grammar::symbol("'('") ||
-                         starts_with(grammar::name(symbol), "LEFT_PAREN"));
-}
-
-// `s` without blanks at either end, and with runs of blanks as one space.
-std::string trimmed(std::string_view s) {
-  std::string out;
-  bool space = false;
-  for (const char c : s) {
-    if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
-      space = !out.empty();
-    } else {
-      if (space) out.push_back(' ');
-      space = false;
-      out.push_back(c);
-    }
+// A nonterminal that only wraps one name token: ident, IDENT_sys, keyword_*.
+bool is_wrapper(int symbol) {
+  const auto &s = syms();
+  if (symbol == s.ident || symbol == s.ident_cli || symbol == s.IDENT_sys ||
+      symbol == s.IDENT_cli || symbol == s.ident_cli_func ||
+      symbol == s.ident_cli_set_usual_case || symbol == s.label_ident) {
+    return true;
   }
-  return out;
+  return !grammar::is_terminal(symbol) &&
+         std::string_view(grammar::name(symbol)).substr(0, 7) == "keyword";
 }
+
+// A node whose FROM list (or target table) names the tables in scope.
+bool is_scope(int symbol) {
+  const auto &s = syms();
+  return symbol == s.query_specification || symbol == s.update || symbol == s.delete_ ||
+         symbol == s.insert || symbol == s.replace;
+}
+
+using Words = std::initializer_list<const char *>;
+
+// The keywords the token scanners go by.  A FROM list starts after these:
+constexpr Words k_from_words = {"FROM", "JOIN", "STRAIGHT_JOIN"};
+// and ends at these (as does the search for its start):
+constexpr Words k_clause_words = {"WHERE",  "ON",     "USING", "GROUP",  "ORDER",
+                                  "HAVING", "LIMIT",  "SET",   "VALUES", "SELECT",
+                                  "WINDOW", "UNION",  "EXCEPT", "INTERSECT"};
+// A table name also follows these (INTO only after INSERT or REPLACE):
+constexpr Words k_table_words = {"UPDATE", "TABLE", "TABLES", "REFERENCES", "DESCRIBE",
+                                 "DESC", "TRUNCATE"};
+// After a table name, these are not its alias:
+constexpr Words k_not_alias = {"JOIN", "LEFT", "RIGHT", "INNER", "CROSS", "NATURAL",
+                               "STRAIGHT_JOIN", "USE", "IGNORE", "FORCE", "PARTITION",
+                               "FOR", "LOCK"};
+
+// The tokens of a statement, for the scanners: their text and kind.
+struct Token_view {
+  const std::vector<Syntax_tree::Token> &t;
+  std::string_view sql;
+  uint32_t base;
+
+  size_t size() const { return t.size(); }
+  int symbol(size_t i) const { return t[i].symbol; }
+  std::string_view text(size_t i) const { return sql.substr(t[i].begin - base, t[i].end - t[i].begin); }
+  bool name(size_t i) const { return i < t.size() && is_name_symbol(t[i].symbol); }
+  // Token i is one of `words`, as a keyword (reserved or not), not a name.
+  bool word(size_t i, Words words) const {
+    static const int ident = grammar::symbol("IDENT");
+    static const int quoted = grammar::symbol("IDENT_QUOTED");
+    if (i >= t.size() || t[i].symbol == ident || t[i].symbol == quoted) return false;
+    const auto x = text(i);
+    for (const char *w : words) {
+      if (iequals(x, w)) return true;
+    }
+    return false;
+  }
+  // INTO at i names a table: INSERT or REPLACE (and their options) is near
+  // before it, not SELECT ... INTO a variable.
+  bool into_table(size_t i) const {
+    if (!word(i, {"INTO"})) return false;
+    for (size_t k = i; k-- > 0 && k + 4 > i;) {
+      if (word(k, {"INSERT", "REPLACE"})) return true;
+    }
+    return false;
+  }
+};
 
 }  // namespace
 
@@ -112,17 +150,20 @@ const char *name_kind_name(Name_kind kind) {
   return "none";
 }
 
-std::string unquote_name(std::string_view s) {
-  if (s.size() >= 2 && (s.front() == '`' || s.front() == '"') && s.back() == s.front()) {
-    const char q = s.front();
-    std::string out;
-    for (size_t i = 1; i + 1 < s.size(); ++i) {
-      out.push_back(s[i]);
-      if (s[i] == q && i + 2 < s.size() && s[i + 1] == q) ++i;
-    }
-    return out;
+std::string unquote_name(std::string_view s) { return unquote_identifier(s); }
+
+const Table_ref *table_for_qualifier(const std::vector<Table_ref> &tables,
+                                     const std::vector<Table_ref> &ctes, std::string_view q) {
+  for (const auto &t : tables) {
+    if (iequals(t.visible_name(), q)) return &t;
   }
-  return std::string(s);
+  for (const auto &t : tables) {
+    if (iequals(t.name, q)) return &t;
+  }
+  for (const auto &c : ctes) {
+    if (iequals(c.name, q)) return &c;
+  }
+  return nullptr;
 }
 
 Statement_names::Statement_names(mdbp_parser *parser, std::string_view sql, uint32_t base)
@@ -134,9 +175,12 @@ Statement_names::Statement_names(mdbp_parser *parser, std::string_view sql, uint
   m_parsed = true;
   m_accepted = st == MDBP_OK && r.accepted;
   m_tree = Syntax_tree::build(parser, r, base);
+  m_leaves.assign(m_tree.tokens().size(), npos);
+  for (uint32_t n = 0; n < m_tree.size(); ++n) {
+    if (m_tree.is_token(n)) m_leaves[m_tree.node(n).first_token] = n;
+  }
 
   const auto &s = syms();
-  if (m_tree.empty()) return;
   // Common table expressions and variables, statement-wide.
   for (const uint32_t root : m_tree.roots()) {
     for (const uint32_t w : m_tree.find_all(root, s.with_list_element)) {
@@ -164,7 +208,7 @@ Statement_names::Statement_names(mdbp_parser *parser, std::string_view sql, uint
       v.range = {m_tree.begin(n), m_tree.end(n)};
       // The type follows the name in the parameter's text.
       const uint32_t b = m_tree.end(n), e = m_tree.end(p);
-      v.type = trimmed(m_sql.substr(b - m_base, e - b));
+      v.type = collapse(m_sql.substr(b - m_base, e - b));
       m_variables.push_back(std::move(v));
     }
     for (const uint32_t d : m_tree.find_all(root, s.sp_decl_idents_init_vars)) {
@@ -173,7 +217,7 @@ Statement_names::Statement_names(mdbp_parser *parser, std::string_view sql, uint
       std::string type;
       if (const uint32_t parent = m_tree.node(d).parent; parent != npos && names != npos) {
         const uint32_t b = m_tree.end(names), e = m_tree.end(parent);
-        type = trimmed(m_sql.substr(b - m_base, e - b));
+        type = collapse(m_sql.substr(b - m_base, e - b));
       }
       for (const uint32_t id : m_tree.find_all(d, s.sp_decl_ident)) {
         m_variables.push_back({name_of(id), type, {m_tree.begin(id), m_tree.end(id)}});
@@ -192,22 +236,6 @@ std::string Statement_names::name_of(uint32_t n) const {
   return n == npos ? std::string() : unquote_name(text(n));
 }
 
-bool Statement_names::is_wrapper(int symbol) const {
-  const auto &s = syms();
-  if (symbol == s.ident || symbol == s.ident_cli || symbol == s.IDENT_sys ||
-      symbol == s.IDENT_cli || symbol == s.ident_cli_func ||
-      symbol == s.ident_cli_set_usual_case || symbol == s.label_ident) {
-    return true;
-  }
-  return !grammar::is_terminal(symbol) && starts_with(grammar::name(symbol), "keyword");
-}
-
-bool Statement_names::is_scope(int symbol) const {
-  const auto &s = syms();
-  return symbol == s.query_specification || symbol == s.update || symbol == s.delete_ ||
-         symbol == s.insert || symbol == s.replace;
-}
-
 uint32_t Statement_names::ancestor(uint32_t n, int symbol) const {
   for (; n != npos; n = m_tree.node(n).parent) {
     if (m_tree.node(n).symbol == symbol) return n;
@@ -216,43 +244,19 @@ uint32_t Statement_names::ancestor(uint32_t n, int symbol) const {
 }
 
 uint32_t Statement_names::token_at(uint32_t offset) const {
-  const auto &s = syms();
   const auto &tokens = m_tree.tokens();
-  uint32_t covering = npos, ending = npos;
-  for (uint32_t i = 0; i < tokens.size(); ++i) {
-    const auto &t = tokens[i];
-    if (t.end <= t.begin) continue;  // END_OF_INPUT
-    if (t.begin <= offset && offset < t.end) {
-      covering = i;
-      break;
-    }
-    if (t.end == offset) ending = i;
-    if (t.begin > offset) break;
-  }
+  // Tokens are in text order: the first that ends after the offset.
+  const auto it = std::partition_point(tokens.begin(), tokens.end(),
+                                       [&](const Syntax_tree::Token &t) { return t.end <= offset; });
+  const auto at = static_cast<uint32_t>(it - tokens.begin());
+  const uint32_t covering =
+      it != tokens.end() && it->begin <= offset && it->begin < it->end ? at : npos;
+  const uint32_t ending = at > 0 && tokens[at - 1].end == offset ? at - 1 : npos;
   // A cursor between a name and punctuation (a|.b, f|() belongs to the name.
-  auto is_name = [&](uint32_t i) {
-    const int sy = tokens[i].symbol;
-    return sy == s.IDENT || sy == s.IDENT_QUOTED || is_nonreserved_keyword(sy);
-  };
-  if (covering != npos && (is_name(covering) || ending == npos || !is_name(ending))) {
-    return covering;
-  }
+  auto name = [&](uint32_t i) { return is_name_symbol(tokens[i].symbol); };
+  if (covering != npos && (name(covering) || ending == npos || !name(ending))) return covering;
   return ending != npos ? ending : covering;
 }
-
-namespace {
-
-// The leaf node of token `token`, npos when the parser never shifted it.
-uint32_t leaf_of(const Syntax_tree &t, uint32_t token) {
-  // Leaves are created in token order; a binary search over nodes is not
-  // possible (inner nodes interleave), so scan the leaves.
-  for (uint32_t n = 0; n < t.size(); ++n) {
-    if (t.is_token(n) && t.node(n).first_token == token) return n;
-  }
-  return npos;
-}
-
-}  // namespace
 
 Name_ref Statement_names::name_at(uint32_t offset) const {
   const uint32_t tok = token_at(offset);
@@ -267,27 +271,31 @@ Table_ref Statement_names::table_ident_ref(uint32_t ti) const {
   for (const uint32_t c : m_tree.children(ti)) {
     if (m_tree.node(c).symbol == s.ident) ids.push_back(c);
   }
-  if (ids.size() >= 2) {
-    ref.schema = name_of(ids[0]);
-    ref.name = name_of(ids[1]);
-    ref.name_range = {m_tree.begin(ids[1]), m_tree.end(ids[1])};
-  } else if (ids.size() == 1) {
-    ref.name = name_of(ids[0]);
-    ref.name_range = {m_tree.begin(ids[0]), m_tree.end(ids[0])};
-  }
+  if (ids.empty()) return ref;
+  if (ids.size() >= 2) ref.schema = name_of(ids[0]);
+  const uint32_t n = ids[std::min<size_t>(ids.size(), 2) - 1];
+  ref.name = name_of(n);
+  ref.name_range = {m_tree.begin(n), m_tree.end(n)};
   return ref;
 }
 
-void Statement_names::set_owner_from(uint32_t node, int table_child_symbol, Name_ref *ref) const {
-  const uint32_t ti = node == npos ? npos : m_tree.find(node, table_child_symbol);
-  if (ti == npos) return;
-  // find() goes depth first: make sure the table_ident is the node's own
-  // (a direct child, or under the insert table wrapper).
-  const Table_ref t = table_ident_ref(ti);
+void Statement_names::set_owner(uint32_t table_ident, Name_ref *ref) const {
+  if (table_ident == npos) return;
+  const Table_ref t = table_ident_ref(table_ident);
   if (t.name.empty()) return;
   ref->has_owner = true;
   ref->owner_schema = t.schema;
   ref->owner = t.name;
+}
+
+void Statement_names::apply_cte(Table_ref *ref) const {
+  if (!ref->schema.empty()) return;
+  for (const auto &c : m_ctes) {
+    if (iequals(c.name, ref->name)) {
+      ref->derived = true;
+      ref->columns = c.columns;
+    }
+  }
 }
 
 Name_ref Statement_names::classify(uint32_t token) const {
@@ -299,108 +307,103 @@ Name_ref Statement_names::classify(uint32_t token) const {
   ref.range = {tk.begin, tk.end};
   ref.name = unquote_name(m_sql.substr(tk.begin - m_base, tk.end - tk.begin));
 
-  const uint32_t leaf = leaf_of(m_tree, token);
-  ref.node = leaf;
+  const uint32_t leaf_node = leaf(token);
+  ref.node = leaf_node;
   // A name token is an identifier or a keyword standing for one; anything
   // else (a reserved keyword, a literal, punctuation) names nothing, unless
   // the tree says otherwise below.
-  const bool name_like = tk.symbol == s.IDENT || tk.symbol == s.IDENT_QUOTED ||
-                         is_nonreserved_keyword(tk.symbol);
-  if (leaf == npos) {
-    return name_like ? classify_by_tokens(token) : ref;
-  }
+  const bool name_like = is_name_symbol(tk.symbol);
+  if (leaf_node == npos) return name_like ? classify_by_tokens(token) : ref;
 
   // Up through the wrappers of the one token.
-  uint32_t child = leaf;
-  uint32_t a = m_tree.node(leaf).parent;
+  uint32_t child = leaf_node;
+  uint32_t a = m_tree.node(leaf_node).parent;
   while (a != npos && is_wrapper(m_tree.node(a).symbol)) {
     child = a;
     a = m_tree.node(a).parent;
   }
-  if (a == npos) {
-    // The stack of a rejected statement ends here: ask the tokens.
-    return name_like ? classify_by_tokens(token) : ref;
-  }
+  // The stack of a rejected statement ends here: ask the tokens.
+  if (a == npos) return name_like ? classify_by_tokens(token) : ref;
   const int sym = m_tree.node(a).symbol;
-  const auto kids = m_tree.children(a);
 
   // The parts of a dotted name a.b.c: the children that are names, and the
   // position of ours among them.
-  auto parts = [&](uint32_t node, std::vector<uint32_t> *ids) -> size_t {
-    size_t at = 0;
-    for (const uint32_t c : m_tree.children(node)) {
-      const int cs = m_tree.node(c).symbol;
-      const bool part = grammar::is_terminal(cs)
-                            ? cs == s.IDENT || cs == s.IDENT_QUOTED || is_nonreserved_keyword(cs)
-                            : is_wrapper(cs);
-      if (!part || m_tree.node(c).token_count == 0) continue;
-      if (c == child) at = ids->size();
-      ids->push_back(c);
-    }
-    return at;
-  };
-  auto qualify = [&](const std::vector<uint32_t> &ids, size_t upto) {
-    for (size_t k = 0; k < upto; ++k) {
+  std::vector<uint32_t> ids;
+  size_t at = 0;
+  for (const uint32_t c : m_tree.children(a)) {
+    const int cs = m_tree.node(c).symbol;
+    const bool part = grammar::is_terminal(cs) ? is_name_symbol(cs) : is_wrapper(cs);
+    if (!part || m_tree.node(c).token_count == 0) continue;
+    if (c == child) at = ids.size();
+    ids.push_back(c);
+  }
+  auto qualify = [&] {
+    for (size_t k = 0; k < at; ++k) {
       ref.qualifiers.push_back(name_of(ids[k]));
       ref.qualifier_ranges.push_back({m_tree.begin(ids[k]), m_tree.end(ids[k])});
     }
   };
   // A dotted column name: column, or the table/schema parts before it.
-  auto dotted_column = [&](uint32_t node) {
-    std::vector<uint32_t> ids;
-    const size_t at = parts(node, &ids);
+  auto dotted_column = [&] {
     const size_t last = ids.empty() ? 0 : ids.size() - 1;
     if (at == last) {
       ref.kind = Name_kind::column;
-      qualify(ids, at);
+      qualify();
     } else if (at + 1 == last) {
       ref.kind = last == 1 ? Name_kind::qualifier : Name_kind::table;
-      qualify(ids, at);
+      qualify();
     } else {
       ref.kind = Name_kind::schema;
     }
   };
+  const bool schema_part = ids.size() >= 2 && at == 0;
+  // The table a DDL statement (ALTER TABLE t, CREATE ... t) is about.
+  auto ddl_table = [&] {
+    uint32_t owner = ancestor(a, s.alter);
+    if (owner == npos) owner = ancestor(a, s.create);
+    return owner == npos ? npos : m_tree.child(owner, s.table_ident);
+  };
+  // In a trigger body: the trigger's table.
+  auto trigger_table = [&] {
+    const uint32_t tt = ancestor(a, s.trigger_tail);
+    return tt == npos ? npos : m_tree.child(tt, s.table_ident);
+  };
 
   if (sym == s.table_ident) {
-    std::vector<uint32_t> ids;
-    const size_t at = parts(a, &ids);
-    if (ids.size() >= 2 && at == 0) {
+    if (schema_part) {
       ref.kind = Name_kind::schema;
       return ref;
     }
     ref.kind = Name_kind::table;
-    qualify(ids, at);
+    qualify();
     const uint32_t p = m_tree.node(a).parent;
-    if (p != npos) {
-      const int ps = m_tree.node(p).symbol;
-      if (ps == s.create) {
-        // CREATE TABLE/VIEW/SEQUENCE t defines t; CREATE INDEX ... ON t,
-        // CREATE TRIGGER ... ON t do not.
-        const bool defines = (m_tree.child(p, s.TABLE_SYM) != npos ||
-                              m_tree.child(p, s.VIEW_SYM) != npos ||
-                              m_tree.child(p, s.SEQUENCE_SYM) != npos) &&
-                             m_tree.child(p, s.INDEX_SYM) == npos;
-        ref.defining = defines && m_tree.child(p, s.table_ident) == a;
-      } else if (ps == s.table_to_table) {
-        ref.defining = m_tree.child(p, s.table_ident) != a;  // RENAME a TO b: b
-      }
+    const int ps = p == npos ? -1 : m_tree.node(p).symbol;
+    if (ps == s.create) {
+      // CREATE TABLE/VIEW/SEQUENCE t defines t; CREATE INDEX ... ON t,
+      // CREATE TRIGGER ... ON t do not.
+      const bool defines = (m_tree.child(p, s.TABLE_SYM) != npos ||
+                            m_tree.child(p, s.VIEW_SYM) != npos ||
+                            m_tree.child(p, s.SEQUENCE_SYM) != npos) &&
+                           m_tree.child(p, s.INDEX_SYM) == npos;
+      ref.defining = defines && m_tree.child(p, s.table_ident) == a;
+    } else if (ps == s.table_to_table) {
+      ref.defining = m_tree.child(p, s.table_ident) != a;  // RENAME a TO b: b
     }
     return ref;
   }
   if (sym == s.simple_ident || sym == s.simple_ident_nospvar ||
       sym == s.optionally_qualified_column_ident) {
-    dotted_column(a);
+    dotted_column();
     const uint32_t p = m_tree.node(a).parent;
     if (ref.kind == Name_kind::column && p != npos && m_tree.node(p).symbol == s.insert_ident) {
-      set_owner_from(ancestor(p, s.insert), s.table_ident, &ref);
-    }
-    // NEW.a and OLD.a in a trigger body are columns of the trigger's table.
-    if (ref.kind == Name_kind::column && ref.qualifiers.size() == 1 &&
-        (iequals(ref.qualifiers[0], "NEW") || iequals(ref.qualifiers[0], "OLD"))) {
-      if (const uint32_t tt = ancestor(a, s.trigger_tail); tt != npos) {
-        set_owner_from(m_tree.child(tt, s.table_ident) != npos ? tt : npos, s.table_ident, &ref);
+      if (const uint32_t ins = ancestor(p, s.insert); ins != npos) {
+        set_owner(m_tree.find(ins, s.table_ident), &ref);
       }
     }
+    // NEW.a and OLD.a in a trigger body are columns of the trigger's table.
+    const bool new_old = ref.qualifiers.size() == 1 &&
+                         (iequals(ref.qualifiers[0], "NEW") || iequals(ref.qualifiers[0], "OLD"));
+    if (ref.kind == Name_kind::column && new_old) set_owner(trigger_table(), &ref);
     if (ref.kind == Name_kind::qualifier && ancestor(a, s.trigger_tail) != npos &&
         (iequals(ref.name, "NEW") || iequals(ref.name, "OLD"))) {
       ref.kind = Name_kind::other;
@@ -408,64 +411,26 @@ Name_ref Statement_names::classify(uint32_t token) const {
     return ref;
   }
   if (sym == s.field_ident) {
-    std::vector<uint32_t> ids;
-    const size_t at = parts(a, &ids);
     if (ids.size() > 1) {
-      dotted_column(a);
+      dotted_column();
       return ref;
     }
-    (void)at;
     const uint32_t p = m_tree.node(a).parent;
     const int ps = p == npos ? -1 : m_tree.node(p).symbol;
-    if (ps == s.key_def) {
-      ref.kind = Name_kind::index;
-      ref.defining = true;
-    } else {
-      ref.kind = Name_kind::column;
-      ref.defining = ps == s.field_spec;
-    }
-    uint32_t owner = ancestor(a, s.alter);
-    if (owner == npos) owner = ancestor(a, s.create);
-    if (owner != npos) {
-      if (const uint32_t ti = m_tree.child(owner, s.table_ident); ti != npos) {
-        const Table_ref t = table_ident_ref(ti);
-        ref.has_owner = !t.name.empty();
-        ref.owner_schema = t.schema;
-        ref.owner = t.name;
-      }
-    }
+    ref.kind = ps == s.key_def ? Name_kind::index : Name_kind::column;
+    ref.defining = ps == s.key_def || ps == s.field_spec;
+    set_owner(ddl_table(), &ref);
     return ref;
   }
   if (sym == s.key_part_simple || sym == s.ref_list || sym == s.alter_list_item) {
     ref.kind = Name_kind::column;
-    if (const uint32_t r = ancestor(a, s.references); r != npos) {
-      if (const uint32_t ti = m_tree.child(r, s.table_ident); ti != npos) {
-        const Table_ref t = table_ident_ref(ti);
-        ref.has_owner = true;
-        ref.owner_schema = t.schema;
-        ref.owner = t.name;
-      }
-      return ref;
-    }
-    uint32_t owner = ancestor(a, s.alter);
-    if (owner == npos) owner = ancestor(a, s.create);
-    if (owner != npos) {
-      if (const uint32_t ti = m_tree.child(owner, s.table_ident); ti != npos) {
-        const Table_ref t = table_ident_ref(ti);
-        ref.has_owner = !t.name.empty();
-        ref.owner_schema = t.schema;
-        ref.owner = t.name;
-      }
-    }
+    const uint32_t r = ancestor(a, s.references);
+    set_owner(r != npos ? m_tree.child(r, s.table_ident) : ddl_table(), &ref);
     return ref;
   }
-  if (sym == s.using_list) {
+  if (sym == s.using_list || sym == s.view_list) {
     ref.kind = Name_kind::column;
-    return ref;
-  }
-  if (sym == s.view_list) {
-    ref.kind = Name_kind::column;
-    ref.defining = true;
+    ref.defining = sym == s.view_list;
     return ref;
   }
   if (sym == s.ident_sys_alloc && ancestor(a, s.with_column_list) != npos) {
@@ -484,64 +449,46 @@ Name_ref Statement_names::classify(uint32_t token) const {
     return ref;
   }
   if (sym == s.table_ident_opt_wild || sym == s.table_alias_ref) {
-    std::vector<uint32_t> ids;
-    const size_t at = parts(a, &ids);
-    if (ids.size() >= 2 && at == 0) {
-      ref.kind = Name_kind::schema;
-    } else {
-      ref.kind = Name_kind::qualifier;
-      qualify(ids, at);
-    }
+    ref.kind = schema_part ? Name_kind::schema : Name_kind::qualifier;
+    if (!schema_part) qualify();
     return ref;
   }
   if (sym == s.select_sublist_qualified_asterisk) {
-    std::vector<uint32_t> ids;
-    const size_t at = parts(a, &ids);
-    ref.kind = ids.size() >= 2 && at == 0 ? Name_kind::schema
-               : ids.size() >= 2          ? Name_kind::table
-                                          : Name_kind::qualifier;
-    qualify(ids, at);
+    ref.kind = schema_part         ? Name_kind::schema
+               : ids.size() >= 2   ? Name_kind::table
+                                   : Name_kind::qualifier;
+    qualify();
     return ref;
   }
   if (sym == s.function_call_generic) {
-    std::vector<uint32_t> ids;
-    const size_t at = parts(a, &ids);
     // ident '(' ...: the parts before the '(' are the function's name.
     size_t before_paren = 0;
-    for (const uint32_t c : kids) {
-      if (m_tree.node(c).symbol == s.lparen) break;
+    for (const uint32_t c : m_tree.children(a)) {
+      if (is_left_paren(m_tree.node(c).symbol)) break;
       if (std::find(ids.begin(), ids.end(), c) != ids.end()) ++before_paren;
     }
     if (at + 1 == before_paren) {
       ref.kind = Name_kind::function;
-      qualify(ids, at);
+      qualify();
     } else if (at + 1 < before_paren) {
       ref.kind = Name_kind::schema;
     }
     return ref;
   }
   if (sym == s.sp_name || sym == s.call) {
-    std::vector<uint32_t> ids;
-    const size_t at = parts(a, &ids);
-    if (ids.size() >= 2 && at == 0) {
+    if (schema_part) {
       ref.kind = Name_kind::schema;
       return ref;
     }
-    qualify(ids, at);
+    qualify();
     if (sym == s.call) {
       ref.kind = Name_kind::routine;
       return ref;
     }
-    const uint32_t p = m_tree.node(a).parent;
-    const int ps = p == npos ? -1 : m_tree.node(p).symbol;
-    if (ps == s.trigger_tail || ps == s.event_tail || ancestor(a, s.trigger_tail) != npos ||
-        ancestor(a, s.event_tail) != npos) {
-      ref.kind = Name_kind::other;
-      ref.defining = ancestor(a, s.create) != npos;
-    } else {
-      ref.kind = Name_kind::routine;
-      ref.defining = ancestor(a, s.create) != npos;
-    }
+    // A trigger's or event's name is not a routine's.
+    const bool other = ancestor(a, s.trigger_tail) != npos || ancestor(a, s.event_tail) != npos;
+    ref.kind = other ? Name_kind::other : Name_kind::routine;
+    ref.defining = ancestor(a, s.create) != npos;
     return ref;
   }
   if (sym == s.use) {
@@ -551,14 +498,12 @@ Name_ref Statement_names::classify(uint32_t token) const {
   if (sym == s.create || sym == s.drop || sym == s.alter) {
     if (m_tree.child(a, s.DATABASE) != npos) {
       ref.kind = Name_kind::schema;
-      ref.defining = sym == s.create;
     } else if (sym == s.create && m_tree.child(a, s.INDEX_SYM) != npos) {
       ref.kind = Name_kind::index;
-      ref.defining = true;
     } else {
       ref.kind = Name_kind::other;
-      ref.defining = sym == s.create;
     }
+    ref.defining = sym == s.create;
     return ref;
   }
   if (sym == s.sp_param_name || sym == s.sp_decl_ident) {
@@ -573,118 +518,81 @@ Name_ref Statement_names::classify(uint32_t token) const {
   }
   if (sym == s.option_value_no_option_type) {
     // SET v = ..., SET NEW.a = ...
-    std::vector<uint32_t> ids;
-    const size_t at = parts(a, &ids);
     if (ids.size() == 1) {
       ref.kind = Name_kind::variable;
     } else if (ids.size() == 2 && at == 1 && ancestor(a, s.trigger_tail) != npos) {
       ref.kind = Name_kind::column;
-      qualify(ids, at);
-      if (const uint32_t tt = ancestor(a, s.trigger_tail); tt != npos) {
-        if (const uint32_t ti = m_tree.child(tt, s.table_ident); ti != npos) {
-          const Table_ref t = table_ident_ref(ti);
-          ref.has_owner = true;
-          ref.owner_schema = t.schema;
-          ref.owner = t.name;
-        }
-      }
+      qualify();
+      set_owner(trigger_table(), &ref);
     } else if (ids.size() == 2 && at == 0) {
       ref.kind = Name_kind::other;
     }
     return ref;
   }
-  if (name_like) {
-    // A name in a place the rules above do not know (an index hint, a
-    // label, a REST path): something, but nothing we resolve.
-    ref.kind = Name_kind::other;
-  }
+  // A name in a place the rules above do not know (an index hint, a label,
+  // a REST path): something, but nothing we resolve.
+  if (name_like) ref.kind = Name_kind::other;
   return ref;
 }
 
 Name_ref Statement_names::classify_by_tokens(uint32_t token) const {
   const auto &s = syms();
-  const auto &tokens = m_tree.tokens();
+  const Token_view tv{m_tree.tokens(), m_sql, m_base};
   Name_ref ref;
-  const auto &tk = tokens[token];
-  ref.range = {tk.begin, tk.end};
-  ref.name = unquote_name(m_sql.substr(tk.begin - m_base, tk.end - tk.begin));
-  auto tok_text = [&](uint32_t i) {
-    return m_sql.substr(tokens[i].begin - m_base, tokens[i].end - tokens[i].begin);
-  };
-  auto is_name = [&](uint32_t i) {
-    const int sy = tokens[i].symbol;
-    return sy == s.IDENT || sy == s.IDENT_QUOTED || is_nonreserved_keyword(sy);
-  };
-  // Token i is one of `words`, a keyword (reserved or not), not a name.
-  auto word_is = [&](uint32_t i, std::initializer_list<const char *> words) {
-    if (tokens[i].symbol == s.IDENT || tokens[i].symbol == s.IDENT_QUOTED) return false;
-    const auto t = tok_text(i);
-    for (const char *w : words) {
-      if (iequals(t, w)) return true;
-    }
-    return false;
-  };
+  ref.range = {m_tree.tokens()[token].begin, m_tree.tokens()[token].end};
+  ref.name = unquote_name(tv.text(token));
 
   // The dotted name this token ends: qualifiers before it.
   uint32_t first = token;
-  while (first >= 2 && tokens[first - 1].symbol == s.dot && is_name(first - 2)) first -= 2;
+  while (first >= 2 && tv.symbol(first - 1) == s.dot && tv.name(first - 2)) first -= 2;
   for (uint32_t i = first; i < token; i += 2) {
-    ref.qualifiers.push_back(unquote_name(tok_text(i)));
-    ref.qualifier_ranges.push_back({tokens[i].begin, tokens[i].end});
+    ref.qualifiers.push_back(unquote_name(tv.text(i)));
+    ref.qualifier_ranges.push_back({m_tree.tokens()[i].begin, m_tree.tokens()[i].end});
   }
   // A dotted name continues after the token: then it is a qualifier.
-  const bool continues = token + 2 < tokens.size() && tokens[token + 1].symbol == s.dot &&
-                         is_name(token + 2);
+  const bool continues = token + 2 < tv.size() && tv.symbol(token + 1) == s.dot && tv.name(token + 2);
 
   // The context: the keyword before the name, skipping a FROM list.
   enum class Ctx { expression, table, schema, routine, insert_columns, statement } ctx =
       Ctx::expression;
   uint32_t insert_table = npos;
-  static const int semicolon = grammar::symbol("';'");
   if (first > 0) {
-    uint32_t p = first - 1;
-    if (tokens[p].symbol == semicolon ||
-        word_is(p, {"BEGIN", "THEN", "ELSE", "DO", "LOOP", "REPEAT"})) {
+    const uint32_t p = first - 1;
+    if (tv.symbol(p) == s.semicolon || tv.word(p, {"BEGIN", "THEN", "ELSE", "DO", "LOOP", "REPEAT"})) {
       // A statement starts here (inside a compound statement): a keyword,
       // or a label being defined.
       ctx = Ctx::statement;
-    } else if (word_is(p, {"FROM", "JOIN", "STRAIGHT_JOIN", "INTO", "UPDATE", "TABLE", "TABLES",
-                    "REFERENCES", "DESCRIBE", "DESC", "TRUNCATE", "LIKE"})) {
-      // LIKE only after CREATE TABLE x
-      if (!word_is(p, {"LIKE"}) || (p >= 2 && word_is(p - 2, {"TABLE"}))) ctx = Ctx::table;
-    } else if (word_is(p, {"USE", "DATABASE", "SCHEMA"})) {
+    } else if (tv.word(p, k_from_words) || tv.word(p, k_table_words) || tv.into_table(p) ||
+               (tv.word(p, {"LIKE"}) && p >= 2 && tv.word(p - 2, {"TABLE"}))) {
+      ctx = Ctx::table;  // LIKE only after CREATE TABLE x
+    } else if (tv.word(p, {"USE", "DATABASE", "SCHEMA"})) {
       ctx = Ctx::schema;
-    } else if (word_is(p, {"CALL"})) {
+    } else if (tv.word(p, {"CALL"})) {
       ctx = Ctx::routine;
-    } else if (tokens[p].symbol == s.comma || is_left_paren(tokens[p].symbol)) {
+    } else if (tv.symbol(p) == s.comma || is_left_paren(tv.symbol(p))) {
       // In a list: FROM a, b | INSERT INTO t (a, b
       int depth = 0;
       for (uint32_t i = p + 1; i-- > 0;) {
-        const int sy = tokens[i].symbol;
+        const int sy = tv.symbol(i);
         if (sy == s.rparen) {
           ++depth;
         } else if (is_left_paren(sy)) {
-          if (depth == 0) {
-            // INTO name [(]
-            if (i >= 2 && is_name(i - 1) && word_is(i - 2, {"INTO"})) {
-              ctx = Ctx::insert_columns;
-              insert_table = i - 1;
-              break;
-            }
-            if (i >= 4 && is_name(i - 1) && tokens[i - 2].symbol == s.dot && is_name(i - 3) &&
-                word_is(i - 4, {"INTO"})) {
-              ctx = Ctx::insert_columns;
-              insert_table = i - 1;
-              break;
-            }
-            break;  // a function's arguments, a subquery: an expression
+          if (depth > 0) {
+            --depth;
+            continue;
           }
-          --depth;
-        } else if (depth == 0 && word_is(i, {"FROM"})) {
+          // INTO [schema.]name (
+          const bool qualified = i >= 4 && tv.symbol(i - 2) == s.dot && tv.name(i - 3);
+          const uint32_t into = qualified ? i - 4 : i - 2;
+          if (i >= 2 && tv.name(i - 1) && tv.word(into, {"INTO"})) {
+            ctx = Ctx::insert_columns;
+            insert_table = i - 1;
+          }
+          break;  // else a function's arguments, a subquery: an expression
+        } else if (depth == 0 && tv.word(i, {"FROM"})) {
           ctx = Ctx::table;
           break;
-        } else if (depth == 0 && word_is(i, {"WHERE", "ON", "SELECT", "SET", "BY", "HAVING",
-                                             "USING", "VALUES", "JOIN"})) {
+        } else if (depth == 0 && (tv.word(i, k_clause_words) || tv.word(i, {"BY", "JOIN"}))) {
           break;
         }
       }
@@ -697,12 +605,9 @@ Name_ref Statement_names::classify_by_tokens(uint32_t token) const {
       ref.defining = true;
       break;
     case Ctx::table:
-      if (continues) {
-        ref.kind = Name_kind::schema;
-      } else {
-        ref.kind = ref.qualifiers.empty() || ref.qualifiers.size() == 1 ? Name_kind::table
-                                                                          : Name_kind::other;
-      }
+      ref.kind = continues                   ? Name_kind::schema
+                 : ref.qualifiers.size() <= 1 ? Name_kind::table
+                                              : Name_kind::other;
       break;
     case Ctx::schema:
       ref.kind = Name_kind::schema;
@@ -713,13 +618,13 @@ Name_ref Statement_names::classify_by_tokens(uint32_t token) const {
     case Ctx::insert_columns:
       ref.kind = Name_kind::column;
       ref.has_owner = true;
-      ref.owner = unquote_name(tok_text(insert_table));
-      if (insert_table >= 2 && tokens[insert_table - 1].symbol == s.dot) {
-        ref.owner_schema = unquote_name(tok_text(insert_table - 2));
+      ref.owner = unquote_name(tv.text(insert_table));
+      if (insert_table >= 2 && tv.symbol(insert_table - 1) == s.dot) {
+        ref.owner_schema = unquote_name(tv.text(insert_table - 2));
       }
       break;
     case Ctx::expression:
-      if (token + 1 < tokens.size() && tokens[token + 1].symbol == s.lparen &&
+      if (token + 1 < tv.size() && is_left_paren(tv.symbol(token + 1)) &&
           ref.qualifiers.size() <= 1) {
         ref.kind = Name_kind::function;
       } else if (continues) {
@@ -732,31 +637,34 @@ Name_ref Statement_names::classify_by_tokens(uint32_t token) const {
   return ref;
 }
 
-std::vector<Name_ref> Statement_names::names() const {
-  const auto &s = syms();
+std::vector<Name_ref> Statement_names::names(std::string_view spelled) const {
   std::vector<Name_ref> out;
-  const auto &tokens = m_tree.tokens();
-  for (uint32_t i = 0; i < tokens.size(); ++i) {
-    const int sy = tokens[i].symbol;
-    if (sy != s.IDENT && sy != s.IDENT_QUOTED && !is_nonreserved_keyword(sy)) continue;
+  const Token_view tv{m_tree.tokens(), m_sql, m_base};
+  for (uint32_t i = 0; i < tv.size(); ++i) {
+    if (!tv.name(i)) continue;
+    if (!spelled.empty() && !iequals(unquote_name(tv.text(i)), spelled)) continue;
     Name_ref r = classify(i);
     if (r.kind != Name_kind::none) out.push_back(std::move(r));
   }
   return out;
 }
 
+std::string Statement_names::alias_of(uint32_t item) const {
+  const auto &s = syms();
+  const uint32_t al = m_tree.child(item, s.select_alias);
+  if (al == npos || m_tree.node(al).token_count == 0) return {};
+  const uint32_t id = m_tree.find(al, s.ident);
+  return id != npos ? name_of(id) : unquote_name(text(al));  // AS 'string' too
+}
+
 void Statement_names::derived_columns(uint32_t node, std::vector<std::string> *out) const {
   const auto &s = syms();
   const uint32_t q = m_tree.find(node, s.query_specification);
-  if (q == npos) return;
-  const uint32_t list = m_tree.find(q, s.select_item_list);
+  const uint32_t list = q == npos ? npos : m_tree.find(q, s.select_item_list);
   if (list == npos) return;
   for (const uint32_t item : m_tree.find_all(list, s.select_item)) {
-    if (const uint32_t al = m_tree.child(item, s.select_alias);
-        al != npos && m_tree.node(al).token_count > 0) {
-      const uint32_t id = m_tree.find(al, s.ident);
-      // AS 'string' is an alias too
-      out->push_back(id != npos ? name_of(id) : unquote_name(text(al)));
+    if (auto alias = alias_of(item); !alias.empty()) {
+      out->push_back(std::move(alias));
       continue;
     }
     const uint32_t e = m_tree.child(item, s.expr);
@@ -777,34 +685,24 @@ void Statement_names::collect_tables(uint32_t scope, std::vector<Table_ref> *out
     stack.pop_back();
     const int sym = m_tree.node(n).symbol;
     if (n != scope && is_scope(sym)) continue;
-    if (sym == s.table_primary_ident || sym == s.table_name_with_opt_use_partition ||
-        sym == s.delete_single_table) {
-      const uint32_t ti = m_tree.child(n, s.table_ident);
-      if (ti == npos) continue;
-      Table_ref r = table_ident_ref(ti);
-      if (const uint32_t al = m_tree.find(n, s.ident_table_alias); al != npos) {
-        r.alias = name_of(al);
-        r.alias_range = {m_tree.begin(al), m_tree.end(al)};
-      }
-      if (r.schema.empty()) {
-        for (const auto &c : m_ctes) {
-          if (iequals(c.name, r.name)) {
-            r.derived = true;
-            r.columns = c.columns;
-          }
-        }
-      }
-      if (!r.name.empty()) out->push_back(std::move(r));
-      continue;
-    }
-    if (sym == s.table_primary_derived) {
+    const bool named = sym == s.table_primary_ident || sym == s.table_name_with_opt_use_partition ||
+                       sym == s.delete_single_table;
+    if (named || sym == s.table_primary_derived) {
       Table_ref r;
-      r.derived = true;
+      if (named) {
+        const uint32_t ti = m_tree.child(n, s.table_ident);
+        if (ti == npos) continue;
+        r = table_ident_ref(ti);
+        if (r.name.empty()) continue;
+        apply_cte(&r);
+      } else {
+        r.derived = true;
+        derived_columns(n, &r.columns);
+      }
       if (const uint32_t al = m_tree.find(n, s.ident_table_alias); al != npos) {
         r.alias = name_of(al);
         r.alias_range = {m_tree.begin(al), m_tree.end(al)};
       }
-      derived_columns(n, &r.columns);
       out->push_back(std::move(r));
       continue;
     }
@@ -817,16 +715,15 @@ std::vector<Table_ref> Statement_names::tables_at(uint32_t offset) const {
   const auto &s = syms();
   std::vector<Table_ref> out;
   const uint32_t tok = token_at(offset);
-  uint32_t leaf = tok == npos ? npos : leaf_of(m_tree, tok);
-  if (leaf == npos && !m_tree.empty()) {
-    // An offset between tokens: the nearest token before it.
-    for (uint32_t i = 0; i < m_tree.tokens().size(); ++i) {
-      if (m_tree.tokens()[i].begin > offset) break;
-      if (const uint32_t l = leaf_of(m_tree, i); l != npos) leaf = l;
+  uint32_t node = tok == npos ? npos : leaf(tok);
+  if (node == npos) {
+    // An offset between tokens: the nearest shifted token before it.
+    for (uint32_t i = 0; i < m_tree.tokens().size() && m_tree.tokens()[i].begin <= offset; ++i) {
+      if (leaf(i) != npos) node = leaf(i);
     }
   }
   bool found_scope = false;
-  for (uint32_t n = leaf; n != npos; n = m_tree.node(n).parent) {
+  for (uint32_t n = node; n != npos; n = m_tree.node(n).parent) {
     const int sym = m_tree.node(n).symbol;
     if (is_scope(sym)) {
       collect_tables(n, &out);
@@ -847,20 +744,15 @@ std::vector<std::string> Statement_names::select_aliases_at(uint32_t offset) con
   const auto &s = syms();
   std::vector<std::string> out;
   const uint32_t tok = token_at(offset);
-  const uint32_t leaf = tok == npos ? npos : leaf_of(m_tree, tok);
-  for (uint32_t n = leaf; n != npos; n = m_tree.node(n).parent) {
+  for (uint32_t n = tok == npos ? npos : leaf(tok); n != npos; n = m_tree.node(n).parent) {
     const int sym = m_tree.node(n).symbol;
-    uint32_t q = npos;
-    if (sym == s.query_specification) q = n;
-    if (sym == s.query_expression_body_ext) q = m_tree.find(n, s.query_specification);
+    const uint32_t q = sym == s.query_specification        ? n
+                       : sym == s.query_expression_body_ext ? m_tree.find(n, s.query_specification)
+                                                            : npos;
     if (q == npos) continue;
-    const uint32_t list = m_tree.find(q, s.select_item_list);
-    if (list == npos) break;
-    for (const uint32_t item : m_tree.find_all(list, s.select_item)) {
-      if (const uint32_t al = m_tree.child(item, s.select_alias);
-          al != npos && m_tree.node(al).token_count > 0) {
-        const uint32_t id = m_tree.find(al, s.ident);
-        if (id != npos) out.push_back(name_of(id));
+    if (const uint32_t list = m_tree.find(q, s.select_item_list); list != npos) {
+      for (const uint32_t item : m_tree.find_all(list, s.select_item)) {
+        if (auto alias = alias_of(item); !alias.empty()) out.push_back(std::move(alias));
       }
     }
     break;
@@ -870,94 +762,53 @@ std::vector<std::string> Statement_names::select_aliases_at(uint32_t offset) con
 
 std::vector<Table_ref> Statement_names::scanned_tables() const {
   const auto &s = syms();
+  const Token_view tv{m_tree.tokens(), m_sql, m_base};
   std::vector<Table_ref> out;
-  const auto &tokens = m_tree.tokens();
-  auto tok_text = [&](size_t i) {
-    return m_sql.substr(tokens[i].begin - m_base, tokens[i].end - tokens[i].begin);
-  };
-  auto is_name = [&](size_t i) {
-    if (i >= tokens.size()) return false;
-    const int sy = tokens[i].symbol;
-    return sy == s.IDENT || sy == s.IDENT_QUOTED || is_nonreserved_keyword(sy);
-  };
-  auto is_word = [&](size_t i, std::initializer_list<const char *> words) {
-    if (i >= tokens.size() || tokens[i].symbol == s.IDENT || tokens[i].symbol == s.IDENT_QUOTED)
-      return false;
-    for (const char *w : words) {
-      if (iequals(tok_text(i), w)) return true;
-    }
-    return false;
-  };
   bool in_from = false;
   int depth = 0;
   int from_depth = -1;
-  for (size_t i = 0; i < tokens.size(); ++i) {
-    const int sy = tokens[i].symbol;
+  for (size_t i = 0; i < tv.size(); ++i) {
+    const int sy = tv.symbol(i);
     if (is_left_paren(sy)) ++depth;
     if (sy == s.rparen) {
       --depth;
       if (depth < from_depth) in_from = false;
     }
-    // INTO names a table after INSERT or REPLACE (and their options), not
-    // in SELECT ... INTO a variable.
-    bool into_table = false;
-    if (is_word(i, {"INTO"})) {
-      for (size_t k = i; k-- > 0 && k + 4 > i;) {
-        if (is_word(k, {"INSERT", "REPLACE"})) into_table = true;
-      }
-    }
-    const bool starts = is_word(i, {"FROM", "JOIN", "STRAIGHT_JOIN", "UPDATE"}) || into_table ||
-                        (in_from && depth == from_depth && sy == s.comma);
-    if (is_word(i, {"WHERE", "ON", "USING", "GROUP", "ORDER", "HAVING", "LIMIT", "SET",
-                    "VALUES", "SELECT", "WINDOW", "UNION", "EXCEPT", "INTERSECT"})) {
-      in_from = false;
-    }
-    if (!starts) continue;
-    if (is_word(i, {"FROM", "JOIN", "STRAIGHT_JOIN"}) || sy == s.comma) {
+    const bool from = tv.word(i, k_from_words) || (in_from && depth == from_depth && sy == s.comma);
+    if (tv.word(i, k_clause_words)) in_from = false;
+    if (!from && !tv.word(i, {"UPDATE"}) && !tv.into_table(i)) continue;
+    if (from) {
       in_from = true;
       from_depth = depth;
     }
     size_t j = i + 1;
     Table_ref r;
-    if (j < tokens.size() && is_left_paren(tokens[j].symbol)) {
+    if (j < tv.size() && is_left_paren(tv.symbol(j))) {
       // (SELECT ...) alias
-      int d = 0;
-      for (; j < tokens.size(); ++j) {
-        if (is_left_paren(tokens[j].symbol)) ++d;
-        if (tokens[j].symbol == s.rparen && --d == 0) break;
+      for (int d = 0; j < tv.size(); ++j) {
+        if (is_left_paren(tv.symbol(j))) ++d;
+        if (tv.symbol(j) == s.rparen && --d == 0) break;
       }
       ++j;
       r.derived = true;
-    } else if (is_name(j)) {
-      r.name = unquote_name(tok_text(j));
-      r.name_range = {tokens[j].begin, tokens[j].end};
-      if (j + 2 < tokens.size() && tokens[j + 1].symbol == s.dot && is_name(j + 2)) {
-        r.schema = r.name;
-        r.name = unquote_name(tok_text(j + 2));
-        r.name_range = {tokens[j + 2].begin, tokens[j + 2].end};
+    } else if (tv.name(j)) {
+      if (j + 2 < tv.size() && tv.symbol(j + 1) == s.dot && tv.name(j + 2)) {
+        r.schema = unquote_name(tv.text(j));
         j += 2;
       }
+      r.name = unquote_name(tv.text(j));
+      r.name_range = {m_tree.tokens()[j].begin, m_tree.tokens()[j].end};
+      apply_cte(&r);
       ++j;
     } else {
       continue;
     }
-    if (is_word(j, {"AS"})) ++j;
-    if (is_name(j) && !is_word(j, {"WHERE", "ON", "USING", "JOIN", "LEFT", "RIGHT", "INNER",
-                                   "CROSS", "NATURAL", "SET", "VALUES", "GROUP", "ORDER",
-                                   "LIMIT", "STRAIGHT_JOIN", "HAVING", "WINDOW", "USE",
-                                   "IGNORE", "FORCE", "PARTITION", "FOR", "LOCK"})) {
-      r.alias = unquote_name(tok_text(j));
-      r.alias_range = {tokens[j].begin, tokens[j].end};
+    if (tv.word(j, {"AS"})) ++j;
+    if (tv.name(j) && !tv.word(j, k_clause_words) && !tv.word(j, k_not_alias)) {
+      r.alias = unquote_name(tv.text(j));
+      r.alias_range = {m_tree.tokens()[j].begin, m_tree.tokens()[j].end};
     }
-    if (!r.name.empty() || r.derived) {
-      for (const auto &c : m_ctes) {
-        if (r.schema.empty() && iequals(c.name, r.name)) {
-          r.derived = true;
-          r.columns = c.columns;
-        }
-      }
-      out.push_back(std::move(r));
-    }
+    out.push_back(std::move(r));
   }
   return out;
 }

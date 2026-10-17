@@ -116,8 +116,10 @@ class Statement_names {
   Name_ref name_at(uint32_t offset) const;
   Name_ref classify(uint32_t token) const;
 
-  // Every name token of the statement, in text order.
-  std::vector<Name_ref> names() const;
+  // Every name token of the statement, in text order; with `spelled`, only
+  // those that spell it (any case, unquoted), which are all that is
+  // classified then.
+  std::vector<Name_ref> names(std::string_view spelled = {}) const;
 
   // The tables a name at `offset` can see, innermost query first, then the
   // queries around it.  From the tokens when the tree has none.
@@ -138,12 +140,19 @@ class Statement_names {
 
  private:
   uint32_t ancestor(uint32_t n, int symbol) const;
-  bool is_wrapper(int symbol) const;
-  bool is_scope(int symbol) const;
+  // The leaf of token `token`, npos when the parser never shifted it.
+  uint32_t leaf(uint32_t token) const {
+    return token < m_leaves.size() ? m_leaves[token] : Syntax_tree::npos;
+  }
   void collect_tables(uint32_t scope, std::vector<Table_ref> *out) const;
   void derived_columns(uint32_t query, std::vector<std::string> *out) const;
+  // A select_item's alias (AS x, AS 'x'), "" when it has none.
+  std::string alias_of(uint32_t select_item) const;
   Table_ref table_ident_ref(uint32_t table_ident) const;
-  void set_owner_from(uint32_t node, int table_child_symbol, Name_ref *ref) const;
+  // Owner of `ref`: the table `table_ident` names (nothing for npos).
+  void set_owner(uint32_t table_ident, Name_ref *ref) const;
+  // A table named like a CTE of the statement is that CTE.
+  void apply_cte(Table_ref *ref) const;
   Name_ref classify_by_tokens(uint32_t token) const;
 
   std::string_view m_sql;
@@ -151,9 +160,15 @@ class Statement_names {
   bool m_parsed = false;
   bool m_accepted = false;
   Syntax_tree m_tree;
+  std::vector<uint32_t> m_leaves;  // token -> leaf node
   std::vector<Table_ref> m_ctes;
   std::vector<Variable> m_variables;
 };
+
+// The table `qualifier` (the `a` of `a.b`) names among `tables` (by alias,
+// else by table name) or `ctes`; nullptr if none.
+const Table_ref *table_for_qualifier(const std::vector<Table_ref> &tables,
+                                     const std::vector<Table_ref> &ctes, std::string_view qualifier);
 
 // The unquoted name a token spells: `a``b` -> a`b, "x" -> x, plain names
 // as they are.

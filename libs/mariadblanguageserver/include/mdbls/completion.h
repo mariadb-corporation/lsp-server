@@ -65,7 +65,7 @@ struct Completion_list {
   bool incomplete = false;  // more items matched than were returned
   // What was found at the cursor, for tests and logs: "table", "column", ...
   Name_kind context = Name_kind::none;
-  bool keywords_known = false;  // the parser could say which keywords fit
+  bool quoted = false;  // the word is in backticks: items bring their own
 };
 
 struct Completion_options {

@@ -18,6 +18,7 @@
 #include "mdbls/catalog_view.h"
 
 #include <algorithm>
+#include <cctype>
 #include <set>
 
 #include "text_util.h"
@@ -26,8 +27,13 @@ namespace mdbls {
 
 namespace {
 
+// Case-insensitive order, without lower-casing copies.
 struct Iless {
-  bool operator()(const std::string &a, const std::string &b) const { return lower(a) < lower(b); }
+  bool operator()(const std::string &a, const std::string &b) const {
+    return std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end(), [](char x, char y) {
+      return std::tolower(static_cast<unsigned char>(x)) < std::tolower(static_cast<unsigned char>(y));
+    });
+  }
 };
 
 }  // namespace
@@ -147,16 +153,6 @@ void Catalog_view::for_each_routine(std::string_view schema,
       }
     }
   }
-}
-
-std::vector<std::string> Catalog_view::column_names(const Table_hit &hit) {
-  std::vector<std::string> out;
-  if (hit.table != nullptr) {
-    for (const auto &c : hit.table->columns) out.push_back(c.name);
-  } else if (hit.view != nullptr) {
-    out = hit.view->columns;
-  }
-  return out;
 }
 
 }  // namespace mdbls

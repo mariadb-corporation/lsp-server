@@ -40,10 +40,7 @@ std::string qualified(const std::string &schema, const std::string &name) {
 }
 
 std::string column_line(const Column &c) {
-  std::string s = quote_identifier(c.name) + " " + c.type;
-  if (!c.nullable) s += " NOT NULL";
-  if (c.default_value) s += " DEFAULT " + *c.default_value;
-  if (c.auto_increment) s += " AUTO_INCREMENT";
+  std::string s = quote_identifier(c.name) + " " + c.attributes();
   if (c.generated) s += " AS (" + *c.generated + ")";
   return s;
 }
@@ -58,28 +55,35 @@ const char *layer_text(const Catalog_layer *l) {
   return nullptr;
 }
 
-bool is_name_terminal(int symbol) {
-  static const int ident = grammar::symbol("IDENT");
-  static const int quoted = grammar::symbol("IDENT_QUOTED");
-  return symbol == ident || symbol == quoted || is_nonreserved_keyword(symbol);
+// Copies what a catalog lookup found into `r`.
+void set_hit(Resolution &r, const Catalog_view::Table_hit &hit) {
+  r.table = hit.table;
+  r.view = hit.view;
+  r.schema = hit.schema;
+  r.layer = hit.layer;
 }
 
-// Case-insensitive search of `needle` (not empty) in `hay`.
-bool icontains(std::string_view hay, std::string_view needle) {
-  if (needle.empty() || hay.size() < needle.size()) return false;
-  const unsigned char lo = static_cast<unsigned char>(std::tolower(static_cast<unsigned char>(needle[0])));
-  const unsigned char up = static_cast<unsigned char>(std::toupper(static_cast<unsigned char>(needle[0])));
-  const char *p = hay.data();
-  const char *end = hay.data() + hay.size() - needle.size() + 1;
-  while (p < end) {
-    const void *a = std::memchr(p, lo, static_cast<size_t>(end - p));
-    const void *b = lo == up ? nullptr : std::memchr(p, up, static_cast<size_t>(end - p));
-    const char *hit = static_cast<const char *>(a == nullptr ? b : b == nullptr ? a : std::min(a, b));
-    if (hit == nullptr) return false;
-    if (iequals(std::string_view(hit, needle.size()), needle)) return true;
-    p = hit + 1;
-  }
-  return false;
+// Runs `fn(i, view, cache, out)` for each statement index of `todo` on
+// `pool`, `per_job` statements a job, each job with its own copy of
+// `catalogs` whose current schema is the one in use at the statement; the
+// outputs in `todo` order.
+template <typename T, typename Fn>
+std::vector<T> on_statements(const std::vector<size_t> &todo, size_t per_job,
+                             const std::vector<std::string> &schemas, const Catalog_view &catalogs,
+                             Parser_pool &pool, int priority, Fn &&fn) {
+  const size_t jobs = (todo.size() + per_job - 1) / per_job;
+  std::vector<std::vector<T>> parts(jobs);
+  pool.run_all(priority, jobs, [&](size_t job, Parser_cache &cache) {
+    Catalog_view view = catalogs;
+    const size_t from = job * per_job, to = std::min(todo.size(), from + per_job);
+    for (size_t k = from; k < to; ++k) {
+      view.set_current_schema(schemas[todo[k]]);
+      fn(todo[k], view, cache, parts[job]);
+    }
+  });
+  std::vector<T> out;
+  for (auto &p : parts) out.insert(out.end(), p.begin(), p.end());
+  return out;
 }
 
 }  // namespace
@@ -94,10 +98,7 @@ void Name_resolver::resolve_table(Resolution &r, const std::string &schema,
   const auto hit = m_catalogs.find_table(schema, name);
   r.id.name = name;
   if (hit.table != nullptr || hit.view != nullptr) {
-    r.table = hit.table;
-    r.view = hit.view;
-    r.schema = hit.schema;
-    r.layer = hit.layer;
+    set_hit(r, hit);
     r.id.kind = hit.view != nullptr ? Target_kind::view : Target_kind::table;
     r.id.schema = hit.schema->name.empty() ? m_catalogs.current_schema() : hit.schema->name;
     r.id.name = hit.table != nullptr ? hit.table->name : hit.view->name;
@@ -105,6 +106,25 @@ void Name_resolver::resolve_table(Resolution &r, const std::string &schema,
   }
   r.id.kind = Target_kind::table;
   r.id.schema = schema.empty() ? m_catalogs.current_schema() : schema;
+}
+
+void Name_resolver::as_alias(Resolution &r, const Table_ref &t) const {
+  r.id = {Target_kind::table_alias, "", "", t.alias};
+  r.local_definition = t.alias_range;
+  r.table_ref = t;
+  if (!t.derived) set_hit(r, m_catalogs.find_table(t.schema, t.name));
+}
+
+bool Name_resolver::as_cte(Resolution &r, std::string_view name) const {
+  for (const auto &c : m_names.ctes()) {
+    if (iequals(c.name, name)) {
+      r.id = {Target_kind::cte, "", "", c.name};
+      r.local_definition = c.name_range;
+      r.table_ref = c;
+      return true;
+    }
+  }
+  return false;
 }
 
 void Name_resolver::resolve_column(Resolution &r) const {
@@ -115,10 +135,7 @@ void Name_resolver::resolve_column(Resolution &r) const {
   auto in_table = [&](const std::string &schema, const std::string &table) {
     Resolution t;
     resolve_table(t, schema, table);
-    r.table = t.table;
-    r.view = t.view;
-    r.schema = t.schema;
-    r.layer = t.layer;
+    set_hit(r, {t.table, t.view, t.schema, t.layer});
     r.id.schema = t.id.schema;
     r.id.table = t.id.name;
     if (t.table != nullptr) r.column = t.table->column(ref.name);
@@ -150,15 +167,7 @@ void Name_resolver::resolve_column(Resolution &r) const {
   const auto tables = m_names.tables_at(ref.range.begin);
   if (ref.qualifiers.size() == 1) {
     const std::string &q = ref.qualifiers[0];
-    for (const auto &t : tables) {
-      if (iequals(t.visible_name(), q)) return in_ref(t);
-    }
-    for (const auto &t : tables) {
-      if (iequals(t.name, q)) return in_ref(t);
-    }
-    for (const auto &c : m_names.ctes()) {
-      if (iequals(c.name, q)) return in_ref(c);
-    }
+    if (const Table_ref *t = table_for_qualifier(tables, m_names.ctes(), q)) return in_ref(*t);
     in_table("", q);
     return;
   }
@@ -171,10 +180,12 @@ void Name_resolver::resolve_column(Resolution &r) const {
       continue;
     }
     const auto hit = m_catalogs.find_table(t.schema, t.name);
-    const auto cols = Catalog_view::column_names(hit);
-    if (std::any_of(cols.begin(), cols.end(), [&](const std::string &c) { return iequals(c, ref.name); })) {
-      return in_ref(t);
-    }
+    const bool has = hit.table != nullptr
+                         ? hit.table->column(ref.name) != nullptr
+                         : hit.view != nullptr &&
+                               std::any_of(hit.view->columns.begin(), hit.view->columns.end(),
+                                           [&](const std::string &c) { return iequals(c, ref.name); });
+    if (has) return in_ref(t);
   }
   // A routine variable, or a select alias in ORDER BY / GROUP BY / HAVING.
   for (const auto &v : m_names.variables()) {
@@ -215,44 +226,18 @@ Resolution Name_resolver::resolve(const Name_ref &ref) const {
       break;
     }
     case Name_kind::table: {
-      if (ref.qualifiers.empty()) {
-        for (const auto &c : m_names.ctes()) {
-          if (iequals(c.name, ref.name)) {
-            r.id = {Target_kind::cte, "", "", c.name};
-            r.local_definition = c.name_range;
-            r.table_ref = c;
-            return r;
-          }
-        }
-      }
+      if (ref.qualifiers.empty() && as_cte(r, ref.name)) return r;
       resolve_table(r, ref.qualifiers.empty() ? std::string() : ref.qualifiers.back(), ref.name);
       break;
     }
     case Name_kind::qualifier: {
       for (const auto &t : m_names.tables_at(ref.range.begin)) {
         if (!t.alias.empty() && iequals(t.alias, ref.name)) {
-          r.id = {Target_kind::table_alias, "", "", t.alias};
-          r.local_definition = t.alias_range;
-          r.table_ref = t;
-          if (!t.derived) {
-            Resolution under;
-            resolve_table(under, t.schema, t.name);
-            r.table = under.table;
-            r.view = under.view;
-            r.schema = under.schema;
-            r.layer = under.layer;
-          }
+          as_alias(r, t);
           return r;
         }
       }
-      for (const auto &c : m_names.ctes()) {
-        if (iequals(c.name, ref.name)) {
-          r.id = {Target_kind::cte, "", "", c.name};
-          r.local_definition = c.name_range;
-          r.table_ref = c;
-          return r;
-        }
-      }
+      if (as_cte(r, ref.name)) return r;
       resolve_table(r, "", ref.name);
       break;
     }
@@ -291,17 +276,7 @@ Resolution Name_resolver::resolve(const Name_ref &ref) const {
     case Name_kind::alias: {
       for (const auto &t : m_names.tables_at(ref.range.begin)) {
         if (t.alias_range.begin == ref.range.begin && t.alias_range.end == ref.range.end) {
-          r.id = {Target_kind::table_alias, "", "", ref.name};
-          r.local_definition = ref.range;
-          r.table_ref = t;
-          if (!t.derived) {
-            Resolution under;
-            resolve_table(under, t.schema, t.name);
-            r.table = under.table;
-            r.view = under.view;
-            r.schema = under.schema;
-            r.layer = under.layer;
-          }
+          as_alias(r, t);
           return r;
         }
       }
@@ -331,10 +306,7 @@ Resolution Name_resolver::resolve_at(uint32_t offset) const {
   if (ref.kind == Name_kind::none) {
     // COUNT(, LEFT(, SUBSTRING(: built-in functions spelled by keywords.
     const auto &tokens = m_names.tree().tokens();
-    static const int lparen = grammar::symbol("'('");
-    if (tok + 1 < tokens.size() &&
-        (tokens[tok + 1].symbol == lparen ||
-         std::strncmp(grammar::name(tokens[tok + 1].symbol), "LEFT_PAREN", 10) == 0)) {
+    if (tok + 1 < tokens.size() && is_left_paren(tokens[tok + 1].symbol)) {
       if (const auto *f = builtin_function(ref.name)) {
         Resolution r;
         r.ref = ref;
@@ -358,19 +330,15 @@ std::string hover_markdown(const Resolution &r) {
     out += "\n```sql\n";
     for (const auto &c : t.columns) out += column_line(c) + "\n";
     for (const auto &ix : t.indexes) {
-      std::string cols;
-      for (const auto &c : ix.columns) cols += (cols.empty() ? "" : ", ") + c;
+      const std::string cols = join(ix.columns);
       out += (ix.kind == "primary" ? std::string("PRIMARY KEY")
                                    : upper(ix.kind == "index" ? "key" : ix.kind + " key") +
                                          (ix.name.empty() ? "" : " " + quote_identifier(ix.name))) +
              " (" + cols + ")\n";
     }
     for (const auto &fk : t.foreign_keys) {
-      std::string cols, ref;
-      for (const auto &c : fk.columns) cols += (cols.empty() ? "" : ", ") + c;
-      for (const auto &c : fk.ref_columns) ref += (ref.empty() ? "" : ", ") + c;
-      out += "FOREIGN KEY (" + cols + ") REFERENCES " + quote_identifier(fk.ref_table) + " (" +
-             ref + ")\n";
+      out += "FOREIGN KEY (" + join(fk.columns) + ") REFERENCES " + quote_identifier(fk.ref_table) +
+             " (" + join(fk.ref_columns) + ")\n";
     }
     out += "```";
   };
@@ -399,11 +367,7 @@ std::string hover_markdown(const Resolution &r) {
     case Target_kind::view:
       if (r.view == nullptr) return {};
       out = "**view** " + qualified(schema_name, r.view->name);
-      if (!r.view->columns.empty()) {
-        std::string cols;
-        for (const auto &c : r.view->columns) cols += (cols.empty() ? "" : ", ") + c;
-        out += " (" + cols + ")";
-      }
+      if (!r.view->columns.empty()) out += " (" + join(r.view->columns) + ")";
       if (!r.view->definition.empty()) out += "\n```sql\n" + r.view->definition + "\n```";
       source();
       return out;
@@ -425,49 +389,30 @@ std::string hover_markdown(const Resolution &r) {
     }
     case Target_kind::routine: {
       if (r.routine == nullptr) return {};
-      std::string params;
-      for (const auto &p : r.routine->parameters) {
-        params += (params.empty() ? "" : ", ") + (p.mode.empty() ? "" : p.mode + " ") +
-                  quote_identifier(p.name) + " " + p.type;
-      }
       out = "**" + r.routine->kind + "** " + qualified(schema_name, r.routine->name);
       out += "\n```sql\n" + upper(r.routine->kind) + " " + quote_identifier(r.routine->name) + "(" +
-             params + ")" + (r.routine->returns.empty() ? "" : " RETURNS " + r.routine->returns) +
+             r.routine->parameter_list() + ")" + (r.routine->returns.empty() ? "" : " RETURNS " + r.routine->returns) +
              "\n```";
       source();
       return out;
     }
     case Target_kind::builtin_function: {
       if (r.builtin == nullptr) return {};
-      out = "**function** `" + std::string(r.builtin->name) + "`";
-      if (!r.builtin->forms.empty()) out += "\n```sql\n" + std::string(r.builtin->forms) + "\n```";
-      if (!r.builtin->summary.empty()) out += "\n\n" + std::string(r.builtin->summary);
-      if (!r.builtin->url.empty()) {
-        out += "\n\n[MariaDB documentation](" + std::string(r.builtin->url) + ")";
-      }
-      return out;
+      return "**function** `" + std::string(r.builtin->name) + "`\n" + builtin_markdown(*r.builtin);
     }
     case Target_kind::table_alias: {
       const auto &t = r.table_ref;
       out = "**alias** `" + r.id.name + "` for " +
             (t.derived ? std::string("a subquery") : "table " + qualified(t.schema, t.name));
       if (r.table != nullptr) table_body(*r.table);
-      if (t.derived && !t.columns.empty()) {
-        std::string cols;
-        for (const auto &c : t.columns) cols += (cols.empty() ? "" : ", ") + c;
-        out += "\n\nColumns: " + cols;
-      }
+      if (t.derived && !t.columns.empty()) out += "\n\nColumns: " + join(t.columns);
       return out;
     }
     case Target_kind::select_alias:
       return "**select alias** `" + r.id.name + "`";
     case Target_kind::cte: {
       out = "**common table expression** `" + r.id.name + "`";
-      if (!r.table_ref.columns.empty()) {
-        std::string cols;
-        for (const auto &c : r.table_ref.columns) cols += (cols.empty() ? "" : ", ") + c;
-        out += "\n\nColumns: " + cols;
-      }
+      if (!r.table_ref.columns.empty()) out += "\n\nColumns: " + join(r.table_ref.columns);
       return out;
     }
     case Target_kind::variable:
@@ -515,7 +460,7 @@ void references_in(std::string_view text, const Statement_index &index, size_t i
       const auto &t = lr.tokens[k];
       if (t.byte_end <= t.byte_start) continue;
       const int sym = mdbp_grammar_token_symbol(t.token_number);
-      if (!is_name_terminal(sym)) continue;
+      if (!is_name_symbol(sym)) continue;
       const auto word = sql.substr(static_cast<size_t>(t.byte_start),
                                    static_cast<size_t>(t.byte_end - t.byte_start));
       if (iequals(unquote_name(word), id.name)) {
@@ -531,8 +476,7 @@ void references_in(std::string_view text, const Statement_index &index, size_t i
   const Statement_names names(tp, sql, st.begin);
   if (!names.parsed()) return;
   const Name_resolver resolver(catalogs, names);
-  for (const auto &ref : names.names()) {
-    if (!iequals(ref.name, id.name)) continue;
+  for (const auto &ref : names.names(id.name)) {
     const auto r = resolver.resolve(ref);
     if (r.id == id) out->push_back({ref.range, ref.defining});
   }
@@ -555,13 +499,10 @@ std::vector<Reference> find_references(std::string_view text, const Statement_in
                                        const Object_id &id, size_t statement,
                                        const Catalog_view &catalogs, Parser_pool &pool,
                                        const Reference_options &options) {
-  std::vector<Reference> out;
-  if (id.kind == Target_kind::none || id.kind == Target_kind::builtin_function) return out;
+  if (id.kind == Target_kind::none || id.kind == Target_kind::builtin_function) return {};
   const auto &st = index.statements();
-  const bool local = id.kind == Target_kind::table_alias || id.kind == Target_kind::select_alias ||
-                     id.kind == Target_kind::cte || id.kind == Target_kind::variable;
   std::vector<size_t> todo;
-  if (local) {
+  if (id.statement_local()) {
     if (statement < st.size()) todo.push_back(statement);
   } else {
     for (size_t i = 0; i < st.size(); ++i) {
@@ -570,23 +511,13 @@ std::vector<Reference> find_references(std::string_view text, const Statement_in
       }
     }
   }
-  if (todo.empty()) return out;
-  const auto schemas = schemas_in_use(text, index, options.initial_schema);
-
-  constexpr size_t k_per_job = 32;
-  const size_t jobs = (todo.size() + k_per_job - 1) / k_per_job;
-  std::vector<std::vector<Reference>> parts(jobs);
-  pool.run_all(options.priority, jobs, [&](size_t job, Parser_cache &cache) {
-    Catalog_view view = catalogs;
-    const size_t from = job * k_per_job, to = std::min(todo.size(), from + k_per_job);
-    for (size_t k = from; k < to; ++k) {
-      const size_t i = todo[k];
-      if (!schemas[i].empty()) view.set_current_schema(schemas[i]);
-      references_in(text, index, i, id, view, cache, options.version_id, true, &parts[job]);
-    }
-  });
-  for (auto &p : parts) out.insert(out.end(), p.begin(), p.end());
-  return out;
+  if (todo.empty()) return {};
+  return on_statements<Reference>(
+      todo, 32, schemas_in_use(text, index, options.initial_schema), catalogs, pool,
+      options.priority,
+      [&](size_t i, const Catalog_view &view, Parser_cache &cache, std::vector<Reference> &out) {
+        references_in(text, index, i, id, view, cache, options.version_id, true, &out);
+      });
 }
 
 std::vector<Name_issue> unknown_names(std::string_view text, const Statement_index &index,
@@ -597,39 +528,34 @@ std::vector<Name_issue> unknown_names(std::string_view text, const Statement_ind
   for (size_t i = 0; i < st.size(); ++i) {
     if (st[i].kind == Statement_kind::sql) todo.push_back(i);
   }
-  const auto schemas = schemas_in_use(text, index, options.initial_schema);
-  constexpr size_t k_per_job = 64;
-  const size_t jobs = (todo.size() + k_per_job - 1) / k_per_job;
-  std::vector<std::vector<Name_issue>> parts(jobs);
-  pool.run_all(options.priority, jobs, [&](size_t job, Parser_cache &cache) {
-    Catalog_view view = catalogs;
-    const size_t from = job * k_per_job, to = std::min(todo.size(), from + k_per_job);
-    for (size_t k = from; k < to; ++k) {
-      const size_t i = todo[k];
-      view.set_current_schema(schemas[i]);
-      mdbp_parser *p = cache.get(index.modes()[st[i].mode].mode, options.version_id, true);
-      if (p == nullptr) continue;
-      const Statement_names names(p, index.text_of(text, st[i]), st[i].begin);
-      if (!names.accepted()) continue;  // a syntax error is reported already
-      const Name_resolver resolver(view, names);
-      for (const auto &ref : names.names()) {
-        if (ref.defining || (ref.kind != Name_kind::table && ref.kind != Name_kind::column)) continue;
-        const auto r = resolver.resolve(ref);
-        if (r.id.kind == Target_kind::table && r.table == nullptr && r.view == nullptr) {
-          // Only where the schema is known: a table of a schema nobody
-          // described may well exist.
-          if (r.id.schema.empty() || !view.has_schema(r.id.schema)) continue;
-          parts[job].push_back({i, ref.range, "unknown table `" + (ref.qualifiers.empty() ? std::string() : ref.qualifiers.back() + "`.`") + ref.name + "`"});
-        } else if (r.id.kind == Target_kind::column && r.column == nullptr && r.table != nullptr &&
-                   !r.table_ref.derived) {
-          parts[job].push_back({i, ref.range, "unknown column `" + ref.name + "` in table `" + r.table->name + "`"});
+  return on_statements<Name_issue>(
+      todo, 64, schemas_in_use(text, index, options.initial_schema), catalogs, pool,
+      options.priority,
+      [&](size_t i, const Catalog_view &view, Parser_cache &cache, std::vector<Name_issue> &out) {
+        mdbp_parser *p = cache.get(index.modes()[st[i].mode].mode, options.version_id, true);
+        if (p == nullptr) return;
+        const Statement_names names(p, index.text_of(text, st[i]), st[i].begin);
+        if (!names.accepted()) return;  // a syntax error is reported already
+        const Name_resolver resolver(view, names);
+        for (const auto &ref : names.names()) {
+          if (ref.defining || (ref.kind != Name_kind::table && ref.kind != Name_kind::column)) {
+            continue;
+          }
+          const auto r = resolver.resolve(ref);
+          if (r.id.kind == Target_kind::table && r.table == nullptr && r.view == nullptr) {
+            // Only where the schema is known: a table of a schema nobody
+            // described may well exist.
+            if (r.id.schema.empty() || !view.has_schema(r.id.schema)) continue;
+            const std::string schema =
+                ref.qualifiers.empty() ? std::string() : ref.qualifiers.back() + "`.`";
+            out.push_back({i, ref.range, "unknown table `" + schema + ref.name + "`"});
+          } else if (r.id.kind == Target_kind::column && r.column == nullptr &&
+                     r.table != nullptr && !r.table_ref.derived) {
+            out.push_back({i, ref.range,
+                           "unknown column `" + ref.name + "` in table `" + r.table->name + "`"});
+          }
         }
-      }
-    }
-  });
-  std::vector<Name_issue> out;
-  for (auto &p : parts) out.insert(out.end(), p.begin(), p.end());
-  return out;
+      });
 }
 
 std::optional<Signature_help> signature_help(std::string_view text, const Statement_index &index,
@@ -653,7 +579,7 @@ std::optional<Signature_help> signature_help(std::string_view text, const Statem
   std::vector<Open> stack;
   for (size_t k = 0; k < r.ntokens; ++k) {
     const char *name = r.tokens[k].name != nullptr ? r.tokens[k].name : "";
-    if (std::strcmp(name, "'('") == 0 || std::strncmp(name, "LEFT_PAREN", 10) == 0) {
+    if (is_left_paren(mdbp_grammar_token_symbol(r.tokens[k].token_number))) {
       stack.push_back({k, 0});
     } else if (std::strcmp(name, "')'") == 0) {
       if (!stack.empty()) stack.pop_back();
@@ -699,8 +625,7 @@ std::optional<Signature_help> signature_help(std::string_view text, const Statem
   if (call || !schema.empty()) return std::nullopt;
   const Builtin_function *f = builtin_function(name);
   if (f == nullptr || f->forms.empty()) return std::nullopt;
-  std::string doc(f->summary);
-  if (!f->url.empty()) doc += "\n\n[MariaDB documentation](" + std::string(f->url) + ")";
+  const std::string doc = builtin_markdown(*f, false);
   size_t from = 0;
   while (from <= f->forms.size()) {
     const size_t nl = f->forms.find('\n', from);
