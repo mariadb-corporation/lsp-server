@@ -19,6 +19,21 @@
 
 #include "stub.h"
 
+/* --- portability --------------------------------------------------------- */
+
+/* POSIX's case-insensitive compares, which MSVC spells with a leading
+ * underscore and declares in <string.h> rather than <strings.h>. */
+#ifdef _WIN32
+#ifndef strcasecmp
+#define strcasecmp _stricmp
+#endif
+#ifndef strncasecmp
+#define strncasecmp _strnicmp
+#endif
+#else
+#include <strings.h>
+#endif
+
 /* --- src/parser_glue.c (bison's own tables, read by the runtime) -------- */
 
 int mdbp_yy_ntokens(void);              /* YYNTOKENS: terminal symbol kinds */

@@ -19,8 +19,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <fstream>
-#include <iterator>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -30,6 +28,7 @@
 #include "mdbls/statement_index.h"
 #include "mdbls/syntax_check.h"
 #include "mdbparse.h"
+#include "test_util.h"
 
 namespace mdbls {
 
@@ -144,9 +143,7 @@ TEST(Syntax_check, unsupported_mode_is_not_checked) {
 // The same answers with one thread and with many, on a file large enough to
 // make many jobs.
 TEST(Syntax_check, threads_agree) {
-  std::ifstream in(std::string(MDBLS_SQL_FIXTURE_DIR) + "/mrs_grammar_test.sql",
-                   std::ios::binary);
-  std::string one{std::istreambuf_iterator<char>(in), {}};
+  const std::string one = test::read_fixture("mrs_grammar_test.sql");
   std::string text;
   for (int i = 0; i < 20; ++i) text += one + "\nSELECT FROM WHERE;\n";
   const auto index = Statement_index::build(text);

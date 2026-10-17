@@ -29,15 +29,25 @@ typedef struct mdbp_lexer mdbp_lexer;
 /* 1 when terminal_name is shiftable in the caller's current context, else 0. */
 typedef int (*mdbp_valid_fn)(const char *terminal_name, void *user);
 
+/* A comma-separated sql_mode list -> the mode bits mdbp_lex_new() takes.
+ * Returns 0 and fills *bits, or -1 for an sql_mode this lexer refuses (the
+ * caller is expected to have already refused it through
+ * mdbp_sql_mode_refused() -- this is the defensive backstop, not a second
+ * place the rule is stated).  A parser converts its list ONCE, so no lex
+ * re-reads it. */
+int mdbp_lex_sql_mode_bits(const char *sql_mode, unsigned long long *bits);
+
 /* sql/len need not be NUL-terminated; the lexer keeps its own copy.
- * sql_mode is a comma-separated sql_mode list; charset is the connection
- * charset name -- NULL means "utf8mb4"; prepare_mode is 0/1.
+ * sql_mode_bits is what mdbp_lex_sql_mode_bits() made of the sql_mode list;
+ * charset is the connection charset name -- NULL means "utf8mb4";
+ * prepare_mode is 0/1.
  * valid may be NULL, which means "always 0" (parsing_place == NO_MATTER).
- * Returns NULL on allocation failure, an sql_mode this lexer refuses, or a
- * charset this lexer refuses (the caller is expected to have already
- * refused both through mdbp_sql_mode_refused()/mdbp_charset_refused() --
- * this is the defensive backstop, not a second place the rule is stated). */
-mdbp_lexer *mdbp_lex_new(const char *sql, size_t len, const char *sql_mode,
+ * Returns NULL on allocation failure or a charset this lexer refuses (the
+ * caller is expected to have already refused it through
+ * mdbp_charset_refused() -- this is the defensive backstop, not a second
+ * place the rule is stated). */
+mdbp_lexer *mdbp_lex_new(const char *sql, size_t len,
+                         unsigned long long sql_mode_bits,
                          const char *charset, int prepare_mode,
                          mdbp_valid_fn valid, void *user);
 /* 1: *out is the next token.  0: the stream ended.  -1: internal error.

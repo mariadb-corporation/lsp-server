@@ -18,14 +18,12 @@
 #ifndef MDBLS_LSP_FEATURES_H_
 #define MDBLS_LSP_FEATURES_H_
 
-#include <rapidjson/stringbuffer.h>
-#include <rapidjson/writer.h>
-
 #include <cstdint>
 #include <span>
 #include <vector>
 
 #include "mdbls/document.h"
+#include "mdbls/lsp/json_position.h"
 #include "mdbls/outline.h"
 #include "mdbls/parser_pool.h"
 
@@ -33,9 +31,7 @@
 // server.
 namespace mdbls::lsp {
 
-using Json_writer = rapidjson::Writer<rapidjson::StringBuffer>;
-
-void write_position(Json_writer &w, Position p);
+// write_range() on the snapshot's text and line map.
 void write_range(Json_writer &w, const Snapshot &s, uint32_t begin, uint32_t end);
 
 // textDocument/documentSymbol: DocumentSymbol[] from the outline, schema >

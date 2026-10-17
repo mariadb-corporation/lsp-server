@@ -71,6 +71,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import common  # noqa: E402
+
 PUNCTUATION = {
     "EQUAL_OPERATOR": "'='", "COMMA_SYMBOL": "','", "DOT_SYMBOL": "'.'",
     "OPEN_PAR_SYMBOL": "'('", "CLOSE_PAR_SYMBOL": "')'",
@@ -181,7 +184,7 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--parser-yy", required=True, type=Path)
     ap.add_argument("--generated", type=Path,
-                    default=Path(__file__).resolve().parent.parent / "generated")
+                    default=common.REPO_ROOT / "generated")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 

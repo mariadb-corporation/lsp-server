@@ -49,7 +49,7 @@ class Output {
 
 class Fd_input : public Input {
  public:
-  explicit Fd_input(int fd) : m_fd(fd) {}
+  explicit Fd_input(int fd);  // binary mode on Windows
   size_t read(char *buf, size_t n) override;
 
  private:
@@ -58,7 +58,7 @@ class Fd_input : public Input {
 
 class Fd_output : public Output {
  public:
-  explicit Fd_output(int fd) : m_fd(fd) {}
+  explicit Fd_output(int fd);  // binary mode on Windows
   void write(std::string_view data) override;
 
  private:

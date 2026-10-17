@@ -41,7 +41,7 @@ struct Snapshot {
   std::shared_ptr<const std::string> text;
   std::shared_ptr<const Statement_index> index;
   std::shared_ptr<const Line_map> lines;
-  unsigned long version_id = 130100;  // for versioned comments and the parser
+  unsigned long version_id = k_default_version_id;  // for versioned comments and the parser
 };
 
 // The result of checking one statement of the snapshot of `generation`;
@@ -65,7 +65,8 @@ class Document {
   // One change of a didChange notification: replaces `range` (LSP positions
   // in the current text) by `text`, or the whole text when there is no
   // range.  Statements outside the edited region keep their verdicts.
-  void change(std::optional<std::pair<Position, Position>> range, std::string_view text);
+  // Returns the byte offset where the change begins (0 for the whole text).
+  uint32_t change(std::optional<std::pair<Position, Position>> range, std::string_view text);
   void set_version(int64_t version) { m_version = version; m_snapshot.reset(); }
 
   // New sql_mode, version id or delimiter: indexes the text again and drops
@@ -76,7 +77,6 @@ class Document {
   std::shared_ptr<const Snapshot> snapshot();
 
   int64_t version() const { return m_version; }
-  uint64_t generation() const { return m_generation; }
   const std::string &text() const { return *m_text; }
   const Statement_index &index() const { return *m_index; }
   const Line_map &lines() const { return *m_lines; }
@@ -92,7 +92,7 @@ class Document {
   void apply_checks(uint64_t generation, std::span<const Check_result> results);
 
   // Statements given out by take_unchecked() whose verdict has not arrived.
-  size_t checks_in_flight() const { return m_in_flight; }
+  size_t checks_in_flight() const;
   size_t sql_statements() const;
   size_t checked_statements() const;
 
@@ -117,7 +117,6 @@ class Document {
 
   std::vector<Statement_check> m_checks;  // one per statement
   std::vector<uint8_t> m_queued;          // given out, verdict not in yet
-  size_t m_in_flight = 0;
   // The splice of every generation after m_history_base, oldest first.
   std::deque<Index_splice> m_history;
   uint64_t m_history_base = 0;

@@ -17,8 +17,6 @@
 
 #include <gtest/gtest.h>
 
-#include <fstream>
-#include <iterator>
 #include <random>
 #include <sstream>
 #include <string>
@@ -27,6 +25,7 @@
 
 #include "mdbls/statement_index.h"
 #include "mysqlshdk/libs/utils/utils_mysql_parsing.h"
+#include "test_util.h"
 
 namespace mdbls {
 
@@ -46,11 +45,6 @@ std::vector<Seen> split(const std::string &text, const Index_options &o = {}) {
     out.push_back({std::string(index.text_of(text, s)), index.delimiters()[s.delimiter], s.kind});
   }
   return out;
-}
-
-std::string read_file(const std::string &name) {
-  std::ifstream in(std::string(MDBLS_SQL_FIXTURE_DIR) + "/" + name, std::ios::binary);
-  return {std::istreambuf_iterator<char>(in), {}};
 }
 
 }  // namespace
@@ -167,7 +161,7 @@ TEST(Statement_index, empty_text) {
 class Statement_index_fixture : public ::testing::TestWithParam<std::string> {};
 
 TEST_P(Statement_index_fixture, matches_the_shell_driver) {
-  const std::string text = read_file(GetParam());
+  const std::string text = test::read_fixture(GetParam());
   ASSERT_FALSE(text.empty()) << GetParam();
   const auto index = Statement_index::build(text);
 
@@ -198,14 +192,10 @@ TEST_P(Statement_index_fixture, matches_the_shell_driver) {
 INSTANTIATE_TEST_SUITE_P(Fixtures, Statement_index_fixture,
                          ::testing::Values("sakila-schema.sql", "world.sql",
                                            "mysqldump_t.sql"),
-                         [](const auto &info) {
-                           std::string n = info.param;
-                           for (auto &c : n) if (!std::isalnum(static_cast<unsigned char>(c))) c = '_';
-                           return n;
-                         });
+                         test::fixture_param_name);
 
 TEST(Statement_index, mysqldump_modes) {
-  const std::string text = read_file("mysqldump_t.sql");
+  const std::string text = test::read_fixture("mysqldump_t.sql");
   Index_options o;
   o.sql_mode = "STRICT_TRANS_TABLES";
   const auto index = Statement_index::build(text, o);
@@ -335,7 +325,7 @@ TEST(Statement_index, update_equals_build_for_random_edits) {
   }
   for (const char *name : {"sakila-schema.sql", "mysqldump_t.sql", "mrs_grammar_test.sql"}) {
     for (unsigned seed = 1; seed <= 20; ++seed) {
-      check_update_matches_build(read_file(name), seed, 30);
+      check_update_matches_build(test::read_fixture(name), seed, 30);
       if (HasFatalFailure()) return;
     }
   }
@@ -370,7 +360,7 @@ TEST(Statement_index, build_parallel_equals_build) {
   }
   for (const char *name : {"sakila-schema.sql", "mysqldump_t.sql", "mrs_grammar_test.sql",
                            "world.sql"}) {
-    const std::string text = read_file(name);
+    const std::string text = test::read_fixture(name);
     const auto want = Statement_index::build(text);
     for (unsigned threads : {2u, 5u, 16u}) {
       for (size_t chunk : {size_t{64}, size_t{1000}, text.size() / 3}) {

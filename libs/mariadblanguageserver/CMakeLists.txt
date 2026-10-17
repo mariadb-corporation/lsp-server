@@ -35,6 +35,8 @@ target_include_directories(mariadblanguageserver PUBLIC "${CMAKE_CURRENT_SOURCE_
                            PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 find_package(Threads REQUIRED)
 find_package(RapidJSON CONFIG REQUIRED)
+# rapidjson is PUBLIC: include/mdbls/lsp/json_position.h writes with it.
 target_link_libraries(mariadblanguageserver PUBLIC sqlsplitter mariadbparser Threads::Threads
-                      PRIVATE rapidjson)
+                      rapidjson)
+target_compile_definitions(mariadblanguageserver PRIVATE MDBLS_VERSION="${PROJECT_VERSION}")
 mdbls_target_warnings(mariadblanguageserver)

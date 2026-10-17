@@ -23,6 +23,8 @@
 #include <string_view>
 #include <vector>
 
+#include "mdbls/sql_mode.h"
+
 namespace mdbls {
 
 enum class Statement_kind : uint8_t {
@@ -79,8 +81,10 @@ struct Statement_mode {
 
 struct Index_options {
   std::string sql_mode;           // the connection's sql_mode at the start
-  unsigned long version_id = 130100;  // release id for versioned comments
+  unsigned long version_id = k_default_version_id;  // release id for versioned comments
   std::string delimiter = ";";    // the delimiter at the start
+
+  bool operator==(const Index_options &) const = default;
 };
 
 // What the splitter left open at the end of the text.
@@ -103,8 +107,8 @@ class Statement_index {
  public:
   static Statement_index build(std::string_view text, const Index_options &options = {});
 
-  // Equal to build(), on up to `threads` threads for a text of at least
-  // 2 * `min_chunk` bytes.  Each chunk after a line break is split
+  // Equal to build(), on up to `threads` threads (0: one per core) for a text
+  // of at least 2 * `min_chunk` bytes.  Each chunk after a line break is split
   // speculatively from the starting state; a sequential pass keeps a chunk's
   // statements from the first one that matches what a sequential split
   // produces there (same extent, delimiter, splitting flags and a clean

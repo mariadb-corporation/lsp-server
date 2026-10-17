@@ -621,7 +621,8 @@ static int mdbp_name_eq(const char *begin, size_t n, const char *name)
 /* Returns 0 and fills *bits, or -1 when the list names ORACLE or MSSQL --
  * modes this lexer cannot honour, which must be refused rather than look
  * honoured. */
-static int mdbp_parse_sql_mode(const char *list, unsigned long long *bits)
+extern "C" int mdbp_lex_sql_mode_bits(const char *list,
+                                      unsigned long long *bits)
 {
   const char *p= list == NULL ? "" : list;
 
@@ -659,7 +660,7 @@ static int mdbp_parse_sql_mode(const char *list, unsigned long long *bits)
  * mdbp_charset_refused() accepts, and it resolves to the SAME table: there is
  * only one, so accepting the alias is not accepting a second behaviour.
  * NULL only if this is ever called with a name the C-side
- * refusal did not see -- defensive, mirrors mdbp_parse_sql_mode()'s -1 for
+ * refusal did not see -- defensive, mirrors mdbp_lex_sql_mode_bits()'s -1 for
  * ORACLE/MSSQL above.  The const_cast is the one src/mdbp_lex.cc's charset
  * section explains: mdbp_cs_utf8mb4 is const, this function's return type
  * matches system_charset_info/national_charset_info's (non-const), which
@@ -675,9 +676,9 @@ static CHARSET_INFO *mdbp_charset_by_name(const char *name)
 }
 
 extern "C" mdbp_lexer *mdbp_lex_new(const char *sql, size_t len,
-                                    const char *sql_mode, const char *charset,
-                                    int prepare_mode, mdbp_valid_fn valid,
-                                    void *user)
+                                    unsigned long long sql_mode_bits,
+                                    const char *charset, int prepare_mode,
+                                    mdbp_valid_fn valid, void *user)
 {
   /* sql_lex.cc:686 -- symbols[].length / sql_functions[].length, which
    * get_hash_symbol compares against.  MariaDB calls it once per server
@@ -701,15 +702,12 @@ extern "C" mdbp_lexer *mdbp_lex_new(const char *sql, size_t len,
    * reason.  Every thread returning from mdbp_once() sees the finished
    * tables, which is the happens-before edge a bare `if (!done)` would not
    * give. */
-  unsigned long long bits= 0;
   mdbp_lexer *lx;
   mdbp_lexer *saved;
   CHARSET_INFO *cs;
   CHARSET_INFO *saved_sys;
   CHARSET_INFO *saved_nat;
 
-  if (mdbp_parse_sql_mode(sql_mode, &bits) != 0)
-    return NULL;
   cs= mdbp_charset_by_name(charset);
   if (cs == NULL)
     return NULL;
@@ -738,7 +736,7 @@ extern "C" mdbp_lexer *mdbp_lex_new(const char *sql, size_t len,
   lx->charset= cs;
   lx->thd.lex= &lx->lex;
   lx->thd.m_parser_state= &lx->ps;
-  lx->thd.variables.sql_mode= bits;
+  lx->thd.variables.sql_mode= sql_mode_bits;
   /* The comment gate's release id (src/lexshim.h's MYSQL_VERSION_ID).
    * Every lexer starts at the one default; mdbp_lex_set_version_id() below
    * is how a caller changes it.  A field of this lexer, so no thread_local

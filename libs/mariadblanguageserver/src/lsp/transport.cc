@@ -18,18 +18,33 @@
 #include "mdbls/lsp/transport.h"
 
 #include <algorithm>
-#include <cctype>
 #include <cerrno>
 #include <charconv>
 #include <cstring>
 
 #ifdef _WIN32
+#include <fcntl.h>
 #include <io.h>
 #else
 #include <unistd.h>
 #endif
 
+#include "text_util.h"
+
 namespace mdbls::lsp {
+
+// Content-Length counts bytes: Windows must not translate line ends.
+Fd_input::Fd_input(int fd) : m_fd(fd) {
+#ifdef _WIN32
+  ::_setmode(fd, _O_BINARY);
+#endif
+}
+
+Fd_output::Fd_output(int fd) : m_fd(fd) {
+#ifdef _WIN32
+  ::_setmode(fd, _O_BINARY);
+#endif
+}
 
 size_t Fd_input::read(char *buf, size_t n) {
   for (;;) {
@@ -96,8 +111,7 @@ bool Message_reader::next(std::string *body) {
     }
     const auto colon = line.find(':');
     if (colon == std::string_view::npos) return false;
-    std::string name(line.substr(0, colon));
-    for (auto &c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    const std::string name = lower(line.substr(0, colon));
     if (name == "content-length") {
       size_t i = colon + 1;
       while (i < line.size() && line[i] == ' ') ++i;

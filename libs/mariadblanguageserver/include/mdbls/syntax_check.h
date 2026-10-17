@@ -50,7 +50,7 @@ struct Statement_check {
 };
 
 struct Check_options {
-  unsigned long version_id = 130100;  // release id for versioned comments
+  unsigned long version_id = k_default_version_id;  // release id for versioned comments
   int priority = 0;                   // priority of the jobs in the pool
   size_t chunk_bytes = 1u << 20;      // statements per job: about this much text
 };
@@ -80,6 +80,22 @@ std::string syntax_error_message(std::string_view text, const Statement_check &c
 // "single-quoted string", "comment", ...: what an unterminated construct at
 // the end of a text is called; nullptr for none.
 const char *open_context_name(Open_context c);
+
+// Says why a statement was not checked, to be fed the checks of an index in
+// order.  An unsupported sql_mode is reported once, at the first statement
+// of each run in that mode.
+class Unchecked_notes {
+ public:
+  explicit Unchecked_notes(const Statement_index &index) : m_index(index) {}
+
+  // "statement not checked: ...", or empty when statement `i` has nothing
+  // to report.
+  std::string operator()(size_t i, Check_status status);
+
+ private:
+  const Statement_index &m_index;
+  std::string m_last_unsupported;
+};
 
 // Parses every SQL statement of `index` on `pool` and returns one entry per
 // statement of the index, comments included (left unchecked).  `text` must

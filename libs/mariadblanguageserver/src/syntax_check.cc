@@ -19,10 +19,7 @@
 
 #include <algorithm>
 #include <cctype>
-
-#include <atomic>
-#include <condition_variable>
-#include <mutex>
+#include <utility>
 
 #include "mdbparse.h"
 
@@ -196,42 +193,47 @@ std::vector<Statement_check> check_statements(std::string_view text,
 
   // Jobs of consecutive statements, about chunk_bytes of text each.  Every
   // job writes only its own elements of `results`, which is never resized.
-  struct Sync {
-    std::mutex mutex;
-    std::condition_variable cv;
-    size_t pending = 0;
-  } sync;
-
-  auto run = [&](size_t from, size_t to) {
-    {
-      std::lock_guard lock(sync.mutex);
-      ++sync.pending;
-    }
-    pool.submit(options.priority, [&, from, to](Parser_cache &cache) {
-      for (size_t i = from; i < to; ++i) {
-        if (stmts[i].kind != Statement_kind::sql) continue;
-        check_one(text, index, stmts[i], cache, options.version_id, &results[i]);
-      }
-      std::lock_guard lock(sync.mutex);
-      if (--sync.pending == 0) sync.cv.notify_all();
-    });
-  };
-
+  std::vector<std::pair<size_t, size_t>> jobs;
   size_t from = 0;
   size_t bytes = 0;
   for (size_t i = 0; i < stmts.size(); ++i) {
     bytes += stmts[i].end - stmts[i].begin;
     if (bytes >= options.chunk_bytes) {
-      run(from, i + 1);
+      jobs.emplace_back(from, i + 1);
       from = i + 1;
       bytes = 0;
     }
   }
-  if (from < stmts.size()) run(from, stmts.size());
+  if (from < stmts.size()) jobs.emplace_back(from, stmts.size());
 
-  std::unique_lock lock(sync.mutex);
-  sync.cv.wait(lock, [&] { return sync.pending == 0; });
+  pool.run_all(options.priority, jobs.size(), [&](size_t job, Parser_cache &cache) {
+    for (size_t i = jobs[job].first; i < jobs[job].second; ++i) {
+      if (stmts[i].kind != Statement_kind::sql) continue;
+      check_one(text, index, stmts[i], cache, options.version_id, &results[i]);
+    }
+  });
   return results;
+}
+
+std::string Unchecked_notes::operator()(size_t i, Check_status status) {
+  const auto &st = m_index.statements()[i];
+  switch (status) {
+    case Check_status::invalid_utf8:
+      return "statement not checked: it is not valid UTF-8";
+    case Check_status::internal_error:
+      return "statement not checked: internal parser error";
+    case Check_status::unsupported_mode: {
+      const auto &mode = m_index.modes()[st.mode].mode;
+      if (mode == m_last_unsupported) return {};
+      m_last_unsupported = mode;
+      return "statements not checked from here: sql_mode " + mode + " is not supported";
+    }
+    case Check_status::syntax_error:
+      return {};
+    default:
+      if (st.kind == Statement_kind::sql) m_last_unsupported.clear();
+      return {};
+  }
 }
 
 }  // namespace mdbls

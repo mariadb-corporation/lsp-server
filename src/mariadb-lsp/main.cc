@@ -35,20 +35,14 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
-#include <map>
 #include <memory>
 #include <optional>
 #include <string>
-#include <thread>
 #include <vector>
-
-#ifdef _WIN32
-#include <fcntl.h>
-#include <io.h>
-#endif
 
 #include "mdbls/charset.h"
 #include "mdbls/line_map.h"
+#include "mdbls/lsp/json_position.h"
 #include "mdbls/lsp/server.h"
 #include "mdbls/lsp/transport.h"
 #include "mdbls/outline.h"
@@ -117,6 +111,7 @@ struct Options {
 };
 
 using Clock = std::chrono::steady_clock;
+using mdbls::lsp::write_position;
 
 double ms_since(Clock::time_point t) {
   return std::chrono::duration<double, std::milli>(Clock::now() - t).count();
@@ -140,7 +135,18 @@ const char *kind_name(mdbls::Statement_kind k) {
   return k == mdbls::Statement_kind::comment ? "comment" : "sql";
 }
 
-const char *open_name(mdbls::Open_context c) { return mdbls::open_context_name(c); }
+// "line:column", 1-based, as text output shows a position.
+std::string lc(mdbls::Position p) {
+  return std::to_string(p.line + 1) + ":" + std::to_string(p.character + 1);
+}
+
+// Writes `out` to stdout once it holds a megabyte, so output streams.
+void flush_if_large(std::string &out) {
+  if (out.size() > (1u << 20)) {
+    std::cout << out;
+    out.clear();
+  }
+}
 
 // One line of tsv: control characters shown as \n, \t, \r.
 std::string escape_tsv(std::string_view s, size_t max) {
@@ -160,17 +166,8 @@ std::string escape_tsv(std::string_view s, size_t max) {
   return out;
 }
 
-void write_position(rapidjson::Writer<rapidjson::StringBuffer> &w, mdbls::Position p) {
-  w.StartObject();
-  w.Key("line");
-  w.Uint(p.line);
-  w.Key("character");
-  w.Uint(p.character);
-  w.EndObject();
-}
-
-int run_split(const Options &o, const std::string &text, const mdbls::Line_map &lines,
-              const mdbls::Statement_index &index) {
+void run_split(const Options &o, const std::string &text, const mdbls::Line_map &lines,
+               const mdbls::Statement_index &index) {
   const auto &stmts = index.statements();
   if (o.json) {
     rapidjson::StringBuffer buf;
@@ -207,7 +204,7 @@ int run_split(const Options &o, const std::string &text, const mdbls::Line_map &
     }
     w.EndArray();
     w.Key("open_at_end");
-    if (const char *open = open_name(index.open_at_end())) {
+    if (const char *open = mdbls::open_context_name(index.open_at_end())) {
       w.String(open);
     } else {
       w.Null();
@@ -218,54 +215,28 @@ int run_split(const Options &o, const std::string &text, const mdbls::Line_map &
     w.EndArray();
     w.EndObject();
     std::cout << buf.GetString() << '\n';
-    return k_exit_ok;
+    return;
   }
 
   std::string out;
   for (const auto &s : stmts) {
-    const auto a = lines.position(text, s.begin);
-    const auto b = lines.position(text, s.end);
     const auto &mode = index.modes()[s.mode];
-    out += std::to_string(a.line + 1) + ":" + std::to_string(a.character + 1) + "-" +
-           std::to_string(b.line + 1) + ":" + std::to_string(b.character + 1) + "\t" +
+    out += lc(lines.position(text, s.begin)) + "-" + lc(lines.position(text, s.end)) + "\t" +
            kind_name(s.kind) + "\t" + escape_tsv(index.delimiters()[s.delimiter], 16) + "\t" +
            (mode.mode.empty() ? std::string("-") : mode.mode) + (mode.known ? "" : "?") + "\t" +
            escape_tsv(index.text_of(text, s), o.text ? std::string::npos : 60) + "\n";
-    if (out.size() > (1u << 20)) {
-      std::cout << out;
-      out.clear();
-    }
+    flush_if_large(out);
   }
   std::cout << out;
-  if (const char *open = open_name(index.open_at_end())) {
+  if (const char *open = mdbls::open_context_name(index.open_at_end())) {
     std::cerr << "mariadb-lsp: the file ends inside an unterminated " << open << "\n";
   }
   for (const auto &e : index.errors()) std::cerr << "mariadb-lsp: " << e << "\n";
-  return k_exit_ok;
 }
 
-struct Parser_deleter {
-  void operator()(mdbp_parser *p) const { mdbp_parser_free(p); }
-};
-
-int run_tokens(const Options &o, const std::string &text, const mdbls::Line_map &lines,
-               const mdbls::Statement_index &index) {
-  // One parser per distinct sql_mode; nullptr when the parser refuses it.
-  std::map<uint16_t, std::unique_ptr<mdbp_parser, Parser_deleter>> parsers;
-  auto parser_for = [&](uint16_t mode) -> mdbp_parser * {
-    auto it = parsers.find(mode);
-    if (it == parsers.end()) {
-      mdbp_options opts;
-      mdbp_options_init(&opts);
-      opts.sql_mode = index.modes()[mode].mode.c_str();
-      opts.want_derivation = 0;
-      std::unique_ptr<mdbp_parser, Parser_deleter> p{mdbp_parser_new(&opts)};
-      if (p) mdbp_parser_set_version_id(p.get(), o.index.version_id);
-      it = parsers.emplace(mode, std::move(p)).first;
-    }
-    return it->second.get();
-  };
-
+void run_tokens(const Options &o, const std::string &text, const mdbls::Line_map &lines,
+                const mdbls::Statement_index &index) {
+  mdbls::Parser_cache cache;
   rapidjson::StringBuffer buf;
   rapidjson::Writer<rapidjson::StringBuffer> w(buf);
   std::string out;
@@ -274,7 +245,8 @@ int run_tokens(const Options &o, const std::string &text, const mdbls::Line_map 
     const auto &s = index.statements()[i];
     if (s.kind != mdbls::Statement_kind::sql) continue;
     const auto stmt = index.text_of(text, s);
-    mdbp_parser *p = parser_for(s.mode);
+    // nullptr when the parser refuses the sql_mode.
+    mdbp_parser *p = cache.get(index.modes()[s.mode].mode, o.index.version_id);
     mdbp_result r;
     const mdbp_status st =
         p ? mdbp_lex_sql(p, stmt.data(), stmt.size(), &r) : MDBP_UNSUPPORTED;
@@ -286,13 +258,21 @@ int run_tokens(const Options &o, const std::string &text, const mdbls::Line_map 
       w.String(st == MDBP_OK ? "ok" : st == MDBP_UNSUPPORTED ? "unsupported" : "internal");
       w.Key("tokens");
       w.StartArray();
-      uint32_t last_offset = s.begin;
-      mdbls::Position last = lines.position(text, s.begin);
-      for (size_t k = 0; st == MDBP_OK && k < r.ntokens; ++k) {
-        const auto &t = r.tokens[k];
-        const auto begin = static_cast<uint32_t>(s.begin + t.byte_start);
-        last = lines.position_after(text, last_offset, last, begin);
-        last_offset = begin;
+    } else if (st != MDBP_OK) {
+      out += lc(lines.position(text, s.begin)) + "\t(not lexed: " +
+             (p ? std::string("the statement is not valid UTF-8")
+                : "sql_mode " + index.modes()[s.mode].mode + " is not supported") +
+             ")\n";
+      continue;
+    }
+    uint32_t last_offset = s.begin;
+    mdbls::Position last = lines.position(text, s.begin);
+    for (size_t k = 0; st == MDBP_OK && k < r.ntokens; ++k) {
+      const auto &t = r.tokens[k];
+      const auto begin = static_cast<uint32_t>(s.begin + t.byte_start);
+      last = lines.position_after(text, last_offset, last, begin);
+      last_offset = begin;
+      if (o.json) {
         w.StartObject();
         w.Key("name");
         w.String(t.name);
@@ -303,39 +283,19 @@ int run_tokens(const Options &o, const std::string &text, const mdbls::Line_map 
         w.Key("start");
         write_position(w, last);
         w.EndObject();
+        continue;
       }
-      w.EndArray();
-      w.EndObject();
-      continue;
-    }
-    if (st != MDBP_OK) {
-      const auto a = lines.position(text, s.begin);
-      out += std::to_string(a.line + 1) + ":" + std::to_string(a.character + 1) +
-             "\t(not lexed: " +
-             (p ? std::string("the statement is not valid UTF-8")
-                : "sql_mode " + index.modes()[s.mode].mode + " is not supported") +
-             ")\n";
-      continue;
-    }
-    uint32_t last_offset = s.begin;
-    mdbls::Position last = lines.position(text, s.begin);
-    for (size_t k = 0; k < r.ntokens; ++k) {
-      const auto &t = r.tokens[k];
-      const auto off = static_cast<uint32_t>(s.begin + t.byte_start);
-      const auto pos = lines.position_after(text, last_offset, last, off);
-      last_offset = off;
-      last = pos;
       std::string_view tt;
       if (t.text != nullptr && t.byte_end > t.byte_start) {
         tt = std::string_view(t.text, static_cast<size_t>(t.byte_end - t.byte_start));
       }
-      out += std::to_string(pos.line + 1) + ":" + std::to_string(pos.character + 1) + "\t" +
-             t.name + "\t" + escape_tsv(tt, 80) + "\n";
+      out += lc(last) + "\t" + t.name + "\t" + escape_tsv(tt, 80) + "\n";
     }
-    if (out.size() > (1u << 20)) {
-      std::cout << out;
-      out.clear();
+    if (o.json) {
+      w.EndArray();
+      w.EndObject();
     }
+    flush_if_large(out);
   }
   if (o.json) {
     w.EndArray();
@@ -343,10 +303,7 @@ int run_tokens(const Options &o, const std::string &text, const mdbls::Line_map 
   } else {
     std::cout << out;
   }
-  return k_exit_ok;
 }
-
-using mdbls::readable_expected;
 
 struct Check_summary {
   size_t sql_statements = 0;
@@ -368,32 +325,13 @@ Check_summary run_check(const Options &o, const std::string &file, const std::st
     std::string message;
   };
   std::vector<Note> notes;
-  std::string last_unsupported;
+  mdbls::Unchecked_notes unchecked(index);
   for (size_t i = 0; i < results.size(); ++i) {
     const auto &st = index.statements()[i];
     if (st.kind == mdbls::Statement_kind::sql) ++sum.sql_statements;
-    switch (results[i].status) {
-      case mdbls::Check_status::syntax_error:
-        ++sum.errors;
-        break;
-      case mdbls::Check_status::invalid_utf8:
-        notes.push_back({st.begin, "statement not checked: it is not valid UTF-8"});
-        break;
-      case mdbls::Check_status::unsupported_mode: {
-        const auto &mode = index.modes()[st.mode].mode;
-        if (mode != last_unsupported) {
-          notes.push_back({st.begin, "statements not checked from here: sql_mode " + mode +
-                                         " is not supported"});
-          last_unsupported = mode;
-        }
-        break;
-      }
-      case mdbls::Check_status::internal_error:
-        notes.push_back({st.begin, "statement not checked: internal parser error"});
-        break;
-      default:
-        if (st.kind == mdbls::Statement_kind::sql) last_unsupported.clear();
-        break;
+    if (results[i].status == mdbls::Check_status::syntax_error) ++sum.errors;
+    if (auto note = unchecked(i, results[i].status); !note.empty()) {
+      notes.push_back({st.begin, std::move(note)});
     }
   }
   if (index.open_at_end() != mdbls::Open_context::none) ++sum.errors;
@@ -426,11 +364,11 @@ Check_summary run_check(const Options &o, const std::string &file, const std::st
       w->String(mdbls::syntax_error_near(text, c).c_str());
       w->Key("expected");
       w->StartArray();
-      for (const auto &e : readable_expected(c.expected)) w->String(e.c_str());
+      for (const auto &e : mdbls::readable_expected(c.expected)) w->String(e.c_str());
       w->EndArray();
       w->EndObject();
     }
-    if (const char *open = open_name(index.open_at_end())) {
+    if (const char *open = mdbls::open_context_name(index.open_at_end())) {
       w->StartObject();
       w->Key("start");
       write_position(*w, pos(static_cast<uint32_t>(text.size())));
@@ -463,10 +401,7 @@ Check_summary run_check(const Options &o, const std::string &file, const std::st
     return sum;
   }
 
-  auto where = [&](uint32_t off) {
-    const auto p = pos(off);
-    return file + ":" + std::to_string(p.line + 1) + ":" + std::to_string(p.character + 1);
-  };
+  auto where = [&](uint32_t off) { return file + ":" + lc(pos(off)); };
   size_t listed = 0;
   for (size_t i = 0; i < results.size(); ++i) {
     const auto &c = results[i];
@@ -478,7 +413,7 @@ Check_summary run_check(const Options &o, const std::string &file, const std::st
     *out += where(c.error_offset) + ": error: " + mdbls::syntax_error_message(text, c);
     *out += "\n";
   }
-  if (const char *open = open_name(index.open_at_end())) {
+  if (const char *open = mdbls::open_context_name(index.open_at_end())) {
     *out += where(static_cast<uint32_t>(text.size())) +
             ": error: the file ends inside an unterminated " + open + "\n";
   }
@@ -497,7 +432,7 @@ bool to_utf8(const Options &o, const std::string &file, std::string *text,
     const uint32_t line = lines.line_of(static_cast<uint32_t>(off));
     const uint32_t start = lines.line_start(line);
     const uint32_t col = mdbls::utf16_length(std::string_view(t).substr(start, off - start));
-    return file + ":" + std::to_string(line + 1) + ":" + std::to_string(col + 1);
+    return file + ":" + lc({line, col});
   };
   bool latin1 = o.charset == mdbls::File_charset::latin1;
   const auto bad = latin1 ? std::nullopt : mdbls::first_invalid_utf8(*text);
@@ -532,15 +467,13 @@ bool to_utf8(const Options &o, const std::string &file, std::string *text,
 }
 
 // The parse tree of every statement, indented, tokens with their text.
-int run_tree(const Options &o, const std::string &text, const mdbls::Line_map &lines,
-             const mdbls::Statement_index &index) {
+void run_tree(const Options &o, const std::string &text, const mdbls::Line_map &lines,
+              const mdbls::Statement_index &index) {
   mdbls::Parser_cache cache;
   std::string out;
   for (const auto &s : index.statements()) {
     if (s.kind != mdbls::Statement_kind::sql) continue;
-    const auto pos = lines.position(text, s.begin);
-    out += "-- statement at " + std::to_string(pos.line + 1) + ":" +
-           std::to_string(pos.character + 1) + "\n";
+    out += "-- statement at " + lc(lines.position(text, s.begin)) + "\n";
     mdbp_parser *p = cache.get(index.modes()[s.mode].mode, o.index.version_id, true);
     if (p == nullptr) {
       out += "(not parsed: sql_mode " + index.modes()[s.mode].mode + " is not supported)\n";
@@ -563,13 +496,9 @@ int run_tree(const Options &o, const std::string &text, const mdbls::Line_map &l
       const auto ch = tree.children(n);
       for (auto it = ch.rbegin(); it != ch.rend(); ++it) todo.push_back({*it, depth + 1});
     }
-    if (out.size() > (1u << 20)) {
-      std::cout << out;
-      out.clear();
-    }
+    flush_if_large(out);
   }
   std::cout << out;
-  return k_exit_ok;
 }
 
 std::optional<Options> parse_args(int argc, char **argv) {
@@ -583,15 +512,27 @@ std::optional<Options> parse_args(int argc, char **argv) {
       }
       return std::string(argv[++i]);
     };
+    // The value as a decimal number; nullopt, after saying why, when it is not.
+    auto number = [&]() -> std::optional<unsigned long> {
+      const auto v = value();
+      if (!v) return std::nullopt;
+      char *end = nullptr;
+      const unsigned long n = std::strtoul(v->c_str(), &end, 10);
+      if (v->empty() || *end != '\0') {
+        std::cerr << "mariadb-lsp: " << arg << " needs a number\n";
+        return std::nullopt;
+      }
+      return n;
+    };
     if (arg == "--help" || arg == "-h") {
       std::cout << k_usage;
       std::exit(k_exit_ok);
     } else if (arg == "--sql-mode") {
-      auto v = value();
+      const auto v = value();
       if (!v) return std::nullopt;
       o.index.sql_mode = *v;
     } else if (arg == "--charset") {
-      auto v = value();
+      const auto v = value();
       if (!v) return std::nullopt;
       o.charset = mdbls::parse_charset_name(*v);
       if (!o.charset) {
@@ -599,18 +540,21 @@ std::optional<Options> parse_args(int argc, char **argv) {
         return std::nullopt;
       }
     } else if (arg == "--delimiter") {
-      auto v = value();
+      const auto v = value();
       if (!v || v->empty()) return std::nullopt;
       o.index.delimiter = *v;
     } else if (arg == "--version-id") {
-      auto v = value();
-      if (!v) return std::nullopt;
-      char *end = nullptr;
-      o.index.version_id = std::strtoul(v->c_str(), &end, 10);
-      if (v->empty() || *end != '\0') {
-        std::cerr << "mariadb-lsp: --version-id needs a number\n";
-        return std::nullopt;
-      }
+      const auto n = number();
+      if (!n) return std::nullopt;
+      o.index.version_id = *n;
+    } else if (arg == "--threads") {
+      const auto n = number();
+      if (!n) return std::nullopt;
+      o.threads = static_cast<unsigned>(*n);
+    } else if (arg == "--max-errors") {
+      const auto n = number();
+      if (!n) return std::nullopt;
+      o.max_errors = *n;
     } else if (arg == "--format") {
       auto v = value();
       if (!v || (*v != "tsv" && *v != "json")) {
@@ -619,7 +563,7 @@ std::optional<Options> parse_args(int argc, char **argv) {
       }
       o.json = *v == "json";
     } else if (arg == "--log") {
-      auto v = value();
+      const auto v = value();
       if (!v) return std::nullopt;
       o.log = *v;
     } else if (arg == "--stdio") {
@@ -630,20 +574,6 @@ std::optional<Options> parse_args(int argc, char **argv) {
       o.stats = true;
     } else if (o.command.empty() && arg.rfind("-", 0) != 0) {
       o.command = arg;
-    } else if (arg == "--threads" || arg == "--max-errors") {
-      auto v = value();
-      if (!v) return std::nullopt;
-      char *end = nullptr;
-      const unsigned long n = std::strtoul(v->c_str(), &end, 10);
-      if (v->empty() || *end != '\0') {
-        std::cerr << "mariadb-lsp: " << arg << " needs a number\n";
-        return std::nullopt;
-      }
-      if (arg == "--threads") {
-        o.threads = static_cast<unsigned>(n);
-      } else {
-        o.max_errors = n;
-      }
     } else if (arg == "-" || arg.rfind("-", 0) != 0) {
       o.files.push_back(arg);
     } else {
@@ -677,10 +607,6 @@ std::optional<Options> parse_args(int argc, char **argv) {
 }
 
 int run_lsp(const Options &o) {
-#ifdef _WIN32
-  _setmode(_fileno(stdin), _O_BINARY);
-  _setmode(_fileno(stdout), _O_BINARY);
-#endif
   std::ofstream log;
   mdbls::lsp::Server_options so;
   so.threads = o.threads;
@@ -720,7 +646,6 @@ int main(int argc, char **argv) {
     json.StartArray();
   }
 
-  int rc = k_exit_ok;
   size_t total_errors = 0;
   bool unreadable = false;
   for (const auto &file : o->files) {
@@ -746,17 +671,16 @@ int main(int argc, char **argv) {
     const double lines_ms = ms_since(t0);
 
     t0 = Clock::now();
-    const auto index = mdbls::Statement_index::build_parallel(
-        text, o->index, o->threads > 0 ? o->threads : std::max(1u, std::thread::hardware_concurrency()));
+    const auto index = mdbls::Statement_index::build_parallel(text, o->index, o->threads);
     const double index_ms = ms_since(t0);
 
     t0 = Clock::now();
     if (o->command == "split") {
-      rc = run_split(*o, text, lines, index);
+      run_split(*o, text, lines, index);
     } else if (o->command == "tokens") {
-      rc = run_tokens(*o, text, lines, index);
+      run_tokens(*o, text, lines, index);
     } else if (o->command == "tree") {
-      rc = run_tree(*o, text, lines, index);
+      run_tree(*o, text, lines, index);
     } else if (o->command == "outline") {
       mdbls::Outline_options oo;
       oo.version_id = o->index.version_id;
@@ -782,15 +706,14 @@ int main(int argc, char **argv) {
                    pool ? (" (" + std::to_string(pool->max_threads()) + " threads)").c_str() : "");
     }
   }
-  if (o->command == "check") {
-    if (o->json) {
-      json.EndArray();
-      json.Key("errors");
-      json.Uint64(total_errors);
-      json.EndObject();
-      std::cout << json_buf.GetString() << '\n';
-    }
-    rc = total_errors > 0 ? k_exit_errors : k_exit_ok;
+  if (o->command == "check" && o->json) {
+    json.EndArray();
+    json.Key("errors");
+    json.Uint64(total_errors);
+    json.EndObject();
+    std::cout << json_buf.GetString() << '\n';
   }
-  return unreadable ? k_exit_usage : rc;
+  // Only check counts errors.
+  if (unreadable) return k_exit_usage;
+  return total_errors > 0 ? k_exit_errors : k_exit_ok;
 }

@@ -18,15 +18,13 @@
 #include "lsp/features.h"
 
 #include <algorithm>
-#include <cctype>
-#include <condition_variable>
 #include <functional>
-#include <mutex>
 #include <string>
 
 #include "mdbls/semantic_tokens.h"
 #include "mdbls/syntax_tree.h"
 #include "mdbparse.h"
+#include "text_util.h"
 
 namespace mdbls::lsp {
 
@@ -112,14 +110,6 @@ Origin schema_origin(const Schema &schema) {
   return o;
 }
 
-bool starts_with_word(std::string_view text, std::string_view word) {
-  if (text.size() < word.size()) return false;
-  for (size_t i = 0; i < word.size(); ++i) {
-    if (std::toupper(static_cast<unsigned char>(text[i])) != word[i]) return false;
-  }
-  return text.size() == word.size() || !std::isalnum(static_cast<unsigned char>(text[word.size()]));
-}
-
 }  // namespace
 
 void write_position(Json_writer &w, Position p) {
@@ -131,15 +121,20 @@ void write_position(Json_writer &w, Position p) {
   w.EndObject();
 }
 
-void write_range(Json_writer &w, const Snapshot &s, uint32_t begin, uint32_t end) {
-  const Position a = s.lines->position(*s.text, begin);
-  const Position b = end <= begin ? a : s.lines->position_after(*s.text, begin, a, end);
+void write_range(Json_writer &w, std::string_view text, const Line_map &lines, uint32_t begin,
+                 uint32_t end) {
+  const Position a = lines.position(text, begin);
+  const Position b = end <= begin ? a : lines.position_after(text, begin, a, end);
   w.StartObject();
   w.Key("start");
   write_position(w, a);
   w.Key("end");
   write_position(w, b);
   w.EndObject();
+}
+
+void write_range(Json_writer &w, const Snapshot &s, uint32_t begin, uint32_t end) {
+  write_range(w, *s.text, *s.lines, begin, end);
 }
 
 void document_symbols(Json_writer &w, const Snapshot &s, const Outline &outline) {
@@ -331,22 +326,11 @@ std::vector<uint32_t> semantic_tokens(const Snapshot &s, uint32_t begin, uint32_
     bytes += stmts[i].end - stmts[i].begin;
   }
   std::vector<std::vector<Semantic_token>> parts(groups.size());
-  std::mutex mutex;
-  std::condition_variable cv;
-  size_t pending = groups.size();
-  for (size_t g = 0; g < groups.size(); ++g) {
-    pool.submit(priority, [&, g](Parser_cache &cache) {
-      for (size_t i = groups[g].first; i < groups[g].second; ++i) {
-        statement_semantic_tokens(*s.text, index, i, cache, s.version_id, &parts[g]);
-      }
-      std::lock_guard lock(mutex);
-      if (--pending == 0) cv.notify_all();
-    });
-  }
-  {
-    std::unique_lock lock(mutex);
-    cv.wait(lock, [&] { return pending == 0; });
-  }
+  pool.run_all(priority, groups.size(), [&](size_t g, Parser_cache &cache) {
+    for (size_t i = groups[g].first; i < groups[g].second; ++i) {
+      statement_semantic_tokens(*s.text, index, i, cache, s.version_id, &parts[g]);
+    }
+  });
   std::vector<uint32_t> data;
   Position at;
   for (const auto &part : parts) encode_semantic_tokens(*s.text, *s.lines, part, &data, &at);

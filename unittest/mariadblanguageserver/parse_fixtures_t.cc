@@ -20,21 +20,19 @@
 
 #include <gtest/gtest.h>
 
-#include <fstream>
-#include <iterator>
 #include <memory>
 #include <string>
 
 #include "mdbls/statement_index.h"
 #include "mdbparse.h"
+#include "test_util.h"
 
 namespace mdbls {
 
 class Parse_fixture : public ::testing::TestWithParam<std::string> {};
 
 TEST_P(Parse_fixture, every_statement_parses) {
-  std::ifstream in(std::string(MDBLS_SQL_FIXTURE_DIR) + "/" + GetParam(), std::ios::binary);
-  const std::string text{std::istreambuf_iterator<char>(in), {}};
+  const std::string text = test::read_fixture(GetParam());
   ASSERT_FALSE(text.empty());
   const auto index = Statement_index::build(text);
 
@@ -57,11 +55,6 @@ TEST_P(Parse_fixture, every_statement_parses) {
 
 INSTANTIATE_TEST_SUITE_P(Fixtures, Parse_fixture,
                          ::testing::Values("sakila-schema.sql", "mrs_grammar_test.sql"),
-                         [](const auto &info) {
-                           std::string name = info.param;
-                           for (auto &c : name)
-                             if (!std::isalnum(static_cast<unsigned char>(c))) c = '_';
-                           return name;
-                         });
+                         test::fixture_param_name);
 
 }  // namespace mdbls

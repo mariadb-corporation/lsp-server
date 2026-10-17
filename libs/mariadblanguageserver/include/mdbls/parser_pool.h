@@ -26,6 +26,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <tuple>
 #include <utility>
@@ -57,7 +58,17 @@ class Parser_cache {
   struct Deleter {
     void operator()(mdbp_parser *p) const;
   };
-  std::map<std::tuple<std::string, unsigned long, bool>, std::unique_ptr<mdbp_parser, Deleter>>
+  // Compares keys as string_views, so get() looks up without copying sql_mode.
+  struct Key_less {
+    using is_transparent = void;
+    using View = std::tuple<std::string_view, unsigned long, bool>;
+    template <typename A, typename B>
+    bool operator()(const A &a, const B &b) const {
+      return View(a) < View(b);
+    }
+  };
+  std::map<std::tuple<std::string, unsigned long, bool>, std::unique_ptr<mdbp_parser, Deleter>,
+           Key_less>
       m_parsers;
 };
 
@@ -80,6 +91,12 @@ class Parser_pool {
   Parser_pool &operator=(const Parser_pool &) = delete;
 
   void submit(int priority, Job job);
+
+  // Runs fn(0, cache) ... fn(n_jobs - 1, cache) as n_jobs jobs at `priority`
+  // and blocks until those have finished; other jobs may still be running.
+  // It must not be called from a job of this pool.
+  void run_all(int priority, size_t n_jobs,
+               const std::function<void(size_t job, Parser_cache &)> &fn);
 
   // Blocks until no job is queued or running.
   void wait();

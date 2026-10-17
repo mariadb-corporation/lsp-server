@@ -17,14 +17,13 @@
 
 #include <gtest/gtest.h>
 
-#include <fstream>
-#include <iterator>
 #include <string>
 
 #include "mdbls/parser_pool.h"
 #include "mdbls/statement_index.h"
 #include "mdbls/syntax_tree.h"
 #include "mdbparse.h"
+#include "test_util.h"
 
 namespace mdbls {
 
@@ -117,8 +116,7 @@ TEST(Syntax_tree, fixtures_are_well_formed) {
   Parser_cache cache;
   size_t trees = 0;
   for (const char *name : {"sakila-schema.sql", "mrs_grammar_test.sql"}) {
-    std::ifstream in(std::string(MDBLS_SQL_FIXTURE_DIR) + "/" + name, std::ios::binary);
-    const std::string text{std::istreambuf_iterator<char>(in), {}};
+    const std::string text = test::read_fixture(name);
     const auto index = Statement_index::build(text);
     for (const auto &s : index.statements()) {
       if (s.kind != Statement_kind::sql) continue;

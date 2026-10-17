@@ -31,6 +31,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -99,6 +100,22 @@ std::optional<std::string> string_at(const Json &v, std::initializer_list<const 
   const Json *x = path(v, names);
   if (x == nullptr || !x->IsString()) return std::nullopt;
   return std::string(x->GetString(), x->GetStringLength());
+}
+
+// sqlMode, serverVersion and delimiter, as initializationOptions and
+// mariadb/documentContext give them.
+void read_index_options(const Json &v, Index_options &o) {
+  if (const auto mode = string_at(v, {"sqlMode"})) o.sql_mode = normalize_sql_mode(*mode);
+  if (const auto s = string_at(v, {"serverVersion"})) {
+    if (const auto id = parse_server_version(*s)) o.version_id = id;
+  }
+  if (const auto d = string_at(v, {"delimiter"}); d && !d->empty()) o.delimiter = *d;
+}
+
+void write_uints(Json_writer &w, std::span<const uint32_t> data) {
+  w.StartArray();
+  for (uint32_t x : data) w.Uint(x);
+  w.EndArray();
 }
 
 std::optional<Position> position_of(const Json *v) {
@@ -184,10 +201,8 @@ struct Open_document {
   std::optional<std::pair<uint32_t, uint32_t>> viewport;  // lines
   std::optional<uint32_t> focus;                          // offset of the last edit
   std::string progress_token;  // workDoneProgress token, when one is open
-  bool progress_begun = false;     // the client accepted the token
-  bool progress_begin_sent = false;
-  std::string connection;      // mariadb/documentContext, for P5
-  std::string current_schema;
+  // none: no token, or the client has not accepted it yet.
+  enum class Progress : uint8_t { none, accepted, begun } progress = Progress::none;
   std::shared_ptr<Token_cache> tokens = std::make_shared<Token_cache>();
   std::shared_ptr<Outline_cache> outline = std::make_shared<Outline_cache>();
 
@@ -583,18 +598,14 @@ struct Server::Impl {
       w.Key("name");
       w.String("mariadb-lsp");
       w.Key("version");
-      w.String("0.1.0");
+      w.String(MDBLS_VERSION);
       w.EndObject();
       w.EndObject();
     });
   }
 
   void apply_settings(const Json &o) {
-    if (const auto mode = string_at(o, {"sqlMode"})) options.defaults.sql_mode = normalize_sql_mode(*mode);
-    if (const auto d = string_at(o, {"delimiter"}); d && !d->empty()) options.defaults.delimiter = *d;
-    if (const auto v = string_at(o, {"serverVersion"})) {
-      if (const auto id = parse_server_version(*v)) options.defaults.version_id = id;
-    }
+    read_index_options(o, options.defaults);
     auto uint_at = [&](const char *name) -> std::optional<uint64_t> {
       const Json *x = member(o, name);
       return x != nullptr && x->IsUint64() ? std::optional<uint64_t>(x->GetUint64()) : std::nullopt;
@@ -608,8 +619,8 @@ struct Server::Impl {
   void on_response(const std::string &id) {
     // The client accepted a workDoneProgress token: begin reporting.
     for (auto &[uri, d] : documents) {
-      if (!d->progress_token.empty() && !d->progress_begun && id == d->progress_token) {
-        d->progress_begun = true;
+      if (d->progress == Open_document::Progress::none && id == d->progress_token) {
+        d->progress = Open_document::Progress::accepted;
         progress(*d, true);
       }
     }
@@ -619,17 +630,18 @@ struct Server::Impl {
 
   void on_did_open(const Json &params) {
     const auto uri = string_at(params, {"textDocument", "uri"});
-    const auto text = string_at(params, {"textDocument", "text"});
+    auto text = string_at(params, {"textDocument", "text"});
     const Json *version = path(params, {"textDocument", "version"});
     if (!uri || !text) return;
     if (auto it = documents.find(*uri); it != documents.end()) cancel_passes(*it->second);
     log("didOpen " + *uri + ": indexing");
-    auto d = std::make_unique<Open_document>(*uri, *text,
+    const size_t bytes = text->size();
+    auto d = std::make_unique<Open_document>(*uri, std::move(*text),
                                              version != nullptr && version->IsInt64() ? version->GetInt64() : 0,
                                              options.defaults);
     auto &ref = *d;
     documents[*uri] = std::move(d);
-    log("open " + *uri + " (" + std::to_string(text->size()) + " bytes, " +
+    log("open " + *uri + " (" + std::to_string(bytes) + " bytes, " +
         std::to_string(ref.doc.index().statements().size()) + " statements)");
     start_checks(ref);
   }
@@ -639,20 +651,20 @@ struct Server::Impl {
     const Json *changes = member(params, "contentChanges");
     if (d == nullptr || changes == nullptr || !changes->IsArray()) return;
     for (const auto &c : changes->GetArray()) {
-      const auto text = string_at(c, {"text"});
-      if (!text) continue;
+      const Json *t = member(c, "text");
+      if (t == nullptr || !t->IsString()) continue;
+      const std::string_view text(t->GetString(), t->GetStringLength());
       const Json *range = member(c, "range");
       if (range == nullptr) {
         cancel_passes(*d);
-        d->doc.change(std::nullopt, *text);
+        d->doc.change(std::nullopt, text);
         d->focus.reset();
         continue;
       }
       const auto a = position_of(member(*range, "start"));
       const auto b = position_of(member(*range, "end"));
       if (!a || !b) continue;
-      d->doc.change(std::make_pair(*a, *b), *text);
-      d->focus = d->doc.offset(*a);
+      d->focus = d->doc.change(std::make_pair(*a, *b), text);
     }
     if (const Json *v = path(params, {"textDocument", "version"}); v != nullptr && v->IsInt64()) {
       d->doc.set_version(v->GetInt64());
@@ -682,15 +694,8 @@ struct Server::Impl {
     Open_document *d = document(params);
     if (d == nullptr) return;
     Index_options o = d->doc.options();
-    if (const auto mode = string_at(params, {"sqlMode"})) o.sql_mode = normalize_sql_mode(*mode);
-    if (const auto v = string_at(params, {"serverVersion"})) {
-      if (const auto id = parse_server_version(*v)) o.version_id = id;
-    }
-    if (const auto dl = string_at(params, {"delimiter"}); dl && !dl->empty()) o.delimiter = *dl;
-    if (const auto c = string_at(params, {"connection"})) d->connection = *c;
-    if (const auto s = string_at(params, {"currentSchema"})) d->current_schema = *s;
-    if (o.sql_mode != d->doc.options().sql_mode || o.version_id != d->doc.options().version_id ||
-        o.delimiter != d->doc.options().delimiter) {
+    read_index_options(params, o);
+    if (o != d->doc.options()) {
       cancel_passes(*d);
       d->doc.set_options(o);
       start_checks(*d);
@@ -867,35 +872,20 @@ struct Server::Impl {
         w.EndObject();
         ++n;
       };
-      std::string last_unsupported;
+      Unchecked_notes unchecked(index);
       for (size_t i = 0; i < checks.size() && n < options.max_diagnostics; ++i) {
         const auto &c = checks[i];
         const auto &st = index.statements()[i];
-        switch (c.status) {
-          case Check_status::syntax_error:
-            diagnostic(c.error_offset, c.error_offset + c.error_length, 1,
-                       syntax_error_message(text, c), "syntax-error");
-            break;
-          case Check_status::invalid_utf8:
-            diagnostic(st.begin, st.body_end, 2, "statement not checked: it is not valid UTF-8",
-                       "not-checked");
-            break;
-          case Check_status::internal_error:
-            diagnostic(st.begin, st.body_end, 2, "statement not checked: internal parser error",
-                       "not-checked");
-            break;
-          case Check_status::unsupported_mode: {
-            const auto &mode = index.modes()[st.mode].mode;
-            if (mode != last_unsupported) {
-              diagnostic(st.begin, st.begin, 3,
-                         "statements not checked from here: sql_mode " + mode + " is not supported",
-                         "not-checked");
-              last_unsupported = mode;
-            }
-            break;
+        if (c.status == Check_status::syntax_error) {
+          diagnostic(c.error_offset, c.error_offset + c.error_length, 1,
+                     syntax_error_message(text, c), "syntax-error");
+        } else if (const auto note = unchecked(i, c.status); !note.empty()) {
+          // An unsupported sql_mode is information at the start of its run.
+          if (c.status == Check_status::unsupported_mode) {
+            diagnostic(st.begin, st.begin, 3, note, "not-checked");
+          } else {
+            diagnostic(st.begin, st.body_end, 2, note, "not-checked");
           }
-          default:
-            if (st.kind == Statement_kind::sql) last_unsupported.clear();
         }
       }
       if (const char *open = open_context_name(index.open_at_end())) {
@@ -915,8 +905,8 @@ struct Server::Impl {
     d.last_progress = {};
     if (client_progress && d.progress_token.empty()) {
       d.progress_token = "\"mariadb-check-" + std::to_string(next_request++) + "\"";
-      d.progress_begun = false;
-      const std::string token = d.progress_token;
+      d.progress = Open_document::Progress::none;
+      const std::string &token = d.progress_token;
       send([&](Json_writer &w) {
         w.Key("id");
         w.RawValue(token.c_str(), token.size(), rapidjson::kStringType);
@@ -954,19 +944,11 @@ struct Server::Impl {
       w.Bool(done);
       w.EndObject();
     });
-    if (!d.progress_begun || done) return;
+    if (d.progress == Open_document::Progress::none || done) return;
     const unsigned percent = total == 0 ? 100 : static_cast<unsigned>(checked * 100 / total);
-    const std::string token = d.progress_token;
-    const bool first = !d.progress_begin_sent;
-    d.progress_begin_sent = true;
-    notify("$/progress", [&](Json_writer &w) {
-      w.StartObject();
-      w.Key("token");
-      w.RawValue(token.c_str(), token.size(), rapidjson::kStringType);
-      w.Key("value");
-      w.StartObject();
-      w.Key("kind");
-      w.String(first ? "begin" : "report");
+    const bool first = d.progress == Open_document::Progress::accepted;
+    d.progress = Open_document::Progress::begun;
+    notify_progress(d.progress_token, first ? "begin" : "report", [&](Json_writer &w) {
       if (first) {
         w.Key("title");
         w.String("Checking SQL");
@@ -975,30 +957,33 @@ struct Server::Impl {
       w.String((std::to_string(checked) + " of " + std::to_string(total) + " statements").c_str());
       w.Key("percentage");
       w.Uint(percent);
-      w.EndObject();
-      w.EndObject();
     });
   }
 
   void end_progress(Open_document &d) {
-    if (d.doc.text().size() >= options.progress_threshold) progress(d, true);
-    if (!d.progress_token.empty() && d.progress_begun) {
-      const std::string token = d.progress_token;
-      notify("$/progress", [&](Json_writer &w) {
-        w.StartObject();
-        w.Key("token");
-        w.RawValue(token.c_str(), token.size(), rapidjson::kStringType);
-        w.Key("value");
-        w.StartObject();
-        w.Key("kind");
-        w.String("end");
-        w.EndObject();
-        w.EndObject();
-      });
+    progress(d, true);
+    if (d.progress != Open_document::Progress::none) {
+      notify_progress(d.progress_token, "end", [](Json_writer &) {});
     }
     d.progress_token.clear();
-    d.progress_begun = false;
-    d.progress_begin_sent = false;
+    d.progress = Open_document::Progress::none;
+  }
+
+  // $/progress of `token`: a value of `kind` with what `fields` writes.
+  void notify_progress(const std::string &token, const char *kind,
+                       const std::function<void(Json_writer &)> &fields) {
+    notify("$/progress", [&](Json_writer &w) {
+      w.StartObject();
+      w.Key("token");
+      w.RawValue(token.c_str(), token.size(), rapidjson::kStringType);
+      w.Key("value");
+      w.StartObject();
+      w.Key("kind");
+      w.String(kind);
+      fields(w);
+      w.EndObject();
+      w.EndObject();
+    });
   }
 
   // ---- requests
@@ -1088,17 +1073,13 @@ struct Server::Impl {
           w.Key("deleteCount");
           w.Uint64(old.size() - pre - suf);
           w.Key("data");
-          w.StartArray();
-          for (size_t k = pre; k < data.size() - suf; ++k) w.Uint(data[k]);
-          w.EndArray();
+          write_uints(w, std::span(data).subspan(pre, data.size() - suf - pre));
           w.EndObject();
         }
         w.EndArray();
       } else {
         w.Key("data");
-        w.StartArray();
-        for (uint32_t x : data) w.Uint(x);
-        w.EndArray();
+        write_uints(w, data);
       }
       w.EndObject();
       tokens->result_id = result_id;
@@ -1116,9 +1097,7 @@ struct Server::Impl {
           semantic_tokens(*snap, begin, std::max(end, begin + 1), *parse_pool, k_priority_request);
       w.StartObject();
       w.Key("data");
-      w.StartArray();
-      for (uint32_t x : data) w.Uint(x);
-      w.EndArray();
+      write_uints(w, data);
       w.EndObject();
     });
   }

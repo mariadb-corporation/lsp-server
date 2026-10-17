@@ -181,6 +181,7 @@ Statement_index Statement_index::build_parallel(std::string_view text,
                                                const Index_options &options, unsigned threads,
                                                size_t min_chunk) {
   min_chunk = std::max<size_t>(min_chunk, 1);
+  if (threads == 0) threads = std::max(1u, std::thread::hardware_concurrency());
   if (threads <= 1 || text.size() < 2 * min_chunk) return build(text, options);
   if (text.size() >= std::numeric_limits<uint32_t>::max()) {
     throw std::length_error("text of 4 GiB or more");

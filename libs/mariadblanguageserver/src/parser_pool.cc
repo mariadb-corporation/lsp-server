@@ -32,8 +32,7 @@ void Parser_cache::Deleter::operator()(mdbp_parser *p) const { mdbp_parser_free(
 
 mdbp_parser *Parser_cache::get(const std::string &sql_mode, unsigned long version_id,
                                bool derivation) {
-  const auto key = std::make_tuple(sql_mode, version_id, derivation);
-  auto it = m_parsers.find(key);
+  auto it = m_parsers.find(std::make_tuple(std::string_view(sql_mode), version_id, derivation));
   if (it == m_parsers.end()) {
     mdbp_options opts;
     mdbp_options_init(&opts);
@@ -41,7 +40,7 @@ mdbp_parser *Parser_cache::get(const std::string &sql_mode, unsigned long versio
     opts.want_derivation = derivation ? 1 : 0;
     std::unique_ptr<mdbp_parser, Deleter> p{mdbp_parser_new(&opts)};
     if (p && mdbp_parser_set_version_id(p.get(), version_id) != MDBP_OK) p.reset();
-    it = m_parsers.emplace(key, std::move(p)).first;
+    it = m_parsers.emplace(std::make_tuple(sql_mode, version_id, derivation), std::move(p)).first;
   }
   return it->second.get();
 }
@@ -103,6 +102,47 @@ void Parser_pool::submit(int priority, Job job) {
     m_threads.emplace(id, std::move(t));
   }
   m_work.notify_one();
+}
+
+void Parser_pool::run_all(int priority, size_t n_jobs,
+                          const std::function<void(size_t job, Parser_cache &)> &fn) {
+  struct Batch {
+    std::mutex mutex;
+    std::condition_variable cv;
+    size_t pending = 0;
+  } batch;
+  batch.pending = n_jobs;
+  // The jobs reference `batch` and `fn` on this frame: whatever happens, the
+  // submitted ones must finish before this returns.
+  auto wait = [&] {
+    std::unique_lock lock(batch.mutex);
+    batch.cv.wait(lock, [&] { return batch.pending == 0; });
+  };
+  size_t j = 0;
+  try {
+    for (; j < n_jobs; ++j) {
+      submit(priority, [&batch, &fn, j](Parser_cache &cache) {
+        // Counted as done even when fn throws (the worker swallows that).
+        struct Done {
+          Batch &b;
+          ~Done() {
+            std::lock_guard lock(b.mutex);
+            if (--b.pending == 0) b.cv.notify_all();
+          }
+        } done{batch};
+        fn(j, cache);
+      });
+    }
+  } catch (...) {
+    // Job j was not submitted, nor the ones after it: they will never count.
+    {
+      std::lock_guard lock(batch.mutex);
+      batch.pending -= n_jobs - j;
+    }
+    wait();
+    throw;
+  }
+  wait();
 }
 
 void Parser_pool::wait() {

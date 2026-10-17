@@ -17,11 +17,10 @@
 
 #include <gtest/gtest.h>
 
-#include <fstream>
-#include <iterator>
 #include <string>
 
 #include "mdbls/outline.h"
+#include "test_util.h"
 
 namespace mdbls {
 
@@ -215,12 +214,8 @@ TEST(Catalog, grammar_rules_exist) {
 //   mariadb-lsp outline tests/fixtures/sql/sakila-schema.sql > tests/fixtures/outline/sakila-schema.json
 // (then drop the "file" member) and review the diff.
 TEST(Catalog, sakila_outline_matches_golden_file) {
-  auto read = [](const std::string &path) {
-    std::ifstream in(path, std::ios::binary);
-    return std::string{std::istreambuf_iterator<char>(in), {}};
-  };
-  const std::string text = read(std::string(MDBLS_SQL_FIXTURE_DIR) + "/sakila-schema.sql");
-  std::string golden = read(std::string(MDBLS_SQL_FIXTURE_DIR) + "/../outline/sakila-schema.json");
+  const std::string text = test::read_fixture("sakila-schema.sql");
+  std::string golden = test::read_fixture("../outline/sakila-schema.json");
   while (!golden.empty() && (golden.back() == '\n' || golden.back() == '\r')) golden.pop_back();
   ASSERT_FALSE(golden.empty());
   static Parser_pool pool(2);

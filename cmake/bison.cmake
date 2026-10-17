@@ -21,9 +21,6 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-# This should be REQUIRED, but we have to support source tarball build.
-# https://dev.mysql.com/doc/refman/en/source-installation.html
-
 SET(MIN_BISON_VERSION_REQUIRED "3.0.4")
 
 # Bison seems to be stuck at version 2.3 in macOS.
@@ -99,18 +96,6 @@ IF(WIN32 AND NOT DEFINED BISON_EXECUTABLE)
     NO_DEFAULT_PATH
     PATHS ${NATIVE_BISON_PATHS}
     )
-  # Look for Flex also, we may need it later.
-  IF(BISON_EXECUTABLE)
-    FIND_PROGRAM(FLEX_EXECUTABLE
-      NAMES flex win-flex win_flex
-      NO_DEFAULT_PATH
-      PATHS ${NATIVE_BISON_PATHS}
-      )
-    FIND_PATH(FLEX_INCLUDE_DIR FlexLexer.h
-      NO_DEFAULT_PATH
-      PATHS ${NATIVE_BISON_PATHS}
-      )
-  ENDIF()
 ENDIF()
 
 FIND_PACKAGE(BISON)
@@ -138,11 +123,3 @@ IF(BISON_VERSION VERSION_LESS "${MIN_BISON_VERSION_REQUIRED}")
     "Please update to version ${MIN_BISON_VERSION_REQUIRED} or higher"
     )
 ENDIF()
-
-# TODO(tdidriks): replace with "--warnings=all"
-# Legacy backward compatibility suppressions:
-# * no-yacc: for --yacc
-# * no-precedence: for useless precedence or/and associativity rules
-SET(BISON_FLAGS_WARNINGS
-  "--warnings=all,no-yacc,no-precedence"
-  CACHE INTERNAL "BISON 3.x flags")

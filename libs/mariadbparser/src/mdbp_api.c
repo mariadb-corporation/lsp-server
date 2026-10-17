@@ -26,12 +26,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef _WIN32
-#define strcasecmp _stricmp
-#define strncasecmp _strnicmp
-#else
-#include <strings.h>
-#endif
 
 #include "mdbparse.h"
 #include "mdbp_internal.h"
@@ -52,7 +46,9 @@
 struct mdbp_parser {
     int prepare_mode;
     int want_derivation;
-    char *sql_mode;              /* an owned copy; never NULL */
+    /* The sql_mode list, converted ONCE (mdbp_lex_sql_mode_bits()) and
+     * handed to every lexer this parser opens. */
+    unsigned long long sql_mode_bits;
     char *charset;               /* an owned copy; never NULL */
     /* The release id versioned comments are judged against:
      * MDBP_LEX_DEFAULT_VERSION_ID until mdbp_parser_set_version_id() stores
@@ -245,15 +241,14 @@ mdbp_parser *mdbp_parser_new(const mdbp_options *opts)
     if (p == NULL) {
         return NULL;
     }
-    p->sql_mode = (char *) malloc(strlen(mode) + 1);
-    if (p->sql_mode == NULL) {
+    /* mdbp_sql_mode_refused() above has already refused what the lexer
+     * would, so -1 here is the lexer's defensive backstop only. */
+    if (mdbp_lex_sql_mode_bits(mode, &p->sql_mode_bits) != 0) {
         free(p);
         return NULL;
     }
-    memcpy(p->sql_mode, mode, strlen(mode) + 1);
     p->charset = (char *) malloc(strlen(charset) + 1);
     if (p->charset == NULL) {
-        free(p->sql_mode);
         free(p);
         return NULL;
     }
@@ -300,7 +295,6 @@ void mdbp_parser_free(mdbp_parser *p)
     }
     mdbp_ctx_free(&p->ctx);
     free(p->tokens);
-    free(p->sql_mode);
     free(p->charset);
     free(p);
 }
@@ -389,8 +383,8 @@ static void parse_begin(mdbp_parser *p)
 static const char *lexer_open(mdbp_parser *p, const char *sql, size_t len,
                               mdbp_valid_fn valid)
 {
-    p->lx = mdbp_lex_new(sql, len, p->sql_mode, p->charset, p->prepare_mode,
-                         valid, NULL);
+    p->lx = mdbp_lex_new(sql, len, p->sql_mode_bits, p->charset,
+                         p->prepare_mode, valid, NULL);
     if (p->lx == NULL) {
         return "out of memory lexing";
     }
@@ -419,7 +413,9 @@ typedef enum {
  * token_number == -1: they were never resolved, and saying so is better than
  * leaving whatever the caller happened to pass in.  Under RESOLVE_PAST_UNKNOWN
  * every name is looked up, and only the ones that are not terminals keep -1
- * (the caller has already set -1 on every token: live_push() does). */
+ * (the caller has already set -1 on every token: live_push() does).  A token
+ * whose number is already set -- live_pull() writes back the one it looked
+ * up for the automaton -- is not looked up a second time. */
 static size_t resolve_token_numbers(mdbp_token *tokens, size_t n,
                                     resolve_mode mode)
 {
@@ -427,8 +423,12 @@ static size_t resolve_token_numbers(mdbp_token *tokens, size_t n,
     size_t i;
 
     for (i = 0; i < n; i++) {
-        int number = mdbp_token_number(tokens[i].name);
+        int number;
 
+        if (tokens[i].token_number >= 0) {
+            continue;
+        }
+        number = mdbp_token_number(tokens[i].name);
         if (number < 0) {
             if (first_unknown == n) {
                 first_unknown = i;
@@ -601,6 +601,9 @@ static int live_pull(void *user, mdbp_token *out)
          * still lexed, so `tokens` is the whole stream either way. */
         return -1;
     }
+    /* Written back into the stored copy too, so resolve_token_numbers()
+     * does not look the same name up again. */
+    p->tokens[p->ntokens - 1].token_number = number;
     *out = tok;
     out->token_number = number;
     return 1;

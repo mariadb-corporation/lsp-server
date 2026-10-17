@@ -21,31 +21,11 @@
 #include <cctype>
 #include <utility>
 
+#include "text_util.h"
+
 namespace mdbls {
 
 namespace {
-
-bool iequals(std::string_view a, std::string_view b) {
-  if (a.size() != b.size()) return false;
-  for (size_t i = 0; i < a.size(); ++i) {
-    if (std::tolower(static_cast<unsigned char>(a[i])) !=
-        std::tolower(static_cast<unsigned char>(b[i])))
-      return false;
-  }
-  return true;
-}
-
-std::string lower(std::string_view s) {
-  std::string out(s);
-  for (auto &c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-  return out;
-}
-
-std::string upper(std::string_view s) {
-  std::string out(s);
-  for (auto &c : out) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-  return out;
-}
 
 // Runs of blanks become one space; leading and trailing blanks go.
 std::string collapse(std::string_view s) {
@@ -108,6 +88,18 @@ std::string unquote_string(std::string_view s) {
 template <typename T>
 auto find_named(std::vector<T> &v, std::string_view name) {
   return std::find_if(v.begin(), v.end(), [&](const T &x) { return iequals(x.name, name); });
+}
+
+// Replaces the element of v named like x, or appends x when there is none.
+// `keep_existing`: an element of that name stays as it is (IF NOT EXISTS).
+template <typename T>
+void upsert_named(std::vector<T> &v, T x, bool keep_existing = false) {
+  auto it = find_named(v, x.name);
+  if (it == v.end()) {
+    v.push_back(std::move(x));
+  } else if (!keep_existing) {
+    *it = std::move(x);
+  }
 }
 
 // The grammar symbols the fold looks for, resolved once.
@@ -266,6 +258,7 @@ class Catalog_fold {
   bool rest(uint32_t n);
 
   // --- parts
+  View make_view(uint32_t n, uint32_t id) const;
   void field_list_items(uint32_t n, Table &t);
   void column_def(uint32_t n, Table &t, std::optional<size_t> at = std::nullopt);
   Column column(uint32_t field_spec, Table &t);
@@ -376,25 +369,12 @@ bool Catalog_fold::create(uint32_t n) {
     ix.columns = key_columns(child(n, s_.key_list));
     if (ix.columns.empty()) ix.columns.push_back(text(find(n, s_.key_part)));
     ix.origin = origin(id);
-    auto it = find_named(tb->indexes, ix.name);
-    if (it != tb->indexes.end()) *it = std::move(ix); else tb->indexes.push_back(std::move(ix));
+    upsert_named(tb->indexes, std::move(ix));
     return true;
   }
   if (has_child(n, s_.VIEW_SYM)) {
     auto [schema_name, id] = qualified(child(n, s_.table_ident));
-    Schema &sc = c_.schema(schema_name);
-    View v;
-    v.name = name_of(id);
-    for (const uint32_t c : find_all(child(n, s_.view_list_opt), s_.ident)) v.columns.push_back(name_of(c));
-    v.definition = text(child(n, s_.view_select));
-    v.origin = origin(id);
-    auto it = find_named(sc.views, v.name);
-    if (it != sc.views.end()) {
-      if (if_not_exists && !replace) return true;
-      *it = std::move(v);
-    } else {
-      sc.views.push_back(std::move(v));
-    }
+    upsert_named(c_.schema(schema_name).views, make_view(n, id), if_not_exists && !replace);
     return true;
   }
   if (has_child(n, s_.TRIGGER_SYM)) {
@@ -411,28 +391,34 @@ bool Catalog_fold::create(uint32_t n) {
                                    t_.children(child(tail, s_.sp_name)).size() >= 3
                                ? schema_name
                                : table_schema);
-    auto it = find_named(sc.triggers, tr.name);
-    if (it != sc.triggers.end()) *it = std::move(tr); else sc.triggers.push_back(std::move(tr));
+    upsert_named(sc.triggers, std::move(tr));
     return true;
   }
   if (has_child(n, s_.EVENT_SYM)) {
     const uint32_t tail = find(n, s_.event_tail);
     auto [schema_name, id] = qualified(child(tail, s_.sp_name));
-    Schema &sc = c_.schema(schema_name);
-    auto it = find_named(sc.events, name_of(id));
-    if (it != sc.events.end()) *it = {name_of(id), origin(id)}; else sc.events.push_back({name_of(id), origin(id)});
+    upsert_named(c_.schema(schema_name).events, Named_object{name_of(id), origin(id)});
     return true;
   }
   return false;  // USER, ROLE, SERVER
+}
+
+// CREATE VIEW and ALTER VIEW: view_list_opt, view_select.
+View Catalog_fold::make_view(uint32_t n, uint32_t id) const {
+  View v;
+  v.name = name_of(id);
+  for (const uint32_t c : find_all(child(n, s_.view_list_opt), s_.ident)) v.columns.push_back(name_of(c));
+  v.definition = text(child(n, s_.view_select));
+  v.origin = origin(id);
+  return v;
 }
 
 bool Catalog_fold::create_table(uint32_t n) {
   auto [schema_name, id] = qualified(child(n, s_.table_ident));
   const bool replace = find(child(n, s_.create_or_replace), s_.OR_SYM) != npos;
   const bool if_not_exists = non_empty(child(n, s_.opt_if_not_exists));
-  Schema &sc = c_.schema(schema_name);
   const std::string name = name_of(id);
-  if (Table *existing = sc.table(name); existing != nullptr && if_not_exists && !replace) {
+  if (c_.schema(schema_name).table(name) != nullptr && if_not_exists && !replace) {
     return true;  // IF NOT EXISTS: the existing table stays
   }
 
@@ -458,11 +444,8 @@ bool Catalog_fold::create_table(uint32_t n) {
   }
   table_options(child(body, s_.opt_create_table_options), tb.options);
 
-  if (Table *existing = sc.table(name)) {
-    *existing = std::move(tb);
-  } else {
-    sc.tables.push_back(std::move(tb));
-  }
+  // Looked up again: LIKE may have added a schema, moving the others.
+  upsert_named(c_.schema(schema_name).tables, std::move(tb));
   return true;
 }
 
@@ -735,14 +718,7 @@ bool Catalog_fold::alter(uint32_t n) {
   }
   if (has_child(n, s_.VIEW_SYM)) {
     auto [schema_name, id] = qualified(child(n, s_.table_ident));
-    Schema &sc = c_.schema(schema_name);
-    auto it = find_named(sc.views, name_of(id));
-    View v;
-    v.name = name_of(id);
-    for (const uint32_t c : find_all(child(n, s_.view_list_opt), s_.ident)) v.columns.push_back(name_of(c));
-    v.definition = text(child(n, s_.view_select));
-    v.origin = origin(id);
-    if (it != sc.views.end()) *it = std::move(v); else sc.views.push_back(std::move(v));
+    upsert_named(c_.schema(schema_name).views, make_view(n, id));
     return true;
   }
   if (!has_child(n, s_.TABLE_SYM)) return false;
@@ -953,8 +929,7 @@ bool Catalog_fold::rest(uint32_t n) {
   auto named = [&](std::vector<Named_object> &v, int name_sym) {
     const uint32_t p = find(st, name_sym);
     const std::string name = unquote_string(unquote_identifier(text(p)));
-    auto it = find_named(v, name);
-    if (it != v.end()) *it = {name, origin(p)}; else v.push_back({name, origin(p)});
+    upsert_named(v, Named_object{name, origin(p)});
   };
   auto unnamed = [&](std::vector<Named_object> &v, int name_sym) {
     const std::string name = unquote_string(unquote_identifier(text(find(st, name_sym))));

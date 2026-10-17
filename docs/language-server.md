@@ -44,7 +44,7 @@ Diagnostics carry `source: "mariadb"` and a `code`: `syntax-error`, `not-checked
 
 | Message | Direction | Content |
 | --- | --- | --- |
-| `mariadb/documentContext` | client to server, notification | `{textDocument: {uri}, sqlMode?, serverVersion?, delimiter?, currentSchema?, connection?}`: the state a document starts in. A change of `sqlMode`, `serverVersion` or `delimiter` indexes and checks the document again. `connection` (a connection URI) and `currentSchema` are kept for the live catalog (P5). |
+| `mariadb/documentContext` | client to server, notification | `{textDocument: {uri}, sqlMode?, serverVersion?, delimiter?, currentSchema?, connection?}`: the state a document starts in. A change of `sqlMode`, `serverVersion` or `delimiter` indexes and checks the document again. `connection` (a connection URI) and `currentSchema` are accepted and ignored until the live catalog (P5) reads them. |
 | `mariadb/viewport` | client to server, notification | `{textDocument: {uri}, range}`: the visible lines; their statements are checked first |
 | `mariadb/outline` | client to server, request | `{textDocument: {uri}}`; the result is the outline JSON of [outline-format.md](outline-format.md), with `file` set to the URI |
 | `mariadb/parseProgress` | server to client, notification | `{uri, version, checked, total, done}` while a large document is checked |

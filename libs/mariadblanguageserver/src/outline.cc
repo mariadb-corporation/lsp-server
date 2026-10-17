@@ -21,10 +21,9 @@
 #include <rapidjson/writer.h>
 
 #include <algorithm>
-#include <condition_variable>
-#include <mutex>
 #include <optional>
 
+#include "mdbls/lsp/json_position.h"
 #include "mdbparse.h"
 
 namespace mdbls {
@@ -46,39 +45,26 @@ Outline build_outline(std::string_view text, const Statement_index &index, Parse
     Syntax_tree tree;
   };
   std::vector<Parsed> parsed(ddl.size());
-  std::mutex mutex;
-  std::condition_variable cv;
-  size_t pending = 0;
   constexpr size_t k_per_job = 64;
-  for (size_t from = 0; from < ddl.size(); from += k_per_job) {
+  const size_t n_jobs = (ddl.size() + k_per_job - 1) / k_per_job;
+  pool.run_all(options.priority, n_jobs, [&](size_t job, Parser_cache &cache) {
+    const size_t from = job * k_per_job;
     const size_t to = std::min(ddl.size(), from + k_per_job);
-    {
-      std::lock_guard lock(mutex);
-      ++pending;
-    }
-    pool.submit(options.priority, [&, from, to](Parser_cache &cache) {
-      for (size_t k = from; k < to; ++k) {
-        const Statement &s = stmts[ddl[k]];
-        mdbp_parser *p = cache.get(index.modes()[s.mode].mode, options.version_id, true);
-        if (p == nullptr) {
-          parsed[k].unsupported = true;
-          continue;
-        }
-        const auto sql = index.text_of(text, s);
-        mdbp_result r;
-        if (mdbp_parse_sql(p, sql.data(), sql.size(), &r) == MDBP_OK && r.accepted) {
-          parsed[k].accepted = true;
-          parsed[k].tree = Syntax_tree::build(p, r, s.begin);
-        }
+    for (size_t k = from; k < to; ++k) {
+      const Statement &s = stmts[ddl[k]];
+      mdbp_parser *p = cache.get(index.modes()[s.mode].mode, options.version_id, true);
+      if (p == nullptr) {
+        parsed[k].unsupported = true;
+        continue;
       }
-      std::lock_guard lock(mutex);
-      if (--pending == 0) cv.notify_all();
-    });
-  }
-  {
-    std::unique_lock lock(mutex);
-    cv.wait(lock, [&] { return pending == 0; });
-  }
+      const auto sql = index.text_of(text, s);
+      mdbp_result r;
+      if (mdbp_parse_sql(p, sql.data(), sql.size(), &r) == MDBP_OK && r.accepted) {
+        parsed[k].accepted = true;
+        parsed[k].tree = Syntax_tree::build(p, r, s.begin);
+      }
+    }
+  });
 
   Outline out;
   out.ddl_statements = ddl.size();
@@ -134,23 +120,10 @@ class Json_outline {
     for (const auto &s : v) w_.String(s.data(), static_cast<rapidjson::SizeType>(s.size()));
     w_.EndArray();
   }
-  void position(uint32_t off) {
-    const auto p = lines_.position(text_, off);
-    w_.StartObject();
-    w_.Key("line");
-    w_.Uint(p.line);
-    w_.Key("character");
-    w_.Uint(p.character);
-    w_.EndObject();
-  }
+  void position(uint32_t off) { lsp::write_position(w_, lines_.position(text_, off)); }
   void range(const char *key, Range r) {
     w_.Key(key);
-    w_.StartObject();
-    w_.Key("start");
-    position(r.begin);
-    w_.Key("end");
-    position(r.end);
-    w_.EndObject();
+    lsp::write_range(w_, text_, lines_, r.begin, r.end);
   }
   void origin(const Origin &o) {
     range("range", o.statement);

@@ -22,16 +22,11 @@
 #include <cstdint>
 
 #include "mdbls/statement_index.h"
+#include "text_util.h"
 
 namespace mdbls {
 
 namespace {
-
-std::string lower(std::string_view s) {
-  std::string out(s);
-  for (auto &c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-  return out;
-}
 
 void append_utf8(uint32_t cp, std::string *out) {
   if (cp < 0x80) {

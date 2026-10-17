@@ -21,25 +21,11 @@
 #include <utility>
 #include <vector>
 
+#include "text_util.h"
+
 namespace mdbls {
 
 namespace {
-
-std::string to_upper(std::string_view s) {
-  std::string out(s);
-  for (auto &c : out) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-  return out;
-}
-
-bool iequals(std::string_view a, std::string_view b) {
-  if (a.size() != b.size()) return false;
-  for (size_t i = 0; i < a.size(); ++i) {
-    if (std::toupper(static_cast<unsigned char>(a[i])) !=
-        std::toupper(static_cast<unsigned char>(b[i])))
-      return false;
-  }
-  return true;
-}
 
 uint32_t element_bits(std::string_view e) {
   constexpr uint32_t k_ansi_like = k_ansi_quotes | k_pipes_as_concat | k_ignore_space;
@@ -193,7 +179,7 @@ std::string normalize_sql_mode(std::string_view list) {
     while (!e.empty() && std::isspace(static_cast<unsigned char>(e.back()))) e.remove_suffix(1);
     if (!e.empty()) {
       if (!out.empty()) out.push_back(',');
-      out += to_upper(e);
+      out += upper(e);
     }
     start = comma + 1;
   }
@@ -290,7 +276,7 @@ bool Sql_mode_tracker::observe(std::string_view statement) {
                    !std::isdigit(static_cast<unsigned char>(t[v].text[0]))) {
           set(normalize_sql_mode(t[v].text), true);  // SET sql_mode = ansi
         } else if (nvalue == 1 && t[v].kind == Tok::user_var) {
-          const auto it = m_saved.find(to_upper(t[v].text));
+          const auto it = m_saved.find(upper(t[v].text));
           if (it != m_saved.end()) {
             set(it->second, true);
           } else {
@@ -302,7 +288,7 @@ bool Sql_mode_tracker::observe(std::string_view statement) {
           set(m_mode, false);
         }
       } else if (target.kind == Tok::user_var) {
-        const std::string key = to_upper(target.text);
+        const std::string key = upper(target.text);
         if (nvalue == 1 && is_session_sql_mode(t[v]) && m_known) {
           m_saved[key] = m_mode;
         } else if (nvalue == 1 && t[v].kind == Tok::string) {

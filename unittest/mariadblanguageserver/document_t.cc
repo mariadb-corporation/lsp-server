@@ -43,9 +43,9 @@ std::vector<Check_result> check_all(const Snapshot &s, const std::vector<size_t>
 
 TEST(Document, incremental_change_and_positions) {
   Document doc("SELECT 1;\nSELECT 2;\n", 1, {});
-  doc.change(std::make_pair(Position{1, 7}, Position{1, 8}), "22");
+  EXPECT_EQ(doc.change(std::make_pair(Position{1, 7}, Position{1, 8}), "22"), 17u);
   EXPECT_EQ(doc.text(), "SELECT 1;\nSELECT 22;\n");
-  doc.change(std::nullopt, "SELECT 3");
+  EXPECT_EQ(doc.change(std::nullopt, "SELECT 3"), 0u);
   EXPECT_EQ(doc.text(), "SELECT 3");
   EXPECT_EQ(doc.index().statements().size(), 1u);
 }

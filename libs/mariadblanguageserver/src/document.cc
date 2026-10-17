@@ -19,7 +19,6 @@
 
 #include <algorithm>
 #include <stdexcept>
-#include <thread>
 
 namespace mdbls {
 
@@ -43,13 +42,12 @@ void Document::rebuild() {
   m_lines = std::make_shared<Line_map>(*m_text);
   const size_t old_count = m_index ? m_index->statements().size() : 0;
   m_index = std::make_shared<const Statement_index>(Statement_index::build_parallel(
-      *m_text, m_options, std::max(1u, std::thread::hardware_concurrency())));
+      *m_text, m_options, 0));
   ++m_generation;
   // Everything is replaced: queued jobs' verdicts will all be dropped.
   m_history.push_back({0, old_count, m_index->statements().size(), 0});
   m_checks.assign(m_index->statements().size(), {});
   m_queued.assign(m_index->statements().size(), 0);
-  m_in_flight = 0;
   while (m_history.size() > k_history) {
     m_history.pop_front();
     ++m_history_base;
@@ -61,7 +59,7 @@ void Document::set_options(const Index_options &options) {
   rebuild();
 }
 
-void Document::change(std::optional<std::pair<Position, Position>> range, std::string_view text) {
+uint32_t Document::change(std::optional<std::pair<Position, Position>> range, std::string_view text) {
   if (!range) {
     // Replace the buffer's content, reusing its memory when it is ours.
     m_snapshot.reset();
@@ -71,7 +69,7 @@ void Document::change(std::optional<std::pair<Position, Position>> range, std::s
       m_text = std::make_shared<std::string>(text);
     }
     rebuild();
-    return;
+    return 0;
   }
   uint32_t begin = offset(range->first);
   uint32_t end = offset(range->second);
@@ -99,13 +97,11 @@ void Document::change(std::optional<std::pair<Position, Position>> range, std::s
       Statement_index::update(*m_index, *m_text, begin, removed, inserted, m_options, &sp));
   ++m_generation;
   splice(sp);
+  return begin;
 }
 
 void Document::splice(const Index_splice &sp) {
   // Verdicts of the replaced statements go; those after them move.
-  for (size_t i = sp.first; i < sp.first + sp.removed; ++i) {
-    if (m_queued[i]) --m_in_flight;
-  }
   auto checks_first = m_checks.begin() + static_cast<ptrdiff_t>(sp.first);
   auto queued_first = m_queued.begin() + static_cast<ptrdiff_t>(sp.first);
   if (sp.added >= sp.removed) {
@@ -159,7 +155,6 @@ std::vector<size_t> Document::take_unchecked() {
       out.push_back(i);
     }
   }
-  m_in_flight += out.size();
   return out;
 }
 
@@ -181,12 +176,15 @@ void Document::apply_checks(uint64_t generation, std::span<const Check_result> r
     const auto i = translate(generation, r.statement);
     if (!i || *i >= stmts.size() || !m_queued[*i]) continue;
     m_queued[*i] = 0;
-    --m_in_flight;
     m_checks[*i] = r.check;
     if (r.check.status == Check_status::syntax_error) {
       m_checks[*i].error_offset += stmts[*i].begin;
     }
   }
+}
+
+size_t Document::checks_in_flight() const {
+  return static_cast<size_t>(std::count(m_queued.begin(), m_queued.end(), uint8_t{1}));
 }
 
 size_t Document::sql_statements() const {

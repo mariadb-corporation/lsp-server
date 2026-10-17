@@ -40,7 +40,7 @@ struct Outline {
 };
 
 struct Outline_options {
-  unsigned long version_id = 130100;
+  unsigned long version_id = k_default_version_id;
   int priority = 0;
 };
 

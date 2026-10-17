@@ -25,6 +25,10 @@
 
 namespace mdbls {
 
+// The release id (major*10000 + minor*100 + patch) assumed when none is
+// given: it decides which versioned comments are read as SQL.
+inline constexpr unsigned long k_default_version_id = 130100;
+
 // The sql_mode flags that change how SQL is split or lexed.  The composite
 // names are expanded as the server's expand_sql_mode() does.
 enum Sql_mode_bit : uint32_t {
@@ -65,7 +69,7 @@ class Sql_mode_tracker {
   // `initial` is the connection's mode, also what DEFAULT restores.
   // `version_id` decides which versioned comments are read as SQL.
   explicit Sql_mode_tracker(std::string_view initial = {},
-                            unsigned long version_id = 130100);
+                            unsigned long version_id = k_default_version_id);
 
   // Reads one statement (without its delimiter).  Returns true when the
   // session mode or its known-ness changed.

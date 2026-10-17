@@ -79,7 +79,6 @@ target_link_libraries(mariadbparser_objects PUBLIC Threads::Threads)
 add_library(mariadbparser STATIC $<TARGET_OBJECTS:mariadbparser_objects>)
 target_include_directories(mariadbparser PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(mariadbparser PUBLIC Threads::Threads)
-add_library(mariadbparser::static ALIAS mariadbparser)
 
 add_library(mariadbparser_shared SHARED $<TARGET_OBJECTS:mariadbparser_objects>)
 target_include_directories(mariadbparser_shared PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -96,7 +95,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_link_options(mariadbparser_shared PRIVATE
     "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/src/libmariadbparser.map")
 endif()
-add_library(mariadbparser::shared ALIAS mariadbparser_shared)
 
 # mdbparse: a command-line front end for inspecting verdicts, tokens and
 # derivations of single statements, built on the public API only.
@@ -104,9 +102,7 @@ find_package(RapidJSON CONFIG QUIET)
 if(RapidJSON_FOUND)
   add_executable(mdbparse src/mdbparse.cc)
   target_link_libraries(mdbparse PRIVATE mariadbparser rapidjson)
-  if(COMMAND mdbls_target_warnings)
-    mdbls_target_warnings(mdbparse)
-  endif()
+  mdbls_target_warnings(mdbparse)
 else()
   message(STATUS "RapidJSON not found: mdbparse is not built")
 endif()
