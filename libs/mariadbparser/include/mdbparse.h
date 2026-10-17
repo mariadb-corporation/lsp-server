@@ -188,9 +188,17 @@ extern "C" {
  * that needs them tests
  *
  *     #if MDBP_VERSION_MAJOR == 2 && MDBP_VERSION_MINOR >= 3
+ *
+ * VERSION 2.4 ADDED TWO FUNCTIONS that read MariaDB's keyword tables,
+ * mdbp_keyword_count() and mdbp_keyword_at(), for a caller that spells an
+ * expected terminal the way a user types it (completion).  Nothing existing
+ * changed; the new symbols carry MDBPARSER_2.4.  A caller that needs them
+ * tests
+ *
+ *     #if MDBP_VERSION_MAJOR == 2 && MDBP_VERSION_MINOR >= 4
  */
 #define MDBP_VERSION_MAJOR 2
-#define MDBP_VERSION_MINOR 3
+#define MDBP_VERSION_MINOR 4
 #define MDBP_VERSION_PATCH 0
 
 const char *mdbp_version_string(void);
@@ -680,6 +688,26 @@ int mdbp_grammar_rule_length(int rule);
 /* The terminal symbol a token number stands for; the undefined-token symbol
  * for a number the grammar does not declare, -1 for a negative number. */
 int mdbp_grammar_token_symbol(int token_number);
+
+/* ---------------------------------------------------------------------------
+ * The keyword tables (since 2.4)
+ * ---------------------------------------------------------------------------
+ * The lexer's two tables from sql/lex.h, in their order: symbols[] (keywords
+ * and multi-character operators, "SELECT", "<=") and then sql_functions[]
+ * (names that are keywords only before '(', "COUNT", "SUBSTR").  One
+ * terminal can have several spellings: SUBSTRING is "MID", "SUBSTR" and
+ * "SUBSTRING".  Constant tables, callable from any thread at any time. */
+typedef struct mdbp_keyword {
+    const char *spelling;  /* as the table writes it, upper case */
+    const char *terminal;  /* the terminal's name, "SELECT_SYM" */
+    int symbol;            /* its grammar symbol, as mdbp_grammar_token_symbol() */
+    int function;          /* 1: from sql_functions[] */
+} mdbp_keyword;
+
+size_t mdbp_keyword_count(void);
+/* Fills `out` with entry `i` and returns 1; 0 when `i` is out of range or
+ * `out` is NULL. */
+int mdbp_keyword_at(size_t i, mdbp_keyword *out);
 
 #ifdef __cplusplus
 }

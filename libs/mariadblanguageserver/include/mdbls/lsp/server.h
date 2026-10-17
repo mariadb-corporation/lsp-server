@@ -22,6 +22,7 @@
 #include <cstddef>
 #include <memory>
 #include <ostream>
+#include <string>
 #include <string_view>
 
 #include "mdbls/statement_index.h"
@@ -39,13 +40,18 @@ struct Server_options {
   // Documents at least this large report check progress.
   size_t progress_threshold = 4u << 20;
   Index_options defaults;  // sql_mode, version id and delimiter of new documents
+  // MariaDB Shell's binary directory, for its secret store helpers (live
+  // connections); initializationOptions.shellBinary or shellBinDir override.
+  std::string shell_bin_dir;
   std::ostream *log = nullptr;
 };
 
 // A language server speaking LSP over `in` and `out` (JSON-RPC with
 // Content-Length framing; see transport.h).  The initialize request's initializationOptions
 // may override the options: sqlMode, serverVersion, delimiter, debounceMs,
-// maxDiagnostics, semanticTokensFullLimit, progressThreshold.
+// maxDiagnostics, semanticTokensFullLimit, progressThreshold; and set
+// catalogFiles, connection, shellBinary, shellBinDir, credentialStoreHelper,
+// catalogRefreshSeconds and keywordCase (docs/language-server.md).
 //
 // Threads: one reads `in`, one writes `out`, the caller's thread runs the
 // event loop that owns the documents, a small pool answers requests and the

@@ -277,6 +277,35 @@ TEST(Mariadbparser, refuses_what_it_cannot_honour) {
 // One parser per thread, many threads at once: every thread must get the
 // single-threaded answer.  The first calls also race the once-initialised
 // process-wide tables.
+TEST(Mariadbparser, keyword_table) {
+  const size_t n = mdbp_keyword_count();
+  ASSERT_GT(n, 700u);
+  bool select = false, substr = false;
+  for (size_t i = 0; i < n; ++i) {
+    mdbp_keyword k;
+    ASSERT_EQ(mdbp_keyword_at(i, &k), 1);
+    ASSERT_NE(k.spelling, nullptr);
+    ASSERT_NE(k.terminal, nullptr);
+    EXPECT_STREQ(mdbp_grammar_symbol_name(k.symbol), k.terminal);
+    if (std::string_view(k.spelling) == "SELECT") {
+      select = true;
+      EXPECT_STREQ(k.terminal, "SELECT_SYM");
+      EXPECT_EQ(k.function, 0);
+    }
+    if (std::string_view(k.spelling) == "SUBSTR") {
+      substr = true;
+      EXPECT_STREQ(k.terminal, "SUBSTRING");
+      EXPECT_EQ(k.function, 1);
+    }
+  }
+  EXPECT_TRUE(select);
+  EXPECT_TRUE(substr);
+  mdbp_keyword k;
+  EXPECT_EQ(mdbp_keyword_at(n, &k), 0);
+  EXPECT_EQ(mdbp_keyword_at(0, nullptr), 0);
+  EXPECT_STREQ(mdbp_version_string(), "2.4.0");
+}
+
 TEST(Mariadbparser, parsers_on_many_threads_agree) {
   const std::vector<std::string> statements = {
       "SELECT a, b FROM t WHERE x = 1",

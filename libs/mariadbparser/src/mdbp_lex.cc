@@ -260,6 +260,25 @@ struct st_symbol *get_hash_symbol(const char *s, unsigned int len, bool function
   return NULL;
 }
 
+/* The keyword tables, read through mdbparse.h (since 2.4). */
+extern "C" size_t mdbp_keyword_count(void)
+{
+  return symbols_length + sql_functions_length;
+}
+
+extern "C" int mdbp_keyword_at(size_t i, mdbp_keyword *out)
+{
+  if (out == NULL || i >= symbols_length + sql_functions_length)
+    return 0;
+  const bool function= i >= symbols_length;
+  const SYMBOL &s= function ? sql_functions[i - symbols_length] : symbols[i];
+  out->spelling= s.name;
+  out->symbol= mdbp_grammar_token_symbol(static_cast<int>(s.tok));
+  out->terminal= mdbp_grammar_symbol_name(out->symbol);
+  out->function= function ? 1 : 0;
+  return 1;
+}
+
 /* ======================================================================
  * 3.  The lexer object and its memory.
  * ====================================================================== */

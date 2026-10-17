@@ -18,19 +18,29 @@
 
 add_library(mariadblanguageserver STATIC
   src/catalog.cc
+  src/catalog_view.cc
   src/charset.cc
+  src/completion.cc
+  src/connection_uri.cc
   src/document.cc
+  src/keywords.cc
   src/line_map.cc
+  src/live_catalog.cc
   src/lsp/features.cc
+  src/lsp/language_features.cc
   src/lsp/server.cc
   src/lsp/transport.cc
+  src/navigation.cc
   src/outline.cc
+  src/secret_store.cc
   src/semantic_tokens.cc
   src/sql_mode.cc
+  src/sql_names.cc
   src/statement_index.cc
   src/parser_pool.cc
   src/syntax_check.cc
-  src/syntax_tree.cc)
+  src/syntax_tree.cc
+  src/workspace_catalog.cc)
 target_include_directories(mariadblanguageserver PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
                            PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 find_package(Threads REQUIRED)
@@ -39,4 +49,11 @@ find_package(RapidJSON CONFIG REQUIRED)
 target_link_libraries(mariadblanguageserver PUBLIC sqlsplitter mariadbparser Threads::Threads
                       rapidjson)
 target_compile_definitions(mariadblanguageserver PRIVATE MDBLS_VERSION="${PROJECT_VERSION}")
+# Live connections (src/live_catalog.cc) need the client library.
+if(WITH_MARIADB_CLIENT)
+  target_link_libraries(mariadblanguageserver PRIVATE mariadb::client)
+  target_compile_definitions(mariadblanguageserver PRIVATE MDBLS_WITH_CLIENT=1)
+else()
+  target_compile_definitions(mariadblanguageserver PRIVATE MDBLS_WITH_CLIENT=0)
+endif()
 mdbls_target_warnings(mariadblanguageserver)

@@ -30,6 +30,13 @@ namespace mdbls {
 
 Outline build_outline(std::string_view text, const Statement_index &index, Parser_pool &pool,
                       const Outline_options &options) {
+  Outline out;
+  fold_outline(out, text, index, pool, options, 0);
+  return out;
+}
+
+void fold_outline(Outline &out, std::string_view text, const Statement_index &index,
+                  Parser_pool &pool, const Outline_options &options, uint32_t source) {
   const auto &stmts = index.statements();
   std::vector<size_t> ddl;
   for (size_t i = 0; i < stmts.size(); ++i) {
@@ -66,8 +73,10 @@ Outline build_outline(std::string_view text, const Statement_index &index, Parse
     }
   });
 
-  Outline out;
-  out.ddl_statements = ddl.size();
+  out.catalog.set_source(source);
+  out.ddl_statements += ddl.size();
+  const size_t old_notes = out.catalog.notes().size();
+  const size_t first_note = out.notes.size();
   for (size_t k = 0; k < ddl.size(); ++k) {
     const uint32_t at = stmts[ddl[k]].begin;
     if (parsed[k].unsupported) {
@@ -79,10 +88,11 @@ Outline build_outline(std::string_view text, const Statement_index &index, Parse
       ++out.applied;
     }
   }
-  for (const auto &n : out.catalog.notes()) out.notes.push_back(n);
-  std::sort(out.notes.begin(), out.notes.end(),
+  for (size_t k = old_notes; k < out.catalog.notes().size(); ++k) {
+    out.notes.push_back(out.catalog.notes()[k]);
+  }
+  std::sort(out.notes.begin() + static_cast<std::ptrdiff_t>(first_note), out.notes.end(),
             [](const auto &a, const auto &b) { return a.first < b.first; });
-  return out;
 }
 
 namespace {

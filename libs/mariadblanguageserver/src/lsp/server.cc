@@ -26,19 +26,27 @@
 #include <cctype>
 #include <condition_variable>
 #include <deque>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <set>
 #include <span>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
 #include "lsp/features.h"
+#include "lsp/language_features.h"
+#include "mdbls/connection_uri.h"
 #include "mdbls/document.h"
+#include "mdbls/keywords.h"
+#include "mdbls/live_catalog.h"
+#include "mdbls/workspace_catalog.h"
 #include "mdbls/lsp/transport.h"
 #include "mdbls/outline.h"
 #include "mdbls/parser_pool.h"
@@ -61,6 +69,7 @@ constexpr int k_invalid_params = -32602;
 constexpr int k_internal_error = -32603;
 constexpr int k_server_not_initialized = -32002;
 constexpr int k_request_cancelled = -32800;
+constexpr int k_request_failed = -32803;
 
 // Priorities in the pools: requests, then the statements on screen or just
 // edited, then the rest.
@@ -176,6 +185,11 @@ struct Check_pass {
   }
 };
 
+// A request the server refuses (RequestFailed), with the reason.
+struct Request_failed : std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
+
 struct Message {
   std::string body;
   rapidjson::Document json;
@@ -192,7 +206,12 @@ struct Outline_cache {
   std::mutex mutex;
   uint64_t generation = 0;
   std::shared_ptr<const Outline> outline;
+  bool rebuilding = false;  // a job is folding a newer snapshot
 };
+
+// Documents larger than this get their first outline in the background:
+// a completion does not wait for it.
+constexpr size_t k_sync_outline_limit = 4u << 20;
 
 struct Open_document {
   std::string uri;
@@ -208,6 +227,12 @@ struct Open_document {
   enum class Progress : uint8_t { none, accepted, begun } progress = Progress::none;
   std::shared_ptr<Token_cache> tokens = std::make_shared<Token_cache>();
   std::shared_ptr<Outline_cache> outline = std::make_shared<Outline_cache>();
+  // mariadb/documentContext: the connection, the schema, and whether the
+  // client set the sql_mode and version itself (else the server's apply).
+  std::shared_ptr<Live_catalog> live;
+  std::string schema_hint;
+  bool explicit_mode = false;
+  bool explicit_version = false;
 
   Open_document(std::string u, std::string text, int64_t version, Index_options o)
       : uri(std::move(u)), doc(std::move(text), version, std::move(o)) {}
@@ -254,7 +279,9 @@ unsigned long parse_server_version(std::string_view v) {
 
 struct Server::Impl {
   Impl(Input &in, Output &out, Server_options o)
-      : options(std::move(o)), input(in), writer(out), inbox(std::make_shared<Inbox>()) {}
+      : options(std::move(o)), input(in), writer(out), inbox(std::make_shared<Inbox>()) {
+    secrets.shell_bin_dir = options.shell_bin_dir;
+  }
 
   Server_options options;
   Input &input;
@@ -271,9 +298,23 @@ struct Server::Impl {
   bool client_progress = false;  // window.workDoneProgress
   uint64_t next_request = 1;     // ids of our requests to the client
 
+  // Catalogs (loop thread).
+  std::vector<std::string> catalog_entries;  // initializationOptions.catalogFiles
+  std::string root_path;                     // the workspace root, for relative entries
+  std::shared_ptr<const Workspace_catalog> workspace;
+  uint64_t workspace_generation = 0;
+  std::string default_connection;            // initializationOptions.connection
+  Secret_store_options secrets;
+  std::chrono::seconds live_interval{0};
+  std::set<std::string> reported;            // connection errors shown once
+  bool snippets = false;                     // the client takes snippets
+  bool upper_keywords = true;
+
   // Destroyed first: their running jobs may still post and send.
   std::unique_ptr<Parser_pool> parse_pool;
   std::unique_ptr<Parser_pool> request_pool;
+  // Each has a thread that posts to the inbox; joined before the pools go.
+  std::map<std::string, std::shared_ptr<Live_catalog>> live;
 
   // ---- output, from any thread
 
@@ -368,6 +409,8 @@ struct Server::Impl {
         reply(id, [&](Json_writer &out) {
           out.RawValue(result.c_str(), result.size(), rapidjson::kObjectType);
         });
+      } catch (const Request_failed &e) {
+        reply_error(id, k_request_failed, e.what());
       } catch (const std::exception &e) {
         reply_error(id, k_internal_error, e.what());
       }
@@ -452,6 +495,8 @@ struct Server::Impl {
       inbox->events.clear();
     }
     for (auto &[uri, d] : documents) cancel_passes(*d);
+    for (auto &[uri, d] : documents) d->live.reset();
+    live.clear();
     request_pool.reset();
     parse_pool.reset();
     writer.flush();
@@ -509,6 +554,10 @@ struct Server::Impl {
     try {
       if (*method == "initialized") return;
       if (*method == "textDocument/didOpen") return on_did_open(params);
+      if (*method == "textDocument/didSave") return on_did_save(params);
+      if (*method == "workspace/didChangeConfiguration") return on_did_change_configuration(params);
+      if (*method == "workspace/symbol") return on_workspace_symbol(id, params);
+      if (*method == "mariadb/refreshCatalog") return on_refresh_catalog(id, params);
       if (*method == "textDocument/didChange") return on_did_change(params);
       if (*method == "textDocument/didClose") return on_did_close(params);
       if (*method == "mariadb/documentContext") {
@@ -534,6 +583,14 @@ struct Server::Impl {
         return on_tokens_full(id, d, prev ? &*prev : nullptr);
       }
       if (*method == "textDocument/semanticTokens/range") return on_tokens_range(id, d, params);
+      if (*method == "textDocument/completion") return on_completion(id, d, params);
+      if (*method == "textDocument/hover") return on_hover(id, d, params);
+      if (*method == "textDocument/definition") return on_definition(id, d, params);
+      if (*method == "textDocument/references") return on_references(id, d, params);
+      if (*method == "textDocument/documentHighlight") return on_highlight(id, d, params);
+      if (*method == "textDocument/prepareRename") return on_prepare_rename(id, d, params);
+      if (*method == "textDocument/rename") return on_rename(id, d, params);
+      if (*method == "textDocument/signatureHelp") return on_signature_help(id, d, params);
       reply_error(id, k_method_not_found, "unknown method " + *method);
     } catch (const std::exception &e) {
       if (request) reply_error(id, k_internal_error, e.what());
@@ -553,8 +610,31 @@ struct Server::Impl {
     if (const Json *p = path(params, {"capabilities", "window", "workDoneProgress"})) {
       client_progress = p->IsBool() && p->GetBool();
     }
+    if (const Json *p = path(params, {"capabilities", "textDocument", "completion",
+                                      "completionItem", "snippetSupport"})) {
+      snippets = p->IsBool() && p->GetBool();
+    }
+    // The workspace root: the first folder, else rootUri, else rootPath.
+    if (const Json *f = member(params, "workspaceFolders"); f != nullptr && f->IsArray() &&
+                                                             !f->Empty()) {
+      if (const auto u = string_at((*f)[0], {"uri"})) root_path = file_uri_to_path(*u);
+    }
+    if (root_path.empty()) {
+      if (const auto u = string_at(params, {"rootUri"})) root_path = file_uri_to_path(*u);
+    }
+    if (root_path.empty()) {
+      if (const auto p = string_at(params, {"rootPath"})) root_path = *p;
+    }
     if (const Json *o = member(params, "initializationOptions")) apply_settings(*o);
     initialized = true;
+    // The keyword tables are built on first use; build them now, off the
+    // loop, so the first completion does not pay for it.
+    request_pool->submit(k_priority_cold, [](Parser_cache &) {
+      (void)keyword_spellings(0);
+      (void)needs_quoting("x");
+    });
+    rebuild_workspace();
+    if (!default_connection.empty()) live_catalog(default_connection);
     reply(id, [](Json_writer &w) {
       w.StartObject();
       w.Key("capabilities");
@@ -573,6 +653,39 @@ struct Server::Impl {
       w.Key("foldingRangeProvider");
       w.Bool(true);
       w.Key("selectionRangeProvider");
+      w.Bool(true);
+      w.Key("completionProvider");
+      w.StartObject();
+      w.Key("triggerCharacters");
+      w.StartArray();
+      w.String(".");
+      w.String("`");
+      w.EndArray();
+      w.Key("resolveProvider");
+      w.Bool(false);
+      w.EndObject();
+      w.Key("hoverProvider");
+      w.Bool(true);
+      w.Key("definitionProvider");
+      w.Bool(true);
+      w.Key("referencesProvider");
+      w.Bool(true);
+      w.Key("documentHighlightProvider");
+      w.Bool(true);
+      w.Key("renameProvider");
+      w.StartObject();
+      w.Key("prepareProvider");
+      w.Bool(true);
+      w.EndObject();
+      w.Key("signatureHelpProvider");
+      w.StartObject();
+      w.Key("triggerCharacters");
+      w.StartArray();
+      w.String("(");
+      w.String(",");
+      w.EndArray();
+      w.EndObject();
+      w.Key("workspaceSymbolProvider");
       w.Bool(true);
       w.Key("semanticTokensProvider");
       w.StartObject();
@@ -617,6 +730,20 @@ struct Server::Impl {
     if (const auto v = uint_at("maxDiagnostics")) options.max_diagnostics = *v;
     if (const auto v = uint_at("semanticTokensFullLimit")) options.full_semantic_tokens_limit = *v;
     if (const auto v = uint_at("progressThreshold")) options.progress_threshold = *v;
+    if (const auto v = uint_at("catalogRefreshSeconds")) live_interval = std::chrono::seconds(*v);
+    if (const Json *f = member(o, "catalogFiles"); f != nullptr && f->IsArray()) {
+      catalog_entries.clear();
+      for (const auto &e : f->GetArray()) {
+        if (e.IsString()) catalog_entries.emplace_back(e.GetString(), e.GetStringLength());
+      }
+    }
+    if (const auto v = string_at(o, {"connection"})) default_connection = *v;
+    if (const auto v = string_at(o, {"shellBinary"}); v && !v->empty()) {
+      secrets.shell_bin_dir = std::filesystem::path(*v).parent_path().string();
+    }
+    if (const auto v = string_at(o, {"shellBinDir"}); v && !v->empty()) secrets.shell_bin_dir = *v;
+    if (const auto v = string_at(o, {"credentialStoreHelper"})) secrets.helper = *v;
+    if (const auto v = string_at(o, {"keywordCase"})) upper_keywords = *v != "lower";
   }
 
   void on_response(const std::string &id) {
@@ -643,6 +770,12 @@ struct Server::Impl {
                                              version != nullptr && version->IsInt64() ? version->GetInt64() : 0,
                                              options.defaults);
     auto &ref = *d;
+    if (!default_connection.empty()) {
+      ref.live = live_catalog(default_connection);
+      Index_options o = ref.doc.options();
+      apply_server_options(ref, o);
+      if (o != ref.doc.options()) ref.doc.set_options(o);
+    }
     documents[*uri] = std::move(d);
     log("open " + *uri + " (" + std::to_string(bytes) + " bytes, " +
         std::to_string(ref.doc.index().statements().size()) + " statements)");
@@ -696,13 +829,203 @@ struct Server::Impl {
   void on_document_context(const Json &params) {
     Open_document *d = document(params);
     if (d == nullptr) return;
+    if (string_at(params, {"sqlMode"})) d->explicit_mode = true;
+    if (string_at(params, {"serverVersion"})) d->explicit_version = true;
+    if (const Json *c = member(params, "connection")) {
+      if (c->IsString() && c->GetStringLength() > 0) {
+        d->live = live_catalog(std::string(c->GetString(), c->GetStringLength()));
+      } else {
+        d->live.reset();
+      }
+    }
+    if (const auto schema = string_at(params, {"currentSchema"})) d->schema_hint = *schema;
     Index_options o = d->doc.options();
     read_index_options(params, o);
+    apply_server_options(*d, o);
     if (o != d->doc.options()) {
       cancel_passes(*d);
       d->doc.set_options(o);
       start_checks(*d);
     }
+  }
+
+  // The sql_mode and version of the document's connection, where the
+  // client did not set them.
+  void apply_server_options(const Open_document &d, Index_options &o) {
+    if (!d.live) return;
+    const auto snap = d.live->snapshot();
+    if (!snap) return;
+    if (!d.explicit_mode) o.sql_mode = normalize_sql_mode(snap->server.sql_mode);
+    if (!d.explicit_version && snap->server.version_id != 0 &&
+        version_id_supported(snap->server.version_id)) {
+      o.version_id = snap->server.version_id;
+    }
+  }
+
+  // ---- catalogs
+
+  std::shared_ptr<Live_catalog> live_catalog(const std::string &uri) {
+    // Never the URI as given: it may hold a password.
+    const std::string key = normalize_connection_uri(uri).value_or("<invalid connection URI>");
+    if (const auto it = live.find(key); it != live.end()) return it->second;
+    Live_catalog_options o;
+    o.secrets = secrets;
+    o.refresh_interval = live_interval;
+    o.log = [this](const std::string &line) { log(line); };
+    auto box = inbox;
+    auto lc = std::make_shared<Live_catalog>(uri, o, [this, box, key] {
+      box->post([this, key] { on_live_update(key); });
+    });
+    live.emplace(key, lc);
+    return lc;
+  }
+
+  void on_live_update(const std::string &key) {
+    const auto it = live.find(key);
+    if (it == live.end()) return;
+    const auto &lc = it->second;
+    const std::string error = lc->error();
+    if (!error.empty()) {
+      if (reported.insert(key + "\n" + error).second) {
+        notify("window/showMessage", [&](Json_writer &w) {
+          w.StartObject();
+          w.Key("type");
+          w.Int(2);  // warning
+          w.Key("message");
+          const std::string msg = "MariaDB: " + key + ": " + error;
+          w.String(msg.c_str());
+          w.EndObject();
+        });
+      }
+      return;
+    }
+    for (auto &[uri, d] : documents) {
+      if (d->live != lc) continue;
+      Index_options o = d->doc.options();
+      apply_server_options(*d, o);
+      if (o != d->doc.options()) {
+        cancel_passes(*d);
+        d->doc.set_options(o);
+        start_checks(*d);
+      }
+    }
+  }
+
+  // Reads the catalog files again, in the background.
+  void rebuild_workspace() {
+    const uint64_t gen = ++workspace_generation;
+    if (catalog_entries.empty()) {
+      workspace.reset();
+      return;
+    }
+    request_pool->submit(k_priority_cold, [this, gen, entries = catalog_entries, root = root_path,
+                                           defaults = options.defaults](Parser_cache &) {
+      std::vector<std::string> errors;
+      const auto paths = expand_catalog_paths(entries, root, &errors);
+      auto ws = std::make_shared<Workspace_catalog>(
+          build_workspace_catalog(paths, *parse_pool, defaults, k_priority_cold));
+      ws->errors.insert(ws->errors.begin(), errors.begin(), errors.end());
+      inbox->post([this, gen, ws] {
+        if (gen != workspace_generation) return;
+        workspace = ws;
+        log("workspace catalog: " + std::to_string(ws->files.size()) + " files, " +
+            std::to_string(ws->outline.applied) + " statements applied");
+        for (const auto &e : ws->errors) log("workspace catalog: " + e);
+      });
+    });
+  }
+
+  void on_did_save(const Json &params) {
+    const auto uri = string_at(params, {"textDocument", "uri"});
+    if (uri && workspace && workspace->file(*uri) != nullptr) rebuild_workspace();
+  }
+
+  void on_did_change_configuration(const Json &params) {
+    const Json *settings = path(params, {"settings", "mariadb"});
+    if (settings == nullptr || !settings->IsObject()) return;
+    apply_settings(*settings);
+    rebuild_workspace();
+  }
+
+  void on_refresh_catalog(const std::string &id, const Json &params) {
+    rebuild_workspace();
+    if (Open_document *d = document(params)) {
+      if (d->live) d->live->refresh();
+    } else {
+      for (auto &[key, lc] : live) lc->refresh();
+    }
+    if (!id.empty()) reply_null(id);
+  }
+
+  // What a request about `d` sees; the outline is read in the job.
+  struct Request_sources {
+    std::shared_ptr<const Snapshot> snapshot;
+    std::shared_ptr<Outline_cache> outline;
+    Catalog_sources catalogs;
+  };
+
+  Request_sources sources(Open_document &d) {
+    Request_sources r;
+    r.snapshot = d.doc.snapshot();
+    r.outline = d.outline;
+    r.catalogs.workspace = workspace;
+    if (d.live) r.catalogs.live = d.live->snapshot();
+    r.catalogs.schema_hint = d.schema_hint;
+    return r;
+  }
+
+  // The document's outline for a request job.  `fresh`: of this very
+  // snapshot (definitions need its offsets).  Otherwise the last one built
+  // will do, and a newer one is folded in the background.
+  std::shared_ptr<const Outline> document_outline(const Snapshot &snap,
+                                                  const std::shared_ptr<const Snapshot> &keep,
+                                                  const std::shared_ptr<Outline_cache> &cache,
+                                                  bool fresh) {
+    if (fresh) return outline_of(snap, *cache);
+    std::shared_ptr<const Outline> have;
+    bool schedule = false;
+    {
+      std::lock_guard lock(cache->mutex);
+      have = cache->outline;
+      if ((!have || cache->generation != snap.generation) && !cache->rebuilding &&
+          (have || snap.text->size() >= k_sync_outline_limit)) {
+        cache->rebuilding = true;
+        schedule = true;
+      }
+    }
+    if (!have && snap.text->size() < k_sync_outline_limit) return outline_of(snap, *cache);
+    if (schedule) {
+      // Queued by the loop thread: a job never submits to its own pool,
+      // which may be shutting down.
+      inbox->post([this, keep, cache] {
+        request_pool->submit(k_priority_cold, [this, keep, cache](Parser_cache &) {
+          struct Done {
+            Outline_cache &c;
+            ~Done() {
+              std::lock_guard lock(c.mutex);
+              c.rebuilding = false;
+            }
+          } done{*cache};
+          (void)outline_of(*keep, *cache);
+        });
+      });
+    }
+    return have;
+  }
+
+  // Runs `f(sources, snapshot, cache)` as a request about `d` at the
+  // position in params.
+  template <typename F>
+  void position_request(const std::string &id, Open_document *d, const Json &params, bool fresh,
+                        F f) {
+    const auto pos = position_of(member(params, "position"));
+    if (d == nullptr || !pos) return reply_error(id, k_invalid_params, "position expected");
+    auto src = sources(*d);
+    run_request(id, [this, src = std::move(src), pos = *pos, fresh, f = std::move(f)](
+                        Json_writer &w, Parser_cache &cache) mutable {
+      src.catalogs.document = document_outline(*src.snapshot, src.snapshot, src.outline, fresh);
+      f(w, *src.snapshot, pos, src.catalogs, cache);
+    });
   }
 
   void on_viewport(const Json &params) {
@@ -1102,6 +1425,100 @@ struct Server::Impl {
       w.Key("data");
       write_uints(w, data);
       w.EndObject();
+    });
+  }
+
+  // ---- P5: completion, hover, navigation
+
+  void on_completion(const std::string &id, Open_document *d, const Json &params) {
+    Completion_options o;
+    o.version_id = d != nullptr ? d->doc.options().version_id : k_default_version_id;
+    o.upper_case_keywords = upper_keywords;
+    o.snippets = snippets;
+    position_request(id, d, params, false,
+                     [o](Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
+                         Parser_cache &cache) {
+                       Completion_options co = o;
+                       co.version_id = s.version_id;
+                       completion(w, s, pos, c, cache, co);
+                     });
+  }
+
+  void on_hover(const std::string &id, Open_document *d, const Json &params) {
+    position_request(id, d, params, false,
+                     [](Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
+                        Parser_cache &cache) { hover(w, s, pos, c, cache); });
+  }
+
+  void on_definition(const std::string &id, Open_document *d, const Json &params) {
+    const std::string uri = d != nullptr ? d->uri : std::string();
+    position_request(id, d, params, true,
+                     [uri](Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
+                           Parser_cache &cache) { definition(w, s, uri, pos, c, cache); });
+  }
+
+  void on_references(const std::string &id, Open_document *d, const Json &params) {
+    const std::string uri = d != nullptr ? d->uri : std::string();
+    const Json *decl = path(params, {"context", "includeDeclaration"});
+    const bool include = decl == nullptr || !decl->IsBool() || decl->GetBool();
+    position_request(id, d, params, false,
+                     [this, uri, include](Json_writer &w, const Snapshot &s, Position pos,
+                                          const Catalog_sources &c, Parser_cache &cache) {
+                       references(w, s, uri, pos, include, c, *parse_pool, cache,
+                                  k_priority_request);
+                     });
+  }
+
+  void on_highlight(const std::string &id, Open_document *d, const Json &params) {
+    position_request(id, d, params, false,
+                     [](Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
+                        Parser_cache &cache) { document_highlight(w, s, pos, c, cache); });
+  }
+
+  void on_prepare_rename(const std::string &id, Open_document *d, const Json &params) {
+    // A fresh outline, as rename uses: both must agree on what can be renamed.
+    position_request(id, d, params, true,
+                     [](Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
+                        Parser_cache &cache) {
+                       std::string error;
+                       if (!prepare_rename(w, s, pos, c, cache, &error)) throw Request_failed(error);
+                     });
+  }
+
+  void on_rename(const std::string &id, Open_document *d, const Json &params) {
+    const auto name = string_at(params, {"newName"});
+    if (!name) return reply_error(id, k_invalid_params, "newName expected");
+    const std::string uri = d != nullptr ? d->uri : std::string();
+    position_request(id, d, params, true,
+                     [this, uri, name = *name](Json_writer &w, const Snapshot &s, Position pos,
+                                               const Catalog_sources &c, Parser_cache &cache) {
+                       std::string error;
+                       if (!rename(w, s, uri, pos, name, c, *parse_pool, cache, k_priority_request,
+                                   &error)) {
+                         throw Request_failed(error);
+                       }
+                     });
+  }
+
+  void on_signature_help(const std::string &id, Open_document *d, const Json &params) {
+    position_request(id, d, params, false,
+                     [](Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
+                        Parser_cache &cache) { signature_help(w, s, pos, c, cache); });
+  }
+
+  void on_workspace_symbol(const std::string &id, const Json &params) {
+    if (id.empty()) return;
+    const std::string query = string_at(params, {"query"}).value_or("");
+    std::vector<std::tuple<std::string, std::shared_ptr<const Snapshot>, std::shared_ptr<Outline_cache>>>
+        docs;
+    for (auto &[uri, d] : documents) docs.emplace_back(uri, d->doc.snapshot(), d->outline);
+    run_request(id, [this, query, docs, ws = workspace](Json_writer &w, Parser_cache &) {
+      std::vector<Symbol_document> out;
+      for (const auto &[uri, snap, cache] : docs) {
+        // Fresh: the locations are computed from this snapshot's text.
+        out.push_back({uri, snap, document_outline(*snap, snap, cache, true)});
+      }
+      workspace_symbols(w, query, out, ws.get(), 1000);
     });
   }
 };

@@ -23,6 +23,8 @@
 //   mariadb-lsp split   FILE     the statement index of a SQL file
 //   mariadb-lsp tokens  FILE     the tokens of every statement
 //   mariadb-lsp tree    FILE     the parse tree of every statement
+//   mariadb-lsp complete --at L:C FILE   completion candidates at a position
+//   mariadb-lsp connections      the connections the shell's secret store holds
 
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -40,7 +42,13 @@
 #include <string>
 #include <vector>
 
+#include "mdbls/catalog_view.h"
 #include "mdbls/charset.h"
+#include "mdbls/completion.h"
+#include "mdbls/connection_uri.h"
+#include "mdbls/live_catalog.h"
+#include "mdbls/navigation.h"
+#include "mdbls/secret_store.h"
 #include "mdbls/line_map.h"
 #include "mdbls/lsp/json_position.h"
 #include "mdbls/lsp/server.h"
@@ -61,7 +69,7 @@ constexpr int k_exit_usage = 2;
 
 const char *const k_usage =
     "usage: mariadb-lsp <command> [options] FILE|-...\n"
-    "       mariadb-lsp lsp [--stdio] [--threads N] [--log FILE]\n"
+    "       mariadb-lsp lsp [--stdio] [--threads N] [--log FILE] [--shell-bin-dir DIR]\n"
     "\n"
     "commands:\n"
     "  lsp      run the language server: LSP over stdin and stdout\n"
@@ -72,6 +80,11 @@ const char *const k_usage =
     "  split    list the statements of a SQL file\n"
     "  tokens   list the tokens of every statement of a SQL file\n"
     "  tree     print the parse tree of every statement of a SQL file\n"
+    "  complete list the completion candidates at --at LINE:COL of a SQL file,\n"
+    "           from the file's own schema objects (and --connection's)\n"
+    "  connections\n"
+    "           list the connections MariaDB Shell's secret store holds for the\n"
+    "           MCP server and the GUI, by URI\n"
     "\n"
     "options:\n"
     "  --sql-mode LIST    the sql_mode at the start of the file; SET sql_mode in\n"
@@ -84,6 +97,14 @@ const char *const k_usage =
     "                     (major*10000 + minor*100 + patch; default 130100)\n"
     "  --format tsv|json  output format (default tsv)\n"
     "  --text             split: include each statement's text in the output\n"
+    "  --at LINE:COL      complete: the position, 1-based (COL in characters)\n"
+    "  --connection URI   check, outline, complete: read the sql_mode, the version\n"
+    "                     and the catalog from this server (its password from the\n"
+    "                     shell's secret store); check then also reports tables and\n"
+    "                     columns the server does not have, as warnings\n"
+    "  --shell-bin-dir DIR\n"
+    "                     where mariadb-shell and its secret store helpers are\n"
+    "                     (default: mariadb-shell on PATH)\n"
     "  --threads N        check: parser threads (default: one per CPU core)\n"
     "  --max-errors N     check: stop listing errors after N per file (default 100)\n"
     "  --log FILE         lsp: write a log to FILE\n"
@@ -108,7 +129,15 @@ struct Options {
   bool text = false;
   bool stats = false;
   std::string log;
+  std::optional<mdbls::Position> at;  // 0-based
+  std::string connection;
+  std::string shell_bin_dir;
+  bool sql_mode_given = false;
+  bool version_given = false;
 };
+
+// The --connection server's catalog, read once.
+std::shared_ptr<const mdbls::Live_snapshot> g_live;
 
 using Clock = std::chrono::steady_clock;
 using mdbls::lsp::write_position;
@@ -306,6 +335,7 @@ void run_tokens(const Options &o, const std::string &text, const mdbls::Line_map
 }
 
 struct Check_summary {
+  size_t warnings = 0;
   size_t sql_statements = 0;
   size_t errors = 0;
 };
@@ -336,6 +366,23 @@ Check_summary run_check(const Options &o, const std::string &file, const std::st
   }
   if (index.open_at_end() != mdbls::Open_context::none) ++sum.errors;
   for (const auto &e : index.errors()) notes.push_back({0, e});
+
+  // With --connection: the tables and columns the server does not have.
+  std::vector<mdbls::Name_issue> issues;
+  if (g_live) {
+    mdbls::Outline_options oo;
+    oo.version_id = o.index.version_id;
+    auto outline = std::make_shared<mdbls::Outline>(mdbls::build_outline(text, index, pool, oo));
+    mdbls::Catalog_view view;
+    view.add({std::shared_ptr<const mdbls::Catalog>(outline, &outline->catalog),
+              mdbls::Layer_kind::document, {}});
+    view.add({g_live->catalog, mdbls::Layer_kind::live, g_live->server.current_schema});
+    mdbls::Reference_options ro;
+    ro.version_id = o.index.version_id;
+    ro.initial_schema = g_live->server.current_schema;
+    issues = mdbls::unknown_names(text, index, view, pool, ro);
+    sum.warnings = issues.size();
+  }
 
   auto pos = [&](uint32_t off) { return lines.position(text, off); };
   if (w != nullptr) {
@@ -386,6 +433,23 @@ Check_summary run_check(const Options &o, const std::string &file, const std::st
       w->EndObject();
     }
     w->EndArray();
+    if (g_live) {
+      w->Key("warnings");
+      w->StartArray();
+      for (const auto &is : issues) {
+        w->StartObject();
+        w->Key("start");
+        write_position(*w, pos(is.range.begin));
+        w->Key("offset");
+        w->Uint(is.range.begin);
+        w->Key("length");
+        w->Uint(is.range.end - is.range.begin);
+        w->Key("message");
+        w->String(is.message.c_str());
+        w->EndObject();
+      }
+      w->EndArray();
+    }
     w->Key("notes");
     w->StartArray();
     for (const auto &n : notes) {
@@ -417,6 +481,7 @@ Check_summary run_check(const Options &o, const std::string &file, const std::st
     *out += where(static_cast<uint32_t>(text.size())) +
             ": error: the file ends inside an unterminated " + open + "\n";
   }
+  for (const auto &is : issues) *out += where(is.range.begin) + ": warning: " + is.message + "\n";
   for (const auto &n : notes) *out += where(n.offset) + ": note: " + n.message + "\n";
   return sum;
 }
@@ -501,6 +566,77 @@ void run_tree(const Options &o, const std::string &text, const mdbls::Line_map &
   std::cout << out;
 }
 
+void run_complete(const Options &o, const std::string &text, const mdbls::Line_map &lines,
+                  const mdbls::Statement_index &index, mdbls::Parser_pool &pool) {
+  mdbls::Outline_options oo;
+  oo.version_id = o.index.version_id;
+  auto outline = std::make_shared<mdbls::Outline>(mdbls::build_outline(text, index, pool, oo));
+  const uint32_t offset = lines.offset(text, *o.at);
+  mdbls::Catalog_view view;
+  view.add({std::shared_ptr<const mdbls::Catalog>(outline, &outline->catalog),
+            mdbls::Layer_kind::document, {}});
+  if (g_live) view.add({g_live->catalog, mdbls::Layer_kind::live, g_live->server.current_schema});
+  const auto at = mdbls::statement_at(index, offset);
+  view.set_current_schema(mdbls::schema_in_use(text, index, at ? *at : index.find(offset)));
+  mdbls::Parser_cache cache;
+  mdbls::Completion_options co;
+  co.version_id = o.index.version_id;
+  auto t0 = Clock::now();
+  const auto list = mdbls::complete(text, index, offset, view, cache, co);
+  const double first_ms = ms_since(t0);
+  // With --stats, the time of a warm call too: the first one also builds
+  // the keyword tables and the parsers.
+  std::vector<double> warm;
+  for (int k = 0; o.stats && k < 20; ++k) {
+    t0 = Clock::now();
+    (void)mdbls::complete(text, index, offset, view, cache, co);
+    warm.push_back(ms_since(t0));
+  }
+  std::sort(warm.begin(), warm.end());
+  if (o.json) {
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
+    w.StartObject();
+    w.Key("context");
+    w.String(mdbls::name_kind_name(list.context));
+    w.Key("prefix");
+    w.String(list.prefix.c_str());
+    w.Key("replace");
+    mdbls::lsp::write_range(w, text, lines, list.replace_begin, list.replace_end);
+    w.Key("incomplete");
+    w.Bool(list.incomplete);
+    w.Key("items");
+    w.StartArray();
+    for (const auto &it : list.items) {
+      w.StartObject();
+      w.Key("label");
+      w.String(it.label.c_str());
+      w.Key("kind");
+      w.String(mdbls::completion_kind_name(it.kind));
+      w.Key("detail");
+      w.String(it.detail.c_str());
+      w.Key("insert");
+      w.String(it.insert_text.c_str());
+      w.EndObject();
+    }
+    w.EndArray();
+    w.EndObject();
+    std::cout << buf.GetString() << '\n';
+  } else {
+    std::cout << "# context " << mdbls::name_kind_name(list.context) << ", prefix '"
+              << list.prefix << "', " << list.items.size() << " items"
+              << (list.incomplete ? " (more)" : "") << "\n";
+    for (const auto &it : list.items) {
+      std::cout << mdbls::completion_kind_name(it.kind) << '\t' << it.label << '\t'
+                << escape_tsv(it.detail, 80) << '\n';
+    }
+  }
+  if (o.stats) {
+    std::fprintf(stderr, "complete: first %.2f ms, warm median %.2f ms, max %.2f ms\n", first_ms,
+                 warm[warm.size() / 2], warm.back());
+  }
+}
+
 std::optional<Options> parse_args(int argc, char **argv) {
   Options o;
   for (int i = 1; i < argc; ++i) {
@@ -531,6 +667,7 @@ std::optional<Options> parse_args(int argc, char **argv) {
       const auto v = value();
       if (!v) return std::nullopt;
       o.index.sql_mode = *v;
+      o.sql_mode_given = true;
     } else if (arg == "--charset") {
       const auto v = value();
       if (!v) return std::nullopt;
@@ -552,6 +689,19 @@ std::optional<Options> parse_args(int argc, char **argv) {
         return std::nullopt;
       }
       o.index.version_id = *n;
+      o.version_given = true;
+    } else if (arg == "--connection") {
+      const auto v = value();
+      if (!v) return std::nullopt;
+      if (!mdbls::parse_connection_uri(*v)) {
+        std::cerr << "mariadb-lsp: --connection is not a connection URI\n";
+        return std::nullopt;
+      }
+      o.connection = *v;
+    } else if (arg == "--shell-bin-dir") {
+      const auto v = value();
+      if (!v) return std::nullopt;
+      o.shell_bin_dir = *v;
     } else if (arg == "--threads") {
       const auto n = number();
       if (!n) return std::nullopt;
@@ -571,6 +721,15 @@ std::optional<Options> parse_args(int argc, char **argv) {
       const auto v = value();
       if (!v) return std::nullopt;
       o.log = *v;
+    } else if (arg == "--at") {
+      const auto v = value();
+      if (!v) return std::nullopt;
+      unsigned line = 0, col = 0;
+      if (std::sscanf(v->c_str(), "%u:%u", &line, &col) != 2 || line == 0 || col == 0) {
+        std::cerr << "mariadb-lsp: --at is LINE:COL, both from 1\n";
+        return std::nullopt;
+      }
+      o.at = mdbls::Position{line - 1, col - 1};
     } else if (arg == "--stdio") {
       // The default and only transport.
     } else if (arg == "--text") {
@@ -587,21 +746,26 @@ std::optional<Options> parse_args(int argc, char **argv) {
     }
   }
   if (o.command != "split" && o.command != "tokens" && o.command != "check" &&
-      o.command != "tree" && o.command != "outline" && o.command != "lsp") {
+      o.command != "tree" && o.command != "outline" && o.command != "lsp" &&
+      o.command != "complete" && o.command != "connections") {
     std::cerr << (o.command.empty() ? std::string("mariadb-lsp: no command given\n")
                                     : "mariadb-lsp: unknown command " + o.command + "\n")
               << k_usage;
     return std::nullopt;
   }
-  if (o.command == "lsp") {
+  if (o.command == "lsp" || o.command == "connections") {
     if (!o.files.empty()) {
-      std::cerr << "mariadb-lsp: lsp takes no files\n";
+      std::cerr << "mariadb-lsp: " << o.command << " takes no files\n";
       return std::nullopt;
     }
     return o;
   }
   if (o.files.empty()) {
     std::cerr << "mariadb-lsp: no input file (use - for stdin)\n";
+    return std::nullopt;
+  }
+  if (o.command == "complete" && !o.at) {
+    std::cerr << "mariadb-lsp: complete needs --at LINE:COL\n";
     return std::nullopt;
   }
   if (o.command != "check" && o.files.size() > 1) {
@@ -617,6 +781,7 @@ int run_lsp(const Options &o) {
   so.threads = o.threads;
   so.defaults = o.index;
   so.defaults.sql_mode = mdbls::normalize_sql_mode(o.index.sql_mode);
+  so.shell_bin_dir = o.shell_bin_dir;
   if (!o.log.empty()) {
     log.open(o.log, std::ios::app);
     if (!log) {
@@ -633,13 +798,92 @@ int run_lsp(const Options &o) {
 
 }  // namespace
 
+// mariadb-lsp connections
+int run_connections(const Options &o) {
+  const mdbls::Secret_store store({o.shell_bin_dir, ""});
+  if (!store.error().empty()) {
+    std::cerr << "mariadb-lsp: " << store.error() << "\n";
+    return k_exit_usage;
+  }
+  std::string error;
+  const auto conns = store.connections(&error);
+  if (!error.empty()) {
+    std::cerr << "mariadb-lsp: " << error << "\n";
+    return k_exit_usage;
+  }
+  if (o.json) {
+    rapidjson::StringBuffer buf;
+    rapidjson::Writer<rapidjson::StringBuffer> w(buf);
+    w.StartArray();
+    for (const auto &c : conns) {
+      w.StartObject();
+      w.Key("kind");
+      w.String(c.kind.c_str());
+      w.Key("uri");
+      w.String(c.uri.c_str());
+      w.Key("normalized");
+      const auto n = mdbls::normalize_connection_uri(c.uri);
+      if (n) {
+        w.String(n->c_str());
+      } else {
+        w.Null();
+      }
+      w.EndObject();
+    }
+    w.EndArray();
+    std::cout << buf.GetString() << '\n';
+  } else {
+    for (const auto &c : conns) std::cout << c.kind << '\t' << c.uri << '\n';
+  }
+  return k_exit_ok;
+}
+
+// A URI as it may be shown: normalized, so without its password.
+std::string redacted(const std::string &uri) {
+  return mdbls::normalize_connection_uri(uri).value_or("(the URI)");
+}
+
+// --connection: reads the server's catalog, sql_mode and version once.
+bool read_connection(Options &o) {
+  const auto uri = mdbls::parse_connection_uri(o.connection);
+  std::string error;
+  std::optional<std::string> password = uri->password;
+  if (!password) {
+    const mdbls::Secret_store store({o.shell_bin_dir, ""});
+    std::string source;
+    password = store.password_for(o.connection, &source, &error);
+    if (!password) {
+      std::cerr << "mariadb-lsp: --connection " << redacted(o.connection) << ": " << error << "\n";
+      return false;
+    }
+  }
+  auto snap = mdbls::fetch_live_catalog(*uri, std::move(*password), &error);
+  if (!snap) {
+    std::cerr << "mariadb-lsp: --connection " << redacted(o.connection) << ": " << error << "\n";
+    return false;
+  }
+  if (!o.sql_mode_given) o.index.sql_mode = mdbls::normalize_sql_mode(snap->server.sql_mode);
+  if (!o.version_given && mdbls::version_id_supported(snap->server.version_id)) {
+    o.index.version_id = snap->server.version_id;
+  }
+  if (o.stats) {
+    std::fprintf(stderr, "connection: server %s, sql_mode %s, %zu tables, %zu columns\n",
+                 snap->server.version.c_str(), snap->server.sql_mode.c_str(), snap->tables,
+                 snap->columns);
+  }
+  g_live = std::make_shared<const mdbls::Live_snapshot>(std::move(*snap));
+  return true;
+}
+
 int main(int argc, char **argv) {
-  const auto o = parse_args(argc, argv);
+  auto o = parse_args(argc, argv);
   if (!o) return k_exit_usage;
   if (o->command == "lsp") return run_lsp(*o);
+  if (o->command == "connections") return run_connections(*o);
+  if (!o->connection.empty() && !read_connection(*o)) return k_exit_usage;
 
   std::unique_ptr<mdbls::Parser_pool> pool;
-  if (o->command == "check" || o->command == "outline") {
+  if (o->command == "check" || o->command == "outline" || o->command == "complete") {
     pool = std::make_unique<mdbls::Parser_pool>(o->threads);
   }
 
@@ -686,6 +930,8 @@ int main(int argc, char **argv) {
       run_tokens(*o, text, lines, index);
     } else if (o->command == "tree") {
       run_tree(*o, text, lines, index);
+    } else if (o->command == "complete") {
+      run_complete(*o, text, lines, index, *pool);
     } else if (o->command == "outline") {
       mdbls::Outline_options oo;
       oo.version_id = o->index.version_id;

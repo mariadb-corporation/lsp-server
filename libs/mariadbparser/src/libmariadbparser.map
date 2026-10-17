@@ -42,6 +42,9 @@
  * 2.2 adds one function, mdbp_lex_sql_prefix,
  * on its own new node, MDBPARSER_2.2, inheriting MDBPARSER_2.1 -- the same
  * rule, one more release.
+ *
+ * 2.3 adds the eight tree functions on MDBPARSER_2.3, and 2.4 the two
+ * keyword-table readers on MDBPARSER_2.4.
  */
 MDBPARSER_2.0 {
     global:
@@ -78,3 +81,9 @@ MDBPARSER_2.3 {
         mdbp_grammar_rule_length;
         mdbp_grammar_token_symbol;
 } MDBPARSER_2.2;
+
+MDBPARSER_2.4 {
+    global:
+        mdbp_keyword_count;
+        mdbp_keyword_at;
+} MDBPARSER_2.3;

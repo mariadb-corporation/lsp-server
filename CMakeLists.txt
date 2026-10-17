@@ -87,6 +87,11 @@ endif()
 
 enable_testing()
 
+# A MariaDB Shell build's binary directory: the secret store tests talk to
+# its mariadb-secret-store-plaintext helper, and are skipped without it.
+set(MDBLS_SHELL_BIN_DIR "${PROJECT_SOURCE_DIR}/../mariadb-shell/build/bin" CACHE PATH
+    "Directory of a MariaDB Shell build's binaries, for the secret store tests")
+
 add_subdirectory(libs/mariadbparser)
 add_subdirectory(libs/sqlsplitter)
 add_subdirectory(libs/mariadblanguageserver)

@@ -50,13 +50,20 @@ add_test(NAME mariadb-lsp.tree COMMAND mariadb-lsp tree "${_fixtures}/mrs_gramma
 
 # End-to-end tests of the language server (tests/e2e): Python 3, standard
 # library only.  MDBLS_E2E_LARGE_MB sets the size of the generated dump the
-# large-file tests open; MDBLS_LARGE_TESTS adds a run at 256 MB.
+# large-file tests open; MDBLS_LARGE_TESTS adds a run at 256 MB.  The
+# completion latency bound is P5's 20 ms (p95 at 1 MB) for optimized builds.
+# The live-connection tests need mariadbd on PATH and MDBLS_SHELL_BIN_DIR.
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
+  if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$")
+    set(_p95 20)
+  else()
+    set(_p95 100)
+  endif()
   add_test(NAME mariadb-lsp.e2e
            COMMAND Python3::Interpreter -m unittest discover -s "${PROJECT_SOURCE_DIR}/tests/e2e" -v)
   set_tests_properties(mariadb-lsp.e2e PROPERTIES
-    ENVIRONMENT "MARIADB_LSP=$<TARGET_FILE:mariadb-lsp>;MDBLS_E2E_LARGE_MB=16"
+    ENVIRONMENT "MARIADB_LSP=$<TARGET_FILE:mariadb-lsp>;MDBLS_E2E_LARGE_MB=16;MDBLS_COMPLETION_P95_MS=${_p95};MDBLS_SHELL_BIN_DIR=${MDBLS_SHELL_BIN_DIR}"
     TIMEOUT 300)
   option(MDBLS_LARGE_TESTS "Run the end-to-end tests on a 256 MB dump too" OFF)
   if(MDBLS_LARGE_TESTS)

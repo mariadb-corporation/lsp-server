@@ -38,7 +38,8 @@ target_link_libraries(run_unit_tests PRIVATE
   $<$<BOOL:${WITH_MARIADB_CLIENT}>:mariadb::client>)
 target_compile_definitions(run_unit_tests PRIVATE
   MDBP_LEX_FIXTURE_DIR="${PROJECT_SOURCE_DIR}/libs/mariadbparser/tests/lex-fixtures"
-  MDBLS_SQL_FIXTURE_DIR="${PROJECT_SOURCE_DIR}/tests/fixtures/sql")
+  MDBLS_SQL_FIXTURE_DIR="${PROJECT_SOURCE_DIR}/tests/fixtures/sql"
+  MDBLS_SHELL_BIN_DIR="${MDBLS_SHELL_BIN_DIR}")
 set_target_properties(run_unit_tests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 

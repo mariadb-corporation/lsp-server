@@ -130,9 +130,39 @@ Column *Table::column(std::string_view n) {
   return it == columns.end() ? nullptr : &*it;
 }
 
+const Column *Table::column(std::string_view n) const {
+  return const_cast<Table *>(this)->column(n);
+}
+
 Table *Schema::table(std::string_view n) {
   auto it = find_named(tables, n);
   return it == tables.end() ? nullptr : &*it;
+}
+
+const Table *Schema::table(std::string_view n) const {
+  return const_cast<Schema *>(this)->table(n);
+}
+
+const View *Schema::view(std::string_view n) const {
+  auto &v = const_cast<std::vector<View> &>(views);
+  auto it = find_named(v, n);
+  return it == v.end() ? nullptr : &*it;
+}
+
+const Routine *Schema::routine(std::string_view n) const {
+  auto &v = const_cast<std::vector<Routine> &>(routines);
+  auto it = find_named(v, n);
+  return it == v.end() ? nullptr : &*it;
+}
+
+const Schema *Catalog::find(std::string_view n) const {
+  return const_cast<Catalog *>(this)->find_schema(n);
+}
+
+Catalog Catalog::from_schemas(std::vector<Schema> schemas) {
+  Catalog c;
+  c.m_schemas = std::move(schemas);
+  return c;
 }
 
 bool Schema::empty() const {
@@ -220,7 +250,8 @@ class Catalog_fold {
   std::string text(uint32_t n) const { return n == npos ? "" : collapse(raw(n)); }
   std::string name_of(uint32_t n) const { return n == npos ? "" : unquote_identifier(collapse(raw(n))); }
   Range range(uint32_t n) const { return n == npos ? stmt_ : Range{t_.begin(n), t_.end(n)}; }
-  Origin origin(uint32_t name_node) const { return {stmt_, range(name_node)}; }
+  Origin origin(uint32_t name_node) const { return {stmt_, range(name_node), c_.m_source}; }
+  Origin origin(Range statement, Range name) const { return {statement, name, c_.m_source}; }
   uint32_t child(uint32_t n, int sym) const { return n == npos ? npos : t_.child(n, sym); }
   uint32_t find(uint32_t n, int sym) const { return n == npos ? npos : t_.find(n, sym); }
   std::vector<uint32_t> find_all(uint32_t n, int sym) const {
@@ -582,7 +613,7 @@ Foreign_key Catalog_fold::references(uint32_t refs, std::string name,
     if (t_.node(ch[i + 1]).symbol == s_.UPDATE_SYM) fk.on_update = action;
     if (t_.node(ch[i + 1]).symbol == s_.DELETE_SYM) fk.on_delete = action;
   }
-  fk.origin = {range(at), range(at)};
+  fk.origin = origin(range(at), range(at));
   return fk;
 }
 
@@ -596,7 +627,7 @@ void Catalog_fold::key_def(uint32_t n, Table &tb) {
 
   if (has_child(n, s_.FOREIGN)) {
     Foreign_key fk = references(child(n, s_.references), name, cols, n);
-    fk.origin = {range(n), non_empty(id) ? range(id) : range(n)};
+    fk.origin = origin(range(n), non_empty(id) ? range(id) : range(n));
     auto it = find_named(tb.foreign_keys, fk.name);
     if (!fk.name.empty() && it != tb.foreign_keys.end()) *it = std::move(fk);
     else tb.foreign_keys.push_back(std::move(fk));
@@ -605,7 +636,7 @@ void Catalog_fold::key_def(uint32_t n, Table &tb) {
   Index ix;
   ix.name = name;
   ix.columns = cols;
-  ix.origin = {range(n), non_empty(id) ? range(id) : range(n)};
+  ix.origin = origin(range(n), non_empty(id) ? range(id) : range(n));
   if (const uint32_t ckt = child(n, s_.constraint_key_type); ckt != npos) {
     ix.kind = has_child(ckt, s_.PRIMARY_SYM) ? "primary" : "unique";
   } else if (first == s_.fulltext) {
@@ -641,7 +672,7 @@ void Catalog_fold::check_def(uint32_t n, Table &tb) {
   const uint32_t cc = child(n, s_.check_constraint);
   const uint32_t e = find(cc, s_.expr);
   ck.expression = text(e != npos ? e : cc);
-  ck.origin = {range(n), range(n)};
+  ck.origin = origin(range(n), range(n));
   tb.checks.push_back(std::move(ck));
 }
 

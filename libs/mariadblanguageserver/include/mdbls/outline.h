@@ -50,6 +50,12 @@ struct Outline_options {
 Outline build_outline(std::string_view text, const Statement_index &index, Parser_pool &pool,
                       const Outline_options &options = {});
 
+// The same, folding into `outline` after what it holds already: one more
+// file of a script spread over several.  `source` is what the new origins
+// record (Origin::source).
+void fold_outline(Outline &outline, std::string_view text, const Statement_index &index,
+                  Parser_pool &pool, const Outline_options &options = {}, uint32_t source = 0);
+
 // The outline as JSON, format 1; positions are LSP positions (0-based line,
 // UTF-16 column).  docs/outline-format.md describes it.
 std::string outline_json(const Outline &outline, std::string_view text, const Line_map &lines,

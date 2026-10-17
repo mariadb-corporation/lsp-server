@@ -28,11 +28,16 @@ mariadb-lsp split FILE            # the statements: position, kind, delimiter, s
 mariadb-lsp split --format json --text FILE
 mariadb-lsp tokens FILE           # the tokens of every statement
 mariadb-lsp tree FILE             # the parse tree of every statement
+mariadb-lsp complete --at 12:8 FILE   # the completion candidates at line 12, column 8
+mariadb-lsp connections           # the connections MariaDB Shell's secret store holds
+mariadb-lsp check --connection app@db.example.com/shop FILE
+                                  # with the server's sql_mode, version and catalog:
+                                  # unknown tables and columns are warnings
 ```
 
 The language server's capabilities, options and MariaDB-specific messages are described in [docs/language-server.md](docs/language-server.md).
 
-`--sql-mode`, `--delimiter` and `--version-id` set the state at the start of the file; `SET sql_mode` and `DELIMITER` in the file are followed from there. `mariadb-lsp --help` lists all options.
+`--sql-mode`, `--delimiter` and `--version-id` set the state at the start of the file; `SET sql_mode` and `DELIMITER` in the file are followed from there. `--connection URI` reads them from a server instead, unless given; the password comes from MariaDB Shell's secret store, found next to `mariadb-shell` on `PATH` or in `--shell-bin-dir`. `mariadb-lsp --help` lists all options.
 
 Files are read as UTF-8. A Latin-1 file is converted to UTF-8 first when `--charset latin1` is given, or when it declares `SET NAMES latin1` (also in a versioned comment, as mysqldump writes it) before its first byte that is not UTF-8. Line and column numbers stay those of the original file. Any other file that is not valid UTF-8 is an error naming the first such byte, with exit status 2.
 
@@ -42,10 +47,11 @@ Files are read as UTF-8. A Latin-1 file is converted to UTF-8 first when `--char
 | --- | --- |
 | `libs/mariadbparser/` | the MariaDB server grammar and lexer as a standalone C library ([README](libs/mariadbparser/README.md)) |
 | `libs/sqlsplitter/` | MariaDB Shell's SQL statement splitter, maintained by hand ([UPSTREAM.md](libs/sqlsplitter/UPSTREAM.md)) |
-| `libs/mariadblanguageserver/` | the language server engine (statement index, line map, sql_mode tracking, parser pool, syntax check, parse trees, schema catalog, outline, documents, semantic tokens) and the LSP server (`src/lsp/`) |
-| `src/mariadb-lsp/` | the `mariadb-lsp` command: `lsp`, `check`, `outline`, `split`, `tokens`, `tree` |
+| `libs/mariadblanguageserver/` | the language server engine (statement index, line map, sql_mode tracking, parser pool, syntax check, parse trees, schema catalog, outline, documents, semantic tokens, name analysis, completion, navigation, workspace and live catalogs, connection URIs, the shell's secret store) and the LSP server (`src/lsp/`) |
+| `src/mariadb-lsp/` | the `mariadb-lsp` command: `lsp`, `check`, `outline`, `split`, `tokens`, `tree`, `complete`, `connections` |
 | `tests/fixtures/sql/` | SQL files used by tests (sakila schema, world, a mysqldump file) |
 | `scripts/gen_fixture_dump.py` | writes a mysqldump-style file of a given size for benchmarks |
+| `scripts/gen_builtin_functions.py` | writes the built-in function table (names, call forms, summaries) from a MariaDB server tree; run by hand, output committed |
 | `unittest/` | GoogleTest suites, built into one `run_unit_tests` binary |
 | `tests/e2e/` | end-to-end tests of the language server, in Python |
 | `cmake/` | build modules, most copied from MariaDB Shell |

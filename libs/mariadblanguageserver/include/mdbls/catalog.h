@@ -34,10 +34,13 @@ struct Range {
   uint32_t end = 0;
 };
 
-// Where an object was defined: the whole statement, and its name.
+// Where an object was defined: the whole statement, and its name, in the
+// text of source `source` (0 for a catalog folded from one document; the
+// file's position in the list for a workspace catalog).
 struct Origin {
   Range statement;
   Range name;
+  uint32_t source = 0;
 };
 
 struct Column {
@@ -88,6 +91,7 @@ struct Table {
   Origin origin;
 
   Column *column(std::string_view name);
+  const Column *column(std::string_view name) const;
 };
 
 struct View {
@@ -137,6 +141,9 @@ struct Schema {
   Origin origin;
 
   Table *table(std::string_view name);
+  const Table *table(std::string_view name) const;
+  const View *view(std::string_view name) const;
+  const Routine *routine(std::string_view name) const;
   bool empty() const;
 };
 
@@ -179,6 +186,13 @@ class Catalog {
   const std::vector<Named_object> &rest_roles() const { return m_roles; }
   const std::vector<Named_object> &rest_users() const { return m_users; }
   const std::string &current_schema() const { return m_current; }
+  const Schema *find(std::string_view schema) const;
+
+  // The source index new origins get (see Origin); 0 by default.
+  void set_source(uint32_t source) { m_source = source; }
+
+  // A catalog made of `schemas` as they are, for one read from a server.
+  static Catalog from_schemas(std::vector<Schema> schemas);
 
   // Things the fold could not apply, such as ALTER TABLE of a table the
   // script never created: (statement offset, message).
@@ -198,6 +212,7 @@ class Catalog {
   std::vector<Named_object> m_roles;
   std::vector<Named_object> m_users;
   std::vector<std::pair<uint32_t, std::string>> m_notes;
+  uint32_t m_source = 0;
 
   friend class Catalog_fold;
 };

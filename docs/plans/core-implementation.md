@@ -374,9 +374,27 @@ The same walk-up serves hover (object at offset → catalog entry), go-to-defini
 (→ the `CREATE` statement's range in the index, in this or another workspace file),
 and document highlight.
 
-**Built as:** not yet (P5). The pieces it binds to exist: `Statement_index::find()` for the
-statement at an offset, `Syntax_tree` for the walk-up, `mdbp_lex_sql_prefix()`, and the
-expected set, which `Statement_check::expected` already carries for every syntax error.
+**Built as (P5):** `complete()` (`include/mdbls/completion.h`) over `Statement_names`
+(`include/mdbls/sql_names.h`), which classifies a name token by the grammar rules above
+it (`table_ident`, `simple_ident`, `field_ident`, `key_part_simple`, `insert_ident`,
+`sp_name`, `call`, `use`, ...) and collects the tables in scope from the enclosing
+`query_specification`, `update`, `delete` and `insert` nodes, derived tables and CTEs
+included. The fallbacks are as planned, in order: the sentinel with the rest of the
+statement, the sentinel with the statement cut after it, then the partial tree and the
+tokens before the cursor (`classify_by_tokens`, `scanned_tables`); "replace the token
+under the cursor" is the first step, since the sentinel replaces the whole word. The
+partial word is found by scanning identifier bytes back from the cursor, not with
+`mdbp_lex_sql_prefix()`, so a word in backticks completes too. Keyword spellings come
+from MariaDB's keyword table, which libmariadbparser 2.4 exports
+(`mdbp_keyword_count()`, `mdbp_keyword_at()`). Against the plan: the expected set of a
+prefix that is already a complete statement comes from `mdbp_parse_tokens()` with the
+prefix's tokens and an `ABORT_SYM` appended; and a non-reserved keyword where a name may
+stand is offered only when the parser's expected set after it differs from that after a
+name, which costs one parse per keyword, so it is done only for the keywords matching
+the typed letters, cached per prefix, and skipped (list marked incomplete) when nothing
+is typed. Hover, definition, highlight, references and rename go through
+`Name_resolver` (`include/mdbls/navigation.h`). See `docs/language-server.md`,
+"Completion".
 
 ### 2.6 Keeping the index current while typing
 
@@ -452,6 +470,15 @@ are not folded; of the name-only objects only the REST ones are (`rest_auth_apps
 `rest_roles()`, `rest_users()`). The workspace catalog and the live-connection snapshot
 are P5.
 
+**Built as (P5):** `Catalog_view` (`include/mdbls/catalog_view.h`) looks names up in
+layers, the document's own DDL first, then the workspace catalog, then the connection's
+snapshot, as planned. The workspace catalog (`include/mdbls/workspace_catalog.h`) folds
+the files of `initializationOptions.catalogFiles` (a directory: its `*.sql` files sorted
+by path) in the order given into one `Outline` (`fold_outline()`); an `Origin` now
+records the file it came from (`source`). The live snapshot is built from
+`information_schema` by `fetch_live_catalog()` (`include/mdbls/live_catalog.h`,
+`Catalog::from_schemas()`).
+
 ### 2.8 LSP features in scope
 
 In the order they ship (§4): diagnostics; document symbols and the outline request;
@@ -475,6 +502,16 @@ Semantic tokens do not classify identifiers yet; that needs the P5 catalog. Of t
 messages, `mariadb/documentContext`, `mariadb/viewport`, `mariadb/outline` and
 `mariadb/parseProgress` exist; `mariadb/refreshCatalog` is P5, with completion and the rest
 of the list.
+
+**Built as (P5):** completion, hover, definition, document highlight, references (document
+scope), prepareRename and rename (aliases, CTEs, variables, and the tables, views, columns
+and routines the document defines; document scope), signature help (built-in functions
+from the server's help tables, stored functions and procedures) and workspace symbols are
+served, and `mariadb/refreshCatalog`. Signature help comes from a built-in function table
+that `scripts/gen_builtin_functions.py` writes once from the server tree
+(`src/builtin_functions.inc`: names from the function registries, call forms and summaries
+from `scripts/fill_help_tables.sql`), not from the extension's grammar tool, which has
+names only. Semantic tokens still do not classify identifiers.
 
 ### 2.9 The command-line interface
 
@@ -521,6 +558,13 @@ the text format is called `tsv`; `check` prints nothing on success rather than `
 `--connection`, `connections` and `--shell-bin-dir` are P5 with §2.11. Exit codes 0, 1
 and 2 are as planned.
 
+**Built as (P5):** `connections [--format json]`, `--connection URI` on `check`, `outline`
+and `complete`, and `--shell-bin-dir DIR` (also on `lsp`), as planned. With
+`--connection`, `check` reports the tables and columns the server and the file do not
+define as warnings (`FILE:LINE:COL: warning: unknown column ...`), which do not change
+the exit code. `complete --at LINE:COL FILE` was added: the completion candidates at a
+position, for debugging.
+
 ### 2.10 Library boundary
 
 `libmariadblanguageserver` (C++23 inside, C API outside, as the shell will embed it):
@@ -535,8 +579,9 @@ the library, not in the executable: `src/lsp/transport.cc`, `src/lsp/server.cc`,
 `src/lsp/features.cc` with the headers in `include/mdbls/lsp/`; `src/mariadb-lsp/main.cc`
 holds the CLI and starts the server. RapidJSON is a public dependency of the library
 (`include/mdbls/lsp/json_position.h` writes with it). The client library is built and
-linked as `mariadb::client` (`cmake/mariadb_client.cmake`), but only `unittest/client/`
-calls it yet.
+linked as `mariadb::client` (`cmake/mariadb_client.cmake`); since P5 the library links it
+for live connections (`src/live_catalog.cc`; `-DWITH_MARIADB_CLIENT=OFF` builds without,
+and connections then report that).
 
 ### 2.11 Live connections: URIs and the shell's secret store
 
@@ -603,8 +648,17 @@ through the editor or the LSP channel:
   logged, never written to diagnostics; the helper's stdout is scrubbed from logs the
   way the shell's `hide_secret` does.
 
-**Built as:** nothing yet (P5); `mariadb/documentContext` accepts `connection` and
-`currentSchema` and ignores them.
+**Built as (P5):** as described, in `include/mdbls/connection_uri.h` (parsing and the MCP
+plugin's normalisation, its test cases ported to `unittest/mariadblanguageserver/
+connection_t.cc`), `include/mdbls/secret_store.h` (helper selection, `get` and `list`,
+the lookup order GUI, MCP, then the shell's `password` secrets; tested against
+`mariadb-secret-store-plaintext`) and `include/mdbls/live_catalog.h` (one thread per
+connection; TLS as rest-daemon's `MySQLSession` sets it up). Against the plan: the
+connection is not kept open between refreshes; a refresh connects, reads and
+disconnects. The secret type is always `generic` (no tenant groups). The refresh interval
+defaults to off (`catalogRefreshSeconds`). The server's `sql_mode` and version apply to a
+document unless its `mariadb/documentContext` sets them. Errors are shown once per
+connection and message with `window/showMessage`.
 
 ---
 
@@ -919,6 +973,21 @@ Open items:
   edited statement in *target* under 100 ms p95; all e2e tests pass on three platforms.
 
 ### P5 — Completion, hover, navigation, live catalog (2–3 weeks)
+
+**Status 2026-10-17: done on macOS.** Completion (§2.5), hover, definition, document
+highlight, references and rename in document scope, signature help, workspace symbols,
+the workspace catalog (`catalogFiles`) and the live catalog of §2.11 are built and
+tested: 33 completion scenarios and the navigation, URI, secret store and workspace unit
+tests, and 17 end-to-end tests over LSP (`tests/e2e/test_language.py`). Completion at a
+1 MB document measured 0.21 ms p95 in a Release build (target 20 ms); ctest checks the
+bound. The live test starts a throwaway `mariadbd` the way the shell's sandboxes do and
+keeps its secrets in a private store written through `mariadb-secret-store-plaintext`;
+it covers the catalog, the server's `sql_mode` taking effect, `mariadb/refreshCatalog`,
+an unconfigured connection, `check --connection` and `connections`. ThreadSanitizer
+reports no race in the unit tests or the end-to-end run. libmariadbparser is 2.4 (the
+keyword table). Open: Linux and Windows untested (the secret store's Windows
+process code is written but has never run); semantic tokens still do not classify
+identifiers; references and rename stay within one document.
 
 - Sentinel loop (§2.5), keyword completion from the expected set with spelling mapping,
   catalog candidates, scope scanner fallback, completion item ranking and
