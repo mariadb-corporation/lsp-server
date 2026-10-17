@@ -33,7 +33,7 @@ Shell's binary directory, where the secret store helpers of live connections are
 | `textDocument/prepareRename`, `rename` | aliases, CTEs, variables, and tables, views, columns and routines the document itself defines; the edits cover the document, and the new name is quoted when it has to be |
 | `textDocument/signatureHelp` | the call forms of a built-in function, or a stored function's or procedure's parameters, with the active parameter; trigger characters `(` and `,` |
 | `workspace/symbol` | tables, views, routines, triggers, events, sequences and schemas of the open documents and the workspace catalog whose name contains the query; columns too when the query is not empty |
-| `workspace/didChangeConfiguration` | `settings.mariadb` takes the same keys as the initialization options; the workspace catalog is read again |
+| `workspace/didChangeConfiguration` | `settings.mariadb` takes the same keys as the initialization options; the workspace catalog is read again when `catalogFiles` changed |
 | `textDocument/didSave` | saving one of the workspace catalog's files reads the catalog again |
 
 Diagnostics carry `source: "mariadb"` and a `code`: `syntax-error`, `not-checked`,
@@ -75,7 +75,7 @@ completions snippets (`CONCAT($0)`).
 | `mariadb/outline` | client to server, request | `{textDocument: {uri}}`; the result is the outline JSON of [outline-format.md](outline-format.md), with `file` set to the URI |
 | `mariadb/refreshCatalog` | client to server, request | `{textDocument?: {uri}}`: reads the workspace catalog again, and the catalog of the document's connection (of every connection without `textDocument`), in the background; the result is `null` at once |
 | `mariadb/parseProgress` | server to client, notification | `{uri, version, checked, total, done}` while a large document is checked |
-| `window/showMessage` | server to client | a connection that cannot be used ("connection not configured", a failed login, an SSH URI), once per connection and message |
+| `window/showMessage` | server to client | a connection that cannot be used ("connection not configured", a failed login, an SSH URI), once per connection and message; a `connection` that is not a URI, which is refused (and never shown as given, since it may hold a password) |
 
 When the client announces `window.workDoneProgress`, a large document's check is also
 reported as work done progress ("Checking SQL").
@@ -129,7 +129,8 @@ when it connected itself (secret type `password`, `user@host:port`). A password
 written into the URI is used as it is. The helper is the one the shell would use: the
 variable `MARIADB_SHELL_CREDENTIAL_STORE_HELPER`, else `credentialStore.helper` in the
 shell's `options.json`, else `keychain` (macOS), `windows-credential` (Windows) or
-`login-path`.
+`login-path`. Helpers run one at a time, so none inherits another's pipes, and one that
+has not finished after 60 s (a keychain prompt nobody answers) is killed.
 
 Each connection has a thread of its own. It connects (5 s connect and 30 s read
 timeouts, TLS when the server offers it, the URI's `ssl-mode`, `ssl-ca`, `ssl-cert`,
@@ -138,7 +139,8 @@ timeouts, TLS when the server offers it, the URI's `ssl-mode`, `ssl-ca`, `ssl-ce
 with parameters, triggers and events from `information_schema` (not
 `performance_schema`), and disconnects. It does so when the connection is first named,
 on `mariadb/refreshCatalog`, every `catalogRefreshSeconds`, and after a failure again
-after 5 s, 10 s, 20 s, ... up to five minutes. A missing password or an SSH URI
+after 5 s, 10 s, 20 s, ... up to five minutes. Shutting down stops a reading between
+its queries. A missing password or an SSH URI
 (`mariadb+ssh://`, not supported) is not retried. No request waits for a connection:
 requests use the last catalog read. The password is held only until the connect call
 returns, and never logged.
