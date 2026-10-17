@@ -54,7 +54,7 @@ struct Workspace_catalog {
   Outline outline;
   std::vector<std::string> errors;  // files that could not be read
 
-  // The file `uri` names, or nullptr.
+  // The file `uri` names (by its path, links resolved), or nullptr.
   const Workspace_file *file(std::string_view uri) const;
 };
 

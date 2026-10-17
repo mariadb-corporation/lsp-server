@@ -55,9 +55,10 @@ std::string unquote_string(std::string_view s) {
   return out;
 }
 
-template <typename T>
-auto find_named(std::vector<T> &v, std::string_view name) {
-  return std::find_if(v.begin(), v.end(), [&](const T &x) { return iequals(x.name, name); });
+// The element of `v` (a vector, const or not) named `name`, or v.end().
+template <typename V>
+auto find_named(V &v, std::string_view name) {
+  return std::find_if(v.begin(), v.end(), [&](const auto &x) { return iequals(x.name, name); });
 }
 
 // Replaces the element of v named like x, or appends x when there is none.
@@ -118,7 +119,8 @@ std::string Routine::parameter_list() const {
 }
 
 const Column *Table::column(std::string_view n) const {
-  return const_cast<Table *>(this)->column(n);
+  auto it = find_named(columns, n);
+  return it == columns.end() ? nullptr : &*it;
 }
 
 Table *Schema::table(std::string_view n) {
@@ -127,23 +129,23 @@ Table *Schema::table(std::string_view n) {
 }
 
 const Table *Schema::table(std::string_view n) const {
-  return const_cast<Schema *>(this)->table(n);
+  auto it = find_named(tables, n);
+  return it == tables.end() ? nullptr : &*it;
 }
 
 const View *Schema::view(std::string_view n) const {
-  auto &v = const_cast<std::vector<View> &>(views);
-  auto it = find_named(v, n);
-  return it == v.end() ? nullptr : &*it;
+  auto it = find_named(views, n);
+  return it == views.end() ? nullptr : &*it;
 }
 
 const Routine *Schema::routine(std::string_view n) const {
-  auto &v = const_cast<std::vector<Routine> &>(routines);
-  auto it = find_named(v, n);
-  return it == v.end() ? nullptr : &*it;
+  auto it = find_named(routines, n);
+  return it == routines.end() ? nullptr : &*it;
 }
 
 const Schema *Catalog::find(std::string_view n) const {
-  return const_cast<Catalog *>(this)->find_schema(n);
+  auto it = find_named(m_schemas, n);
+  return it == m_schemas.end() ? nullptr : &*it;
 }
 
 Catalog Catalog::from_schemas(std::vector<Schema> schemas) {

@@ -437,13 +437,15 @@ void workspace_symbols(Json_writer &w, std::string_view query,
   }
   if (workspace != nullptr) {
     // A workspace file that is open is listed from its document already;
-    // compared as paths, since a client may spell the URI differently.
+    // matched by path, since a client may spell the URI differently.
+    std::vector<const Workspace_file *> open;
+    for (const auto &d : documents) {
+      if (const Workspace_file *wf = workspace->file(d.uri)) open.push_back(wf);
+    }
     std::vector<File> files;
     for (const auto &wf : workspace->files) {
-      const bool open = std::any_of(documents.begin(), documents.end(), [&](const Symbol_document &d) {
-        return d.uri == wf.uri || file_uri_to_path(d.uri) == wf.path;
-      });
-      files.push_back(open ? File{} : File{&wf.uri, wf.text, &wf.lines});
+      const bool is_open = std::find(open.begin(), open.end(), &wf) != open.end();
+      files.push_back(is_open ? File{} : File{&wf.uri, wf.text, &wf.lines});
     }
     list(workspace->outline.catalog,
          [&](uint32_t source) { return source < files.size() ? files[source] : File{}; });

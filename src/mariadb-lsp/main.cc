@@ -335,7 +335,6 @@ void run_tokens(const Options &o, const std::string &text, const mdbls::Line_map
 }
 
 struct Check_summary {
-  size_t warnings = 0;
   size_t sql_statements = 0;
   size_t errors = 0;
 };
@@ -381,7 +380,6 @@ Check_summary run_check(const Options &o, const std::string &file, const std::st
     ro.version_id = o.index.version_id;
     ro.initial_schema = g_live->server.current_schema;
     issues = mdbls::unknown_names(text, index, view, pool, ro);
-    sum.warnings = issues.size();
   }
 
   auto pos = [&](uint32_t off) { return lines.position(text, off); };

@@ -854,15 +854,17 @@ struct Server::Impl {
   }
 
   // The sql_mode and version of the document's connection, where the
-  // client did not set them.
+  // client did not set them; the defaults when it has no connection, or
+  // none read yet (so a connection taken away takes its settings along).
   void apply_server_options(const Open_document &d, Index_options &o) {
-    if (!d.live) return;
-    const auto snap = d.live->snapshot();
-    if (!snap) return;
-    if (!d.explicit_mode) o.sql_mode = normalize_sql_mode(snap->server.sql_mode);
-    if (!d.explicit_version && snap->server.version_id != 0 &&
-        version_id_supported(snap->server.version_id)) {
-      o.version_id = snap->server.version_id;
+    const auto snap = d.live ? d.live->snapshot() : nullptr;
+    if (!d.explicit_mode) {
+      o.sql_mode = snap ? normalize_sql_mode(snap->server.sql_mode) : options.defaults.sql_mode;
+    }
+    if (!d.explicit_version) {
+      const bool known = snap && snap->server.version_id != 0 &&
+                         version_id_supported(snap->server.version_id);
+      o.version_id = known ? snap->server.version_id : options.defaults.version_id;
     }
   }
 
@@ -871,15 +873,18 @@ struct Server::Impl {
   std::shared_ptr<Live_catalog> live_catalog(const std::string &uri) {
     const auto normalized = normalize_connection_uri(uri);
     if (!normalized) {
-      // Not shown as given: it may hold a password.
-      notify("window/showMessage", [&](Json_writer &w) {
-        w.StartObject();
-        w.Key("type");
-        w.Int(2);
-        w.Key("message");
-        w.String("MariaDB: the document's connection is not a connection URI");
-        w.EndObject();
-      });
+      // Once per URI (every open of a document would repeat it otherwise),
+      // and not shown as given: it may hold a password.
+      if (reported.insert("\n" + uri).second) {
+        notify("window/showMessage", [&](Json_writer &w) {
+          w.StartObject();
+          w.Key("type");
+          w.Int(2);
+          w.Key("message");
+          w.String("MariaDB: the document's connection is not a connection URI");
+          w.EndObject();
+        });
+      }
       return nullptr;
     }
     const std::string &key = *normalized;
@@ -956,8 +961,25 @@ struct Server::Impl {
     const Json *settings = path(params, {"settings", "mariadb"});
     if (settings == nullptr || !settings->IsObject()) return;
     const auto entries = catalog_entries;
+    const auto connection = default_connection;
     apply_settings(*settings);
     if (catalog_entries != entries) rebuild_workspace();
+    if (default_connection != connection) {
+      // The documents on the old default connection follow the new one;
+      // those the client gave a connection of their own stay.
+      std::shared_ptr<Live_catalog> was;
+      if (const auto key = normalize_connection_uri(connection)) {
+        if (const auto it = live.find(*key); it != live.end()) was = it->second;
+      }
+      const auto now = default_connection.empty() ? nullptr : live_catalog(default_connection);
+      for (auto &[uri, d] : documents) {
+        if (d->live != was) continue;
+        d->live = now;
+        Index_options o = d->doc.options();
+        apply_server_options(*d, o);
+        set_options(*d, o, true);
+      }
+    }
   }
 
   void on_refresh_catalog(const std::string &id, const Json &params) {

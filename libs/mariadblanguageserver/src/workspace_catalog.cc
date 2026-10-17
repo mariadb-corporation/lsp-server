@@ -31,6 +31,19 @@ namespace mdbls {
 
 namespace fs = std::filesystem;
 
+namespace {
+
+// A path as the catalog records it: links resolved as far as it exists, in
+// generic form, so a client's spelling of a file (/tmp/x on macOS, c:/x on
+// Windows) and the catalog's (/private/tmp/x, C:/x) compare equal.
+std::string catalog_path(const fs::path &p) {
+  std::error_code ec;
+  const fs::path canonical = fs::weakly_canonical(p, ec);
+  return (ec ? p : canonical).generic_string();
+}
+
+}  // namespace
+
 std::string file_uri_to_path(std::string_view uri) {
   constexpr std::string_view k_scheme = "file://";
   if (uri.size() < k_scheme.size() || !iequals(uri.substr(0, k_scheme.size()), k_scheme)) return {};
@@ -75,8 +88,9 @@ bool read_sql_file(const std::string &path, std::string *text) {
 
 const Workspace_file *Workspace_catalog::file(std::string_view uri) const {
   const std::string path = file_uri_to_path(uri);
+  const std::string canonical = path.empty() ? std::string() : catalog_path(path);
   for (const auto &f : files) {
-    if (f.uri == uri || (!path.empty() && f.path == path)) return &f;
+    if (f.uri == uri || (!canonical.empty() && f.path == canonical)) return &f;
   }
   return nullptr;
 }
@@ -87,9 +101,7 @@ std::vector<std::string> expand_catalog_paths(const std::vector<std::string> &en
   std::vector<std::string> out;
   std::set<std::string> seen;
   auto add = [&](const fs::path &p) {
-    std::error_code ec;
-    fs::path canonical = fs::weakly_canonical(p, ec);
-    const std::string s = (ec ? p : canonical).generic_string();
+    const std::string s = catalog_path(p);
     if (seen.insert(s).second) out.push_back(s);
   };
   for (const auto &e : entries) {

@@ -261,22 +261,26 @@ std::optional<std::string> run_program(const std::string &program,
     }
     CloseHandle(in_w);
   });
+  // Read on a thread too: the wait below bounds a helper that never finishes
+  // (a keychain prompt nobody answers) and so keeps its stdout open; killing
+  // it ends both the read and the write.
   std::string out;
-  char buf[4096];
-  DWORD n = 0;
-  while (ReadFile(out_r, buf, sizeof(buf), &n, nullptr) && n > 0) out.append(buf, n);
+  std::thread reader([&] {
+    char buf[4096];
+    DWORD n = 0;
+    while (ReadFile(out_r, buf, sizeof(buf), &n, nullptr) && n > 0) out.append(buf, n);
+  });
+  const bool timed_out =
+      WaitForSingleObject(pi.hProcess, static_cast<DWORD>(timeout.count())) != WAIT_OBJECT_0;
+  if (timed_out) TerminateProcess(pi.hProcess, 1);
   writer.join();
+  reader.join();
   CloseHandle(out_r);
-  if (WaitForSingleObject(pi.hProcess, static_cast<DWORD>(timeout.count())) != WAIT_OBJECT_0) {
-    TerminateProcess(pi.hProcess, 1);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-    return std::nullopt;
-  }
   DWORD code = 1;
   GetExitCodeProcess(pi.hProcess, &code);
   CloseHandle(pi.hProcess);
   CloseHandle(pi.hThread);
+  if (timed_out) return std::nullopt;
   if (exit_code != nullptr) *exit_code = static_cast<int>(code);
   return out;
 }
@@ -524,7 +528,8 @@ std::optional<std::string> Secret_store::password_for(std::string_view uri, std:
     return std::nullopt;
   }
   std::string list_error;
-  if (const auto specs = list("generic", &list_error)) {
+  const auto specs = list("generic", &list_error);
+  if (specs) {
     for (const auto &[kind, stored, spec] : stored_connections(*specs)) {
       if (normalize_connection_uri(stored) != want) continue;
       if (auto secret = get(*spec, error)) {
@@ -546,7 +551,8 @@ std::optional<std::string> Secret_store::password_for(std::string_view uri, std:
       }
     }
   }
-  if (error != nullptr) *error = "no password stored for " + *want;
+  // A helper that could not list says why, not "no password stored".
+  if (error != nullptr) *error = specs ? "no password stored for " + *want : list_error;
   return std::nullopt;
 }
 
