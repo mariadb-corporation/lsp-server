@@ -44,7 +44,9 @@ Built by the top-level CMake of this repository. Needs bison 3.8 or newer and a 
 C++17 compiler; no Python and no server source tree. Targets: `mariadbparser` (static),
 `mariadbparser_shared` (`libmariadbparser.so.2` / `.2.dylib`), and the `mdbparse` CLI.
 Built and tested on macOS (Apple Clang); the original project built it on Linux with
-GCC, and CI builds it there. Windows needs the lexer's POSIX calls ported.
+GCC. The Windows port (`src/mdbp_once.h`: `InitOnceExecuteOnce` in place of
+`pthread_once`, `win_bison`) and the Linux and Windows CI jobs in
+`.github/workflows/ci.yml` have not been run yet.
 
 Tests live in `unittest/mariadbparser/` at the top level: API tests, a multi-threaded
 consistency test, and the lexer fixtures in `tests/lex-fixtures/` replayed through

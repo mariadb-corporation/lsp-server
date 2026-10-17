@@ -17,8 +17,9 @@ Read in order: §1 what we have · §2 the design · §3 build and repository la
 
 The MariaDB server grammar (`sql/sql_yacc.yy`) and lexer (`sql/sql_lex.cc`) extracted
 into a standalone C library with every grammar action blanked. What is in this branch:
-the public header, the C/C++ sources, the three one-shot extraction tools (`stub.py`,
-`lexslice.py`, `gen_tables.py`, with `common.py`), the lexer test fixtures as plain
+the public header, the C/C++ sources, the one-shot extraction and merge tools (`stub.py`,
+`lexslice.py`, `mrs_merge.py`, with `common.py`; `gen_tables.py` was dropped, the token
+tables come from bison's output at run time), the lexer test fixtures as plain
 files, and `UPSTREAM.md` with the pins and the procedure. **The generated sources
 (`generated/`: the stubbed grammar, the lexer slice, the token tables) are to be
 committed and maintained by hand**; the tools are for a full re-extraction only and the
@@ -26,7 +27,7 @@ build never runs them. The build orchestration, provenance gate, evidence record
 corpus archives, analysis tooling, Python test suite and regeneration document of the
 original project were left behind on purpose. Facts the rest of this plan relies on:
 
-- **API** (`include/mdbparse.h`, version 2.2): `mdbp_parse_sql()` lexes and parses one
+- **API** (`include/mdbparse.h`, version 2.2 then, 2.3 since P3): `mdbp_parse_sql()` lexes and parses one
   statement; `mdbp_lex_sql()` / `mdbp_lex_sql_prefix()` lex without parsing (whole document
   or first N tokens). Every token carries byte offsets.
 - **Verdict, not AST.** A parse returns accept/reject, the error token and byte position,
@@ -51,8 +52,9 @@ original project were left behind on purpose. Facts the rest of this plan relies
   generated file by hand (actions are already blank, so grammar hunks are small), with
   the deviation recorded in `UPSTREAM.md`. Re-extracting with the tools is for a major
   jump and is deferred by decision.
-- **`generated/` is empty until P0's one extraction run**, which needs a Linux host and
-  the server tree at the pin; after that the build needs bison and a compiler only, on
+- **`generated/` is committed**, produced by P0's one extraction run from the server tree
+  at the pin. The plan assumed that run needed a Linux host; it ran on macOS (arm64,
+  bison 3.8.2, `UPSTREAM.md`). The build needs bison 3.8 or newer and a compiler only, on
   every platform.
 - **`REST` is not a keyword** in the server grammar, so `CREATE REST SERVICE ...` is
   rejected by the unmerged parser, usually at `REST`. §2.2 and §3 merge the REST SQL
@@ -144,7 +146,8 @@ per-thread `mysql_thread_init()` tokens) remains a good model for our session cl
 CMake + Ninja, dependencies from a **vcpkg manifest** (`vcpkg.json`, auto-bootstrapped by
 `-DWITH_VCPKG_TRIPLET=<triplet>`, `cmake/bootstrap_vcpkg.cmake`), the MariaDB server source
 auto-fetched when none is given (`cmake/bootstrap_mariadb.cmake`), `cmake/bison.cmake`
-(Homebrew bison on macOS, `win_bison` on Windows, minimum 3.0.4), C++23 with
+(Homebrew bison on macOS, `win_bison` on Windows, minimum 3.0.4; libmariadbparser raises
+that to 3.8 here, `libs/mariadbparser/CMakeLists.txt`), C++23 with
 `-Werror -Wall -Wextra -Wpedantic -Wshadow` (`cmake/compiler.cmake`), `WITH_TESTS=1` by
 default pulling gtest through the vcpkg `tests` feature, one `run_unit_tests` binary,
 `cpack -G TGZ` packaging, GitHub workflows on a self-hosted runner with ccache and the
@@ -199,6 +202,16 @@ Points that go beyond the pasted sketch:
 - `content_hash` makes re-parsing idempotent across edits that only move a statement.
 - `status` is atomic because parser threads write it while the LSP thread reads it.
 
+**Built as:** `Statement{begin, body_end, end, mode, delimiter, kind, active_delimiter,
+mentions_sql_mode, clean_after}` in `include/mdbls/statement_index.h`, `kind` being `sql`
+or `comment`; `mode` and `delimiter` index the interned tables of `Statement_index`. There
+is no REST-versus-server kind, no atomic status, no `content_hash` and no `ParseResult*` in
+the entry. The verdicts (`Statement_check`, `include/mdbls/syntax_check.h`) live beside the
+index in `Document`, which the event-loop thread owns alone; workers return
+`Check_result`s computed on a `Snapshot`, and `Document::apply_checks()` carries them
+across the edits made since through the splice history (`Document::translate()`), not by a
+content hash. The line table is `Line_map`, bytes only, as planned.
+
 ### 2.2 Parsing one statement (the worker's job)
 
 **One grammar.** The REST SQL rules are merged by hand into the stubbed server grammar
@@ -229,6 +242,13 @@ per-thread cache keyed by mode bits avoids thrashing in mixed files.
 A build option `MDBP_WITH_MRS` (default ON) leaves the merge out, which gives the pure
 server grammar for comparison and for consumers that do not want REST SQL.
 
+**Built as:** one grammar, merged by `libs/mariadbparser/tools/mrs_merge.py` (§3). The
+worker's parsers are a `Parser_cache` keyed by (`sql_mode`, release id, derivation wanted).
+`MDBP_WITH_MRS` was not built: bison has no conditional sections, and rules nobody reaches
+cost nothing. The index records no REST kind (§2.1); a REST statement is known by its
+`mrs_statement` node in the tree, which is how the catalog fold finds REST objects
+(`src/catalog_symbols.inc`).
+
 ### 2.3 The thread pool
 
 A process-wide `ParserPool`:
@@ -256,6 +276,17 @@ A process-wide `ParserPool`:
 
 The pool is passive from the library's point of view (`libmariadblanguageserver` owns
 it, MariaDB Shell can set N = 0 and drive parsing on its own thread).
+
+**Built as:** `Parser_pool` (`include/mdbls/parser_pool.h`): workers started on demand up
+to `max_threads`, where 0 means one per core, not no threads; each worker owns a
+`Parser_cache`; idle exit after two minutes as planned. N comes from `--threads` only,
+there is no `initializationOptions.threads`. The server uses three priorities
+(`k_priority_request`, `k_priority_hot`, `k_priority_cold` in `src/lsp/server.cc`): a
+request's own work, then the statements on screen or around the last edit, then the rest
+in file order; there is no DDL tier. Nothing is dropped at dequeue: a job runs to the end
+on its snapshot, and its results are translated or dropped when `Document::apply_checks()`
+applies them. Diagnostics are published every 500 ms (`k_publish_interval`) while a large
+document is being checked, not every 50 ms.
 
 ### 2.4 From derivation to syntax tree
 
@@ -300,6 +331,18 @@ Rule names in `sql_yacc.yy` are stable across releases far more than rule number
 walker is written against names and the regeneration test (§4, P3) lists every name it
 depends on so a MariaDB bump that renames one fails loudly.
 
+**Built as:** route (a), without `mdbp_rule_info()` and without `gen_tables.py`.
+libmariadbparser 2.3 records the parser's stack depth at every reduction
+(`mdbp_derivation_depths()`) and exposes bison's own symbol and rule tables
+(`mdbp_grammar_symbol_count()`, `mdbp_grammar_terminal_count()`,
+`mdbp_grammar_symbol_name()`, `mdbp_grammar_rule_count()`, `mdbp_grammar_rule_lhs()`,
+`mdbp_grammar_rule_length()`, `mdbp_grammar_token_symbol()`; `include/mdbparse.h`), which
+give the exact tree, mid-rule actions included, with no grammar change.
+`Syntax_tree::build()` (`include/mdbls/syntax_tree.h`) builds it on demand from a parser
+that still holds its result. There is no `ParseResult`: the per-statement result kept is
+`Statement_check{status, error_offset, error_length, error_token, expected}`; tokens and
+derivations are not stored, and a consumer that needs the tree parses the statement again.
+
 ### 2.5 Completion and the incomplete-statement loop
 
 Implemented exactly as the pasted plan describes, with these bindings to what we have:
@@ -331,6 +374,10 @@ The same walk-up serves hover (object at offset → catalog entry), go-to-defini
 (→ the `CREATE` statement's range in the index, in this or another workspace file),
 and document highlight.
 
+**Built as:** not yet (P5). The pieces it binds to exist: `Statement_index::find()` for the
+statement at an offset, `Syntax_tree` for the walk-up, `mdbp_lex_sql_prefix()`, and the
+expected set, which `Statement_check::expected` already carries for every syntax error.
+
 ### 2.6 Keeping the index current while typing
 
 Incremental document sync (`TextDocumentSyncKind.Incremental`): the client sends ranges
@@ -360,6 +407,17 @@ opening quote in a 256 MB file costs a bounded amount.
 A debounce timer per document (default 150 ms, 0 in tests) collapses keystroke bursts
 before diagnostics are published; completion requests bypass it.
 
+**Built as:** `Document` (`include/mdbls/document.h`, `src/document.cc`) over
+`Statement_index::update()` and `Line_map::update()`. The text is a `std::string` changed
+in place unless a snapshot still shares it (then it is copied first), not a piece table;
+the measured edit cost (P4) left no reason for one. The kept statements after the
+resynchronisation point are shifted eagerly in `Statement_index::update()`, not through a
+lazy offset tree. Verdicts follow their statements through the splice history (§2.1), not
+by content hash. The bounded give-up region is not built: an edit that opens a string or
+comment re-splits to the end of the file, which on the 256 MB dumps took 5 ms and 24 ms
+because the splitter resynchronises at the next quote or `*/`. The debounce is
+`initializationOptions.debounceMs`, default 150 ms, as planned.
+
 ### 2.7 The object model and outline
 
 `Catalog`: schemas → tables (columns with type, nullability, default, charset/collation,
@@ -386,6 +444,14 @@ The model is designed so that `diff(Catalog a, Catalog b)` is a later, separate 
 that emits `ALTER` statements, and so the EER modeler can read the JSON; neither is built
 in this plan.
 
+**Built as:** `Catalog` (`include/mdbls/catalog.h`) with `Schema`, `Table`, `Column`,
+`Index`, `Foreign_key`, `Check`, `View`, `Routine`, `Trigger`, `Named_object`,
+`Rest_service`, `Rest_schema` and `Rest_object`, each carrying an `Origin`; `Outline` and
+the JSON writer in `outline.h` (`docs/outline-format.md`). Server-level users and roles
+are not folded; of the name-only objects only the REST ones are (`rest_auth_apps()`,
+`rest_roles()`, `rest_users()`). The workspace catalog and the live-connection snapshot
+are P5.
+
 ### 2.8 LSP features in scope
 
 In the order they ship (§4): diagnostics; document symbols and the outline request;
@@ -402,6 +468,13 @@ current schema, server version for a document), `mariadb/viewport` (client → s
 visible line range, used for scheduling only), `mariadb/outline` (request),
 `mariadb/refreshCatalog` (request), `mariadb/parseProgress` (server → client, for a
 status bar item on large files).
+
+**Built as (P4):** diagnostics, document symbols, folding ranges, selection ranges and
+semantic tokens (`range`, `full`, `full/delta`) are served (`docs/language-server.md`).
+Semantic tokens do not classify identifiers yet; that needs the P5 catalog. Of the custom
+messages, `mariadb/documentContext`, `mariadb/viewport`, `mariadb/outline` and
+`mariadb/parseProgress` exist; `mariadb/refreshCatalog` is P5, with completion and the rest
+of the list.
 
 ### 2.9 The command-line interface
 
@@ -429,6 +502,25 @@ server and check unknown tables and columns against its catalog (§2.11); withou
 catalog is folded from the files only. All subcommands share the library; the CLI is
 also the harness the end-to-end tests and benchmarks drive.
 
+**Built as** (`src/mariadb-lsp/main.cc`, `mariadb-lsp --help`):
+
+```text
+mariadb-lsp lsp     [--stdio] [--threads N] [--log FILE]
+mariadb-lsp check   [--threads N] [--max-errors N] [--format tsv|json] FILE|-...
+mariadb-lsp outline FILE|-...
+mariadb-lsp split   [--format tsv|json] [--text] FILE|-...
+mariadb-lsp tokens  FILE|-...
+mariadb-lsp tree    FILE|-...
+```
+
+`--sql-mode LIST`, `--delimiter D`, `--charset utf8mb4|latin1`, `--version-id N` and
+`--stats` apply to every command. Against the plan: `--server-version V` is
+`--version-id N` (`major*10000 + minor*100 + patch`, default 130100); `tree` was added;
+the text format is called `tsv`; `check` prints nothing on success rather than `success`;
+`bench` was not built, `--stats` prints sizes and timings to stderr instead;
+`--connection`, `connections` and `--shell-bin-dir` are P5 with §2.11. Exit codes 0, 1
+and 2 are as planned.
+
 ### 2.10 Library boundary
 
 `libmariadblanguageserver` (C++23 inside, C API outside, as the shell will embed it):
@@ -436,6 +528,15 @@ documents, index, pool, catalog, completion, diagnostics, JSON outline, live-con
 catalog. The LSP transport (JSON-RPC framing, method dispatch) and the CLI live in the
 executable, not in the library. JSON goes through RapidJSON, which the shell already uses
 from vcpkg; the only other runtime dependency is the MariaDB client library (§2.11, §3).
+
+**Built as:** `libmariadblanguageserver` is C++ only so far; the C API for the shell comes
+later (`libs/mariadblanguageserver/CMakeLists.txt`). The LSP transport and dispatch live in
+the library, not in the executable: `src/lsp/transport.cc`, `src/lsp/server.cc`,
+`src/lsp/features.cc` with the headers in `include/mdbls/lsp/`; `src/mariadb-lsp/main.cc`
+holds the CLI and starts the server. RapidJSON is a public dependency of the library
+(`include/mdbls/lsp/json_position.h` writes with it). The client library is built and
+linked as `mariadb::client` (`cmake/mariadb_client.cmake`), but only `unittest/client/`
+calls it yet.
 
 ### 2.11 Live connections: URIs and the shell's secret store
 
@@ -502,85 +603,135 @@ through the editor or the LSP channel:
   logged, never written to diagnostics; the helper's stdout is scrubbed from logs the
   way the shell's `hide_secret` does.
 
+**Built as:** nothing yet (P5); `mariadb/documentContext` accepts `connection` and
+`currentSchema` and ignores them.
+
 ---
 
 ## 3. Repository layout and build
 
+This section describes the tree as it is (rewritten 2026-10-17; the original listed
+modules and scripts that were never copied or written). The README's layout table is the
+short form of the same tree.
+
 ```text
-CMakeLists.txt                 top-level, shaped like mariadb-shell's
-vcpkg.json                     rapidjson; feature "tests": gtest
+CMakeLists.txt                 top-level, shaped like mariadb-shell's: reads VERSION, bootstraps
+                               vcpkg, pins and builds the client library, adds the four
+                               subdirectories below
+vcpkg.json                     openssl (feature "tools"), zlib, rapidjson; feature "tests":
+                               gtest; version overrides for openssl, zlib and gtest
 cmake/                         copied from mariadb-shell: bootstrap_vcpkg, bootstrap_mariadb,
-                               bison, compiler, compile_flags, libutils, exeutils, packaging,
-                               git_hooks, static_analysis
-libs/mariadbparser/            header, sources, generated/ (stubbed grammar with the REST
-                               SQL rules merged in, lexer slice, tables; committed), the
-                               one-shot tools, lexer fixtures, UPSTREAM.md; rule-info API (2.3)
-libs/sqlsplitter/              vendored Sql_splitter from mariadb-shell, dependencies cut
-libs/mariadblanguageserver/    the engine library (C API in include/, C++ in src/)
-src/mariadb-lsp/               the executable: LSP transport + CLI subcommands
-unittest/                      gtest, one run_unit_tests binary, as in the shell
-tests/e2e/                     Python tests speaking LSP over stdio and driving the CLI
-tests/fixtures/                small SQL files; large dumps are generated, not committed
-scripts/                       run_unit_tests.py, gen_fixture_dump.py, sync_from_shell.py
-.github/workflows/             ci.yml copied from shell-ci.yml (self-hosted runner, ccache,
-                               [bypass-ci]); macOS and Windows jobs added
+                               bison; written here: compiler, mariadb_client, mariadb_pin
+libs/mariadbparser/            include/mdbparse.h (2.3), src/, generated/ (yy_stub.yy with the
+                               REST SQL rules merged in, lexer_extracted.cc, keywords.h,
+                               lexstates.h, state_maps.h, ctype-utf8.h; committed), tools/
+                               (stub.py, lexslice.py, mrs_merge.py, common.py),
+                               tests/lex-fixtures/ (nine .jsonl files), docs/thd.md, README.md,
+                               UPSTREAM.md
+libs/sqlsplitter/              Sql_splitter from mariadb-shell under its own include paths,
+                               maintained by hand, UPSTREAM.md
+libs/mariadblanguageserver/    the engine library, C++ only (C API later): include/mdbls/ and
+                               src/ with Statement_index, Line_map, Sql_mode_tracker,
+                               Parser_pool, Statement_check, Syntax_tree, Catalog, Outline,
+                               Document, semantic tokens, charset detection; the LSP server
+                               in src/lsp/ (transport, server, features) and include/mdbls/lsp/
+src/mariadb-lsp/               the executable: main.cc with the CLI subcommands, and the
+                               ctest smoke tests of each subcommand
+unittest/                      gtest, one run_unit_tests binary: mariadbparser/, sqlsplitter/,
+                               mariadblanguageserver/, client/
+tests/e2e/                     lsp_client.py and test_lsp.py: Python end-to-end tests
+                               speaking LSP over stdio, run by ctest
+tests/fixtures/                sql/ (sakila schema, world, a mysqldump file, the shell's REST
+                               grammar test, a latin1 file), outline/ (sakila golden JSON);
+                               large dumps are generated, not committed
+scripts/                       gen_fixture_dump.py
+docs/                          language-server.md, outline-format.md, plans/
+.github/workflows/             ci.yml (Linux self-hosted, macOS, Windows), devtools-ci-start.yml
+.github/vcpkg-triplets/        x64-windows.cmake, the overlay triplet of the Windows job
 ```
 
-Build conventions, copied from the shell rather than invented:
+Build conventions, copied from the shell where the shell has them:
 
-- `cmake .. -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DWITH_VCPKG_TRIPLET=<triplet>`
-  bootstraps vcpkg into `../vcpkg` and installs the manifest; `-DWITH_TESTS=0` drops gtest.
-- **The client library comes from the server checkout, as the shell does it.**
-  `cmake/bootstrap_mariadb.cmake`, copied from the shell, fetches the server at
-  `MARIADB_GIT_TAG` (or takes `-DMARIADB_SOURCE_DIR`/`-DMARIADB_BUILD_DIR`), initialises
-  `libmariadb`, and builds `mariadbclient mysys mysys_ssl caching_sha2_password GenError`;
-  the client library is linked statically, exactly as the shell links it, headers from
-  `<src>/libmariadb/include` and `<src>/include`, with the `mariadb_capi_rename.h` guard
-  pre-defined as the shell does; no vcpkg `libmariadb`, no runtime bundling of a shared
-  client. `MARIADB_GIT_TAG` is the parser's pin (`bab03b0f`) so that the client and the
-  grammar come from the same release.
-- **libmariadbparser builds from `generated/`**: bison over `generated/yy_stub.yy`
-  (with `-Dparse.lac=full` and the XML report), the sources, the lexer slice. No Python,
-  no server tree, no provenance gate at build time. `cmake/bison.cmake` finds Homebrew
-  bison on macOS and `win_bison` on Windows.
-- `cmake/compiler.cmake`: C++23, `-Werror -Wall -Wextra -Wpedantic -Wshadow`. The C
-  library keeps its own flags.
-- `mysql_library_init()` runs once in `main()`, and every pool worker that opens a
-  session holds an RAII `mysql_thread_init()`/`mysql_thread_end()` token.
-- Packaging: `cpack -G TGZ` per platform; the binary is meant to be installed into
-  mariadb-shell's `bin/` next to `mariadb-shell`, which is where the extension's locator
-  will look (§5, decision 4).
-- **The REST SQL merge is a manual edit of `generated/yy_stub.yy`**, done once in P2
-  from the shell's `mysqlshdk/libs/mrs/parser.yy` (the shell commit recorded in
-  `UPSTREAM.md`), and kept up to date by hand like every other upstream change:
-  1. the rules between the `MERGE PART` markers go in; the helper rules after the
-     marker are replaced by the server's (`identifier` → `ident`, `qualified_identifier`
-     → `table_ident`, `text_string_literal` → `TEXT_STRING_sys`, ...);
-  2. tokens are renamed to the server's spelling (`CREATE_SYMBOL` → `CREATE`,
-     `USE_SYMBOL` → `USE_SYM`, `VIEW_SYMBOL` → `VIEW_SYM`, ...); the new keywords are
-     declared as `%token <kwd>`, added to `keyword_ident` (or the narrower list that
-     fits) so that each stays a valid identifier elsewhere, and added to the lexer's
-     keyword table in `generated/keywords.h`;
-  3. `REST_REQUEST_PATH` becomes a rule over `'/'` and identifiers and the
-     `@ANNOTATION` tokens become `'@' ident`, since the server lexer is kept untouched;
-  4. `mrs_statement` is hooked into the server's `verb_clause`, `%expect` is raised by
-     the conflicts the merge introduces, and each conflict with its resolution is
-     listed in `UPSTREAM.md`.
-  Everything downstream (bison, LAC, the derivation, the token tables, the rule-name
-  table) is unchanged. The shell's lexer, AST and driver are not vendored at all.
-- Vendored code from mariadb-shell (`libs/sqlsplitter`) is copied by
-  `scripts/sync_from_shell.py`, which records the shell commit in a `PROVENANCE.json`
-  next to the copy; a CI check compares the vendored files with the shell tree when one
-  is available and fails on silent drift. Local edits are confined to a small patch file
-  applied after copying, so a re-sync is mechanical.
+- `cmake -S . -B bld -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DWITH_VCPKG_TRIPLET=<triplet>`
+  bootstraps vcpkg into `../vcpkg` (or uses `VCPKG_ROOT`) and installs the manifest;
+  `-DWITH_TESTS=0` drops the `tests` feature and the `unittest/` directory. CMake 3.22,
+  Ninja, git and a C++23 compiler are needed.
+- **The client library comes from the server checkout, as the shell does it.** The server
+  commit is pinned in one place, the `| MariaDB server` row of
+  `libs/mariadbparser/UPSTREAM.md`, which `cmake/mariadb_pin.cmake` reads (editing the
+  file re-runs configure); `-DMARIADB_GIT_TAG` overrides it with a warning when the two
+  differ. `cmake/bootstrap_mariadb.cmake`, copied from the shell, clones the server into
+  `../mariadb-server-lsp` (`-DMARIADB_BOOTSTRAP_DIR`), initialises `libmariadb` and builds
+  `mariadbclient mysys mysys_ssl caching_sha2_password GenError`; an existing build is
+  reused with `-DMARIADB_SOURCE_DIR`/`-DMARIADB_BUILD_DIR` (its commit is checked against
+  the pin, a mismatch warns). `cmake/mariadb_client.cmake` exposes the result as the
+  interface target `mariadb::client`: `libmariadbclient` plus the server's `mysys`,
+  `mysys_ssl`, `strings` and `dbug`, linked statically, headers from
+  `<src>/libmariadb/include`, `<bld>/libmariadb/include`, `<src>/include` and
+  `<bld>/include`, `MARIADB_CAPI_RENAME_INCLUDED` pre-defined as the shell does, OpenSSL
+  and zlib from vcpkg. No vcpkg `libmariadb`. `-DWITH_MARIADB_CLIENT=OFF` builds without
+  the client library and without `unittest/client/`.
+- **libmariadbparser builds from `generated/`**: `bison -k -d -Dparse.lac=full` over
+  `generated/yy_stub.yy`, the result `#include`d by `src/parser_glue.c`; the token names
+  come from bison's `yytname[]` and `yytranslate[]` at run time and the rule numbers from
+  `yyn` inside each action, so there is no generated table and no XML report. Bison 3.8
+  or newer is required (`libs/mariadbparser/CMakeLists.txt`; the shell's
+  `cmake/bison.cmake` finds Homebrew bison on macOS and `win_bison` on Windows). No
+  Python, no server tree, no provenance gate at build time. The library is built static
+  and shared (`libmariadbparser.so.2`, version script on Linux, version read from
+  `mdbparse.h`), plus the `mdbparse` CLI when RapidJSON is found.
+- `cmake/compiler.cmake`: C++23 and the shell's warning set (`-Werror -Wall -Wextra
+  -Wpedantic -Wshadow ...`, `/W4 /WX` on MSVC), applied per target through
+  `mdbls_target_warnings()` rather than globally, because the extracted lexer in
+  `libs/mariadbparser` is compiled as written; the library's own C files are held to
+  `-Werror` separately. RapidJSON's SIMD scanning (`RAPIDJSON_NEON` / `RAPIDJSON_SSE2`) is
+  defined for every target.
+- `mysql_library_init()` once in `main()` and an RAII `mysql_thread_init()` token per
+  worker that opens a session: planned, with the live catalog (P5). Today only
+  `unittest/client/` calls the client library.
+- Packaging (`cpack`, install into mariadb-shell's `bin/`, §5 decision 4): planned (P7).
+  The shell's git hooks, `scripts/run_unit_tests.py` and its static-analysis module were
+  not copied either.
+- **The REST SQL merge was done once by `libs/mariadbparser/tools/mrs_merge.py`** on
+  2026-10-15, from the shell's `mysqlshdk/libs/mrs/parser.yy` at the commit pinned in
+  `UPSTREAM.md`, and the result is maintained by hand like the rest of `generated/`: the
+  merge part's 199 rules were translated and appended to `yy_stub.yy`, `mrs_statement`
+  hooked into `verb_clause` and the 27 REST `SHOW` statements into `show_param`; the 61
+  new keywords are all non-reserved, 59 in `keyword_sp_var_and_label` and `CLONE` and
+  `CONFIGURE` in `keyword_verb_clause`, and appended to `generated/keywords.h`;
+  annotations are `'@'` and a word; there was no new conflict, so `%expect 72` is
+  unchanged. A later change that adds a conflict has to resolve it, not raise the count
+  (`UPSTREAM.md`). To take a newer shell grammar, patch the merged block by hand or remove
+  it and run the tool again. The shell's lexer, AST and driver are not vendored.
+- Vendored code is maintained by hand, not synchronised by a script: `libs/sqlsplitter/UPSTREAM.md`
+  and `libs/mariadbparser/UPSTREAM.md` each hold a pin table and the list of deviations,
+  those in the splitter marked `lsp-server:` in the source. There is no
+  `sync_from_shell.py`, no `PROVENANCE.json` and no CI drift check; an upstream change is
+  taken by diffing the shell between pins and applying the hunks.
+- Tests: `unittest/CMakeLists.txt` globs `*/*_t.cc` into `run_unit_tests`
+  (`gtest_discover_tests`, fixture directories passed as compile definitions);
+  `src/mariadb-lsp/CMakeLists.txt` adds a ctest smoke test per subcommand
+  (`mariadb-lsp.split`, `.check-*`, `.outline`, `.tree`, ...); `tests/e2e` runs as
+  `mariadb-lsp.e2e` on a generated 16 MB dump (Python 3, standard library only), and
+  `-DMDBLS_LARGE_TESTS=ON` adds `mariadb-lsp.e2e-large` at 256 MB.
+- CI (`.github/workflows/ci.yml`, on pull requests and by hand): the Linux job runs on the
+  self-hosted devtools runner started by `devtools-ci-start.yml`, with ccache and the
+  server bootstrap cached, `x64-linux-dynamic`; a PR titled `[bypass-ci]` skips it and a
+  fork PR falls back to a GitHub-hosted runner. The macOS job (`arm64-osx`, Homebrew
+  bison) and the Windows job (VS 2022 toolset 14.44, winflexbison3, the overlay triplet
+  in `.github/vcpkg-triplets/`) run on GitHub-hosted runners. The workflow has not run yet
+  (§4).
 
 ---
 
 ## 4. Phases
 
-Each phase ends with its tests green in CI on Linux and macOS (Windows from P4), and a
-short record in `docs/plans/records/<phase>.md` of what was measured. Numbers below marked
-*target* are to be measured, not assumed.
+Each phase was to end with its tests green in CI on Linux and macOS (Windows from P4), and
+a short record of what was measured. As built: CI (`.github/workflows/ci.yml`) has not run
+yet, so every "done" below rests on local runs on this macOS machine; there is no
+`docs/plans/records/` directory, the status paragraphs here and the "Measured" table in
+`docs/language-server.md` hold the record. Numbers below marked *target* are to be
+measured, not assumed.
 
 ### P0 — Build foundation (1–2 weeks)
 
@@ -588,7 +739,7 @@ short record in `docs/plans/records/<phase>.md` of what was measured. Numbers be
 once and `generated/` is committed; the build needs bison and a compiler only; the token
 tables and rule numbers come from bison's own output at run time, so `gen_tables.py` is
 gone; the output matches the original build on all 212,332 recorded token streams; the
-client library is built from the pinned server tree as in the shell; 283 unit tests pass,
+client library is built from the pinned server tree as in the shell; the unit tests pass,
 the parser tests also under ThreadSanitizer. Open: a Linux run in CI (workflow written,
 not yet run), Windows (the lexer uses POSIX threads and the CLI POSIX I/O), the shell's
 git hooks (they enforce copyright headers the imported parser sources lack),
@@ -601,7 +752,10 @@ git hooks (they enforce copyright headers the imported parser sources lack),
 - **The one extraction run**: on a Linux host with the server tree at the pin, run
   `stub.py`, bison, `lexslice.py` and `gen_tables.py` (its grammar-model cross-check
   removed) by hand, commit the output as `libs/mariadbparser/generated/`, record the
-  run in `UPSTREAM.md`. From then on the tools are not needed to build.
+  run in `UPSTREAM.md`. From then on the tools are not needed to build. **Built as:**
+  the run was on macOS (arm64, bison 3.8.2), with the server's own `gen_yy_files.cmake`
+  preprocessor, `stub.py`, bison and `lexslice.py`; `gen_tables.py` is gone, the tables
+  come from bison's output at run time (§2.4, §3); `UPSTREAM.md` records the steps.
 - libmariadbparser's CMake: bison over `generated/yy_stub.yy`, the library and the
   `mdbparse` CLI, on macOS, Linux and Windows, with no Python and no server tree.
 - gtests for the parser library: parse, lex, expected set, and the nine lexer fixture
@@ -612,7 +766,7 @@ git hooks (they enforce copyright headers the imported parser sources lack),
 ### P1 — Splitter and statement index (1 week)
 
 **Status 2026-10-15: done on macOS.** `libs/sqlsplitter` holds the shell's splitter
-(commit `6c0d7a9`, maintained by hand, `UPSTREAM.md`), its 308 tests pass. Two upstream
+(commit `6c0d7a9`, maintained by hand, `UPSTREAM.md`), its tests pass. Two upstream
 bugs were fixed here and should go back to the shell: a `$` inside a versioned comment
 left the comment open (two statements merged), and the delimiter test ran `strlen()` to
 the end of the buffer at every `;` (quadratic on a whole file; hidden in the shell by
@@ -656,8 +810,9 @@ extended INSERTs and 2.7 s with one row per INSERT (2.29 M statements), of which
 parallel check is 0.9 s and 1.3 s; peak memory 278 MB and 531 MB. Two errors planted at
 lines 1,000,000 and 2,000,000 are reported at their positions. ThreadSanitizer reports
 no race in the pool, checker and multi-thread tests or in a `check` run on 8 threads (no
-planted-race control was run). Not done: the viewport priority and stale-version
-dropping, which need the LSP document model (P4).
+planted-race control was run). Done in P4: the viewport priority (`mariadb/viewport`, the
+hot range) and the handling of results from stale snapshots, which are translated through
+the edits since or dropped (`Document::translate()`).
 
 - **Merge spike first (2–3 days):** merge the `MERGE PART` rules into
   `generated/yy_stub.yy` by hand to the point where bison accepts the grammar; the
@@ -672,11 +827,15 @@ dropping, which need the LSP document model (P4).
   is rewritten; that is decided by the spike, not now.
 - Finish the merge: token renames, new keywords into the keyword lists and
   `generated/keywords.h`, request-path and annotation rules, `MDBP_WITH_MRS` (a bison
-  `%ifdef` around the merged rules, as the server's own `%ifdef MARIADB` works), the
-  shell's `unittest/data/mrs/grammar_test.sql` as a corpus that must parse, and a test
-  that a set of server-only statements gets the same verdicts with the merge on and off.
+  `%ifdef` around the merged rules, as the server's own `%ifdef MARIADB` works; not
+  built, the server's `%ifdef` is its own preprocessor and the unused rules cost
+  nothing), the shell's `unittest/data/mrs/grammar_test.sql` as a corpus that must
+  parse, and a test that a set of server-only statements gets the same verdicts with
+  the merge on and off (built as the replay of the recorded server token streams
+  before and after the merge, `UPSTREAM.md`).
 - `ParserPool` (§2.3) with priorities, idle join, version-stale dropping; per-thread
-  parser cache keyed by `sql_mode`.
+  parser cache keyed by `sql_mode`. Built as `Parser_pool` and `Parser_cache`; stale
+  results are handled when applied, in `Document` (P4).
 - `check` subcommand, text and JSON output, exit codes.
 - Thread-safety evidence: TSan build of the pool over a statement corpus with a planted
   race as control, N-thread differential against the single-threaded run.
@@ -697,11 +856,12 @@ writes it as JSON format 1 (`docs/outline-format.md`), `mariadb-lsp tree` prints
 The sakila schema folds completely (35 of 35 DDL statements) and is a golden test; a test
 fails when a rule name the fold uses leaves the grammar. On the 256 MB dumps the outline
 phase takes 4 ms and 38 ms on 8 threads (only DDL is parsed), against 1.2 s for indexing.
-Not done: `textDocument/documentSymbol` (P4), a JSON Schema file for the format, and
-reading objects out of statements with a syntax error.
+Done in P4: `textDocument/documentSymbol`. Not done: a JSON Schema file for the format,
+and reading objects out of statements with a syntax error.
 
 - libmariadbparser 2.3: `mdbp_rule_info()` generated from the grammar model; symbol
-  version `MDBPARSER_2.3`.
+  version `MDBPARSER_2.3`. Built as `mdbp_derivation_depths()` and the
+  `mdbp_grammar_*()` tables (§2.4); the symbol version is `MDBPARSER_2.3` as planned.
 - Tree builder (§2.4a), arena nodes, lookup by rule name, token spans.
 - Catalog fold for the DDL in §2.7, including `ALTER TABLE` sub-commands and REST objects;
   JSON outline writer with a versioned schema and a JSON Schema file under `docs/`.
@@ -809,7 +969,9 @@ order.
    keywords are non-reserved, including after `USE`, `GRANT` and `REVOKE`; no backticks
    are needed anywhere.
 2. **Tree construction.** Offline from the derivation plus a small rule-info API (§2.4a),
-   not inside the grammar actions. Agree?
+   not inside the grammar actions. Agree? (Built in that spirit, but the API differs:
+   the reduction depths plus bison's own grammar tables, not a generated rule-info
+   table.)
 3. **MariaDB pin.** The build fetches the server at the parser's pin (`bab03b0f`,
    13.1.0) so that one checkout serves the client library and the grammar. Moving the
    pin, and the re-extraction that comes with it, is deferred as agreed.
@@ -817,6 +979,8 @@ order.
    mariadb-shell's `bin/` and the extension finds it there. Alternative: the extension
    bundles per-platform binaries itself.
 5. **Sync kind.** Incremental sync with a piece table (§2.6), as your step 5 asks. Agree?
+   (Incremental sync was built; the text is a `std::string` changed in place, not a
+   piece table, since the measured edit cost did not call for one.)
 6. **C++ standard and JSON library.** C++23 and RapidJSON, matching the shell.
 7. **Connection lookup order.** For a URI, the GUI list (`GUI:CONN:`) is tried first,
    then the MCP list (`MCP:CONN:`), then the shell's own `password` credentials (§2.11).
