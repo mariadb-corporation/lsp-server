@@ -152,10 +152,14 @@ Schema &Catalog::schema(const std::string &n) {
   return m_schemas.back();
 }
 
-Rest_service &Catalog::service(const std::string &path) {
+Rest_service *Catalog::find_service(std::string_view path) {
   auto it = std::find_if(m_services.begin(), m_services.end(),
                          [&](const Rest_service &s) { return iequals(s.path, path); });
-  if (it != m_services.end()) return *it;
+  return it == m_services.end() ? nullptr : &*it;
+}
+
+Rest_service &Catalog::service(const std::string &path) {
+  if (Rest_service *s = find_service(path)) return *s;
   m_services.push_back(Rest_service{});
   m_services.back().path = path;
   return m_services.back();
@@ -622,7 +626,13 @@ void Catalog_fold::key_def(uint32_t n, Table &tb) {
       return;
     }
   }
-  tb.indexes.push_back(std::move(ix));
+  // A named key replaces an index of that name, as CREATE INDEX does; the
+  // server would refuse the duplicate, so either reading is a guess.
+  if (ix.name.empty()) {
+    tb.indexes.push_back(std::move(ix));
+  } else {
+    upsert_named(tb.indexes, std::move(ix));
+  }
 }
 
 void Catalog_fold::check_def(uint32_t n, Table &tb) {
@@ -651,9 +661,7 @@ void Catalog_fold::table_options(uint32_t n,
     } else if (sym == s_.ENGINE_SYM) {
       set_option(opts, "engine", unquote_string(text(ch.back())));
     } else if (t_.is_token(first)) {
-      std::string key = lower(raw(first));
-      if (key == "auto_increment") key = "auto_increment";
-      set_option(opts, key, text(ch.back()));
+      set_option(opts, lower(raw(first)), text(ch.back()));
     }
   }
 }
@@ -823,8 +831,6 @@ bool Catalog_fold::alter(uint32_t n) {
 }
 
 bool Catalog_fold::drop(uint32_t n) {
-  const bool if_exists = has_child(n, s_.IF_SYM) || find(n, s_.IF_SYM) != npos;
-  (void)if_exists;
   if (const uint32_t r = child(n, s_.drop_routine); r != npos) {
     const bool proc = find(child(r, s_.sp_handler), s_.PROCEDURE_SYM) != npos;
     std::vector<uint32_t> ids;
@@ -989,21 +995,32 @@ bool Catalog_fold::rest(uint32_t n) {
     std::erase_if(target_service().schemas, [&](const Rest_schema &s) { return iequals(s.path, path); });
     return true;
   }
-  auto drop_object = [&](int path_sym) {
+  // A DROP names its service with FROM SERVICE, else it is the current one;
+  // an object's schema with FROM [SERVICE ...] DATABASE, else every schema of
+  // the service is searched.  A service the script never created is left
+  // alone rather than made.
+  auto dropped_from = [&]() -> Rest_service * {
+    return c_.find_service(service_path.empty() ? c_.m_current_service : service_path);
+  };
+  auto drop_object = [&](const char *kind, int path_sym) {
+    Rest_service *svc = dropped_from();
+    if (svc == nullptr) return;
     const std::string path = text(find(st, path_sym));
-    for (auto &svc : c_.m_services) {
-      for (auto &sch : svc.schemas) {
-        std::erase_if(sch.objects, [&](const Rest_object &o) { return iequals(o.path, path); });
-      }
+    const std::string schema_path = text(find(st, s_.mrs_schema_request_path));
+    for (auto &sch : svc->schemas) {
+      if (!schema_path.empty() && !iequals(sch.path, schema_path)) continue;
+      std::erase_if(sch.objects, [&](const Rest_object &o) {
+        return o.kind == kind && iequals(o.path, path);
+      });
     }
   };
-  if (sym == s_.mrs_drop_rest_view_statement) { drop_object(s_.mrs_view_request_path); return true; }
-  if (sym == s_.mrs_drop_rest_procedure_statement) { drop_object(s_.mrs_procedure_request_path); return true; }
-  if (sym == s_.mrs_drop_rest_function_statement) { drop_object(s_.mrs_function_request_path); return true; }
+  if (sym == s_.mrs_drop_rest_view_statement) { drop_object("view", s_.mrs_view_request_path); return true; }
+  if (sym == s_.mrs_drop_rest_procedure_statement) { drop_object("procedure", s_.mrs_procedure_request_path); return true; }
+  if (sym == s_.mrs_drop_rest_function_statement) { drop_object("function", s_.mrs_function_request_path); return true; }
   if (sym == s_.mrs_drop_rest_content_set_statement) {
-    const std::string path = text(find(st, s_.mrs_content_set_request_path));
-    for (auto &svc : c_.m_services) {
-      std::erase_if(svc.content_sets, [&](const Named_object &o) { return iequals(o.name, path); });
+    if (Rest_service *svc = dropped_from()) {
+      const std::string path = text(find(st, s_.mrs_content_set_request_path));
+      std::erase_if(svc->content_sets, [&](const Named_object &o) { return iequals(o.name, path); });
     }
     return true;
   }

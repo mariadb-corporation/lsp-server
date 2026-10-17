@@ -36,6 +36,12 @@ struct mdbp_parser;
 
 namespace mdbls {
 
+// Whether the parser accepts `version_id` (a MariaDB release id,
+// major*10000 + minor*100 + patch), as mdbp_parser_set_version_id() decides.
+// Asked once where an id comes in, so a refused one is reported as such
+// rather than as Parser_cache::get() returning nullptr for every mode.
+bool version_id_supported(unsigned long version_id);
+
 // The parsers of one worker thread, one per (sql_mode, release id).  A
 // libmariadbparser parser must never be used by two threads at once; each
 // worker owns its cache, so its parsers are only ever used by that worker.

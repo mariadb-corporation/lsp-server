@@ -107,7 +107,10 @@ std::optional<std::string> string_at(const Json &v, std::initializer_list<const 
 void read_index_options(const Json &v, Index_options &o) {
   if (const auto mode = string_at(v, {"sqlMode"})) o.sql_mode = normalize_sql_mode(*mode);
   if (const auto s = string_at(v, {"serverVersion"})) {
-    if (const auto id = parse_server_version(*s)) o.version_id = id;
+    // An id the parser refuses is ignored like a string that is no version.
+    if (const auto id = parse_server_version(*s); id != 0 && version_id_supported(id)) {
+      o.version_id = id;
+    }
   }
   if (const auto d = string_at(v, {"delimiter"}); d && !d->empty()) o.delimiter = *d;
 }

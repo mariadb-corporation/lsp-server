@@ -546,6 +546,11 @@ std::optional<Options> parse_args(int argc, char **argv) {
     } else if (arg == "--version-id") {
       const auto n = number();
       if (!n) return std::nullopt;
+      if (!mdbls::version_id_supported(*n)) {
+        std::cerr << "mariadb-lsp: --version-id " << *n
+                  << " is not a release id the parser accepts (major*10000 + minor*100 + patch)\n";
+        return std::nullopt;
+      }
       o.index.version_id = *n;
     } else if (arg == "--threads") {
       const auto n = number();

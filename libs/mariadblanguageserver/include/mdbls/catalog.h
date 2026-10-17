@@ -188,6 +188,7 @@ class Catalog {
   Schema &schema(const std::string &name);
   Schema *find_schema(std::string_view name);
   Rest_service &service(const std::string &path);
+  Rest_service *find_service(std::string_view path);
 
   std::vector<Schema> m_schemas;
   std::string m_current;

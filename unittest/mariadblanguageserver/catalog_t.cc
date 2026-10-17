@@ -194,6 +194,44 @@ TEST(Catalog, rest_objects) {
   EXPECT_EQ("jane@app", o.catalog.rest_users()[0].name);
 }
 
+// DROP REST takes the object's kind, its FROM selector and the current
+// service into account; it never creates a service.
+TEST(Catalog, rest_drop_is_scoped) {
+  const auto o = outline_of(
+      "CREATE REST SERVICE /a;\n"
+      "CREATE REST SERVICE /b;\n"
+      "CREATE REST SCHEMA /s ON SERVICE /a FROM sakila;\n"
+      "CREATE REST SCHEMA /s ON SERVICE /b FROM sakila;\n"
+      "CREATE REST VIEW /x ON SERVICE /a SCHEMA /s AS sakila.actor;\n"
+      "CREATE REST PROCEDURE /x ON SERVICE /a SCHEMA /s AS sakila.film_in_stock;\n"
+      "CREATE REST VIEW /x ON SERVICE /b SCHEMA /s AS sakila.actor;\n"
+      "CREATE REST CONTENT SET /cs ON SERVICE /a;\n"
+      "CREATE REST CONTENT SET /cs ON SERVICE /b;\n"
+      "USE REST SERVICE /a;\n"
+      "DROP REST VIEW /x;\n"
+      "DROP REST CONTENT SET /cs;\n"
+      "DROP REST PROCEDURE /x FROM SERVICE /nowhere DATABASE /s;\n");
+  const auto &svcs = o.catalog.rest_services();
+  ASSERT_EQ(2u, svcs.size());  // /nowhere was not created by the DROP
+  const auto &a = svcs[0], &b = svcs[1];
+  ASSERT_EQ(1u, a.schemas[0].objects.size());
+  EXPECT_EQ("procedure", a.schemas[0].objects[0].kind);  // the view went, not the procedure
+  EXPECT_TRUE(a.content_sets.empty());
+  ASSERT_EQ(1u, b.schemas[0].objects.size());  // service /b was not searched
+  EXPECT_EQ("view", b.schemas[0].objects[0].kind);
+  EXPECT_EQ(1u, b.content_sets.size());
+}
+
+TEST(Catalog, named_key_replaces_its_namesake) {
+  const auto o = outline_of(
+      "CREATE TABLE t (a INT, b INT, KEY k (a), KEY k (b), UNIQUE (a), UNIQUE (b));\n");
+  const Table *t = table(o, "", "t");
+  ASSERT_NE(nullptr, t);
+  ASSERT_EQ(3u, t->indexes.size());  // k once, the two unnamed keys both kept
+  EXPECT_EQ("k", t->indexes[0].name);
+  EXPECT_EQ(std::vector<std::string>{"b"}, t->indexes[0].columns);
+}
+
 TEST(Catalog, notes_for_what_cannot_be_applied) {
   const auto o = outline_of(
       "ALTER TABLE missing ADD COLUMN x INT;\n"

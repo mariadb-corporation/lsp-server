@@ -45,6 +45,15 @@ mdbp_parser *Parser_cache::get(const std::string &sql_mode, unsigned long versio
   return it->second.get();
 }
 
+bool version_id_supported(unsigned long version_id) {
+  // The parser's own verdict, so callers refuse exactly what it would.
+  mdbp_parser *p = mdbp_parser_new(nullptr);
+  if (p == nullptr) return false;
+  const bool ok = mdbp_parser_set_version_id(p, version_id) == MDBP_OK;
+  mdbp_parser_free(p);
+  return ok;
+}
+
 // --- Parser_pool ---------------------------------------------------------
 
 Parser_pool::Parser_pool(unsigned max_threads, std::chrono::milliseconds idle_timeout)
@@ -92,15 +101,17 @@ void Parser_pool::join_finished() {
 void Parser_pool::submit(int priority, Job job) {
   join_finished();
   std::lock_guard lock(m_mutex);
-  m_queue.push_back({priority, m_seq++, std::move(job)});
-  std::push_heap(m_queue.begin(), m_queue.end(), Item_order{});
-  // Start a worker when none is free to take the job.
-  if (m_waiting < m_queue.size() && m_live < m_max_threads) {
-    ++m_live;
+  // A worker first, when none is free to take the job, and the job only
+  // then: if starting the thread throws, nothing has changed, which run_all()
+  // counts on.  A worker started for a job that is then not queued idles out.
+  if (m_waiting <= m_queue.size() && m_live < m_max_threads) {
     std::thread t(&Parser_pool::worker_main, this);
+    ++m_live;
     const auto id = t.get_id();
     m_threads.emplace(id, std::move(t));
   }
+  m_queue.push_back({priority, m_seq++, std::move(job)});
+  std::push_heap(m_queue.begin(), m_queue.end(), Item_order{});
   m_work.notify_one();
 }
 
@@ -134,7 +145,8 @@ void Parser_pool::run_all(int priority, size_t n_jobs,
       });
     }
   } catch (...) {
-    // Job j was not submitted, nor the ones after it: they will never count.
+    // submit() queues nothing when it throws: job j was not submitted, nor
+    // the ones after it, so they will never count.
     {
       std::lock_guard lock(batch.mutex);
       batch.pending -= n_jobs - j;
