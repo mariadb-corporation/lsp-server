@@ -121,7 +121,7 @@ struct Fake_server {
 
 }  // namespace
 
-TEST(Mcp_catalog, maps_the_tool_results_onto_the_catalog) {
+TEST(Mcp_catalog, a_reading_lists_names_and_leaves_details_for_later) {
   Fake_server server;
   std::string error;
   bool permanent = true;
@@ -132,28 +132,60 @@ TEST(Mcp_catalog, maps_the_tool_results_onto_the_catalog) {
   EXPECT_EQ(snap->server.version_id, 110803u);
   EXPECT_EQ(snap->server.current_schema, "store");
   EXPECT_EQ(snap->tables, 3u);
-  EXPECT_EQ(snap->columns, 6u);
+  EXPECT_EQ(snap->columns, 0u);
+  // No object was asked about.
+  for (const auto &call : server.calls) {
+    EXPECT_EQ(call.find("db.get_object_details"), std::string::npos) << call;
+    EXPECT_EQ(call.find("db.list_objects information_schema procedure"), std::string::npos) << call;
+  }
 
-  // performance_schema is left out; the system schema is listed without
-  // details, so none of its objects was asked about.
+  // performance_schema is left out; a system schema lists tables and views.
   ASSERT_EQ(snap->catalog->schemas().size(), 2u);
   EXPECT_EQ(snap->catalog->find("performance_schema"), nullptr);
   const auto *is = snap->catalog->find("information_schema");
   ASSERT_NE(is, nullptr);
   ASSERT_EQ(is->tables.size(), 1u);
   EXPECT_EQ(is->tables[0].name, "TABLES");
-  EXPECT_TRUE(is->tables[0].columns.empty());
-  for (const auto &call : server.calls) {
-    EXPECT_EQ(call.find("db.get_object_details information_schema"), std::string::npos) << call;
-    EXPECT_EQ(call.find("db.list_objects information_schema procedure"), std::string::npos) << call;
-  }
+  EXPECT_FALSE(is->tables[0].stub);  // no details to come either
 
   const auto *store = snap->catalog->find("store");
   ASSERT_NE(store, nullptr);
   EXPECT_EQ(store->options, (std::vector<std::pair<std::string, std::string>>{{"comment", "the shop"}}));
   const auto *item = store->table("item");
   ASSERT_NE(item, nullptr);
+  EXPECT_TRUE(item->stub);
+  EXPECT_TRUE(item->columns.empty());
   EXPECT_EQ(item->options, (std::vector<std::pair<std::string, std::string>>{{"comment", "for sale"}}));
+  ASSERT_NE(store->view("cheap"), nullptr);
+  EXPECT_TRUE(store->view("cheap")->stub);
+  ASSERT_EQ(store->routines.size(), 2u);
+  EXPECT_TRUE(store->routines[0].stub);
+  EXPECT_EQ(store->routines[0].kind, "procedure");
+  EXPECT_EQ(store->routines[1].kind, "function");
+  ASSERT_EQ(store->triggers.size(), 1u);
+  EXPECT_EQ(store->triggers[0].name, "sale_bi");
+  EXPECT_EQ(store->events.size(), 1u);
+  EXPECT_EQ(store->sequences.size(), 1u);
+}
+
+TEST(Mcp_catalog, details_fill_the_stubs_asked_for) {
+  Fake_server server;
+  std::string error;
+  bool permanent = true;
+  const auto snap = fetch_mcp_catalog(server.caller(), &error, &permanent);
+  ASSERT_TRUE(snap) << error;
+  server.calls.clear();
+
+  // item only: sale is known to point at it before sale is read.
+  auto details = mdbls::fetch_mcp_details(server.caller(), {{"store", "item", "table"}}, &error,
+                                          &permanent);
+  ASSERT_TRUE(details) << error;
+  EXPECT_EQ(server.calls, std::vector<std::string>{"db.get_object_details store item table"});
+  auto catalog = mdbls::apply_details(*snap->catalog, *details);
+  const auto *store = catalog->find("store");
+  const auto *item = store->table("item");
+  ASSERT_NE(item, nullptr);
+  EXPECT_FALSE(item->stub);
   ASSERT_EQ(item->columns.size(), 3u);
   EXPECT_EQ(item->columns[0].type, "int(11)");
   EXPECT_FALSE(item->columns[0].nullable);
@@ -168,55 +200,55 @@ TEST(Mcp_catalog, maps_the_tool_results_onto_the_catalog) {
   EXPECT_EQ(item->indexes[0].kind, "primary");
   EXPECT_EQ(item->indexes[0].columns, std::vector<std::string>{"id"});
   EXPECT_EQ(item->indexes[1].kind, "unique");
-  EXPECT_EQ(item->indexes[1].name, "label");
-  // The 1:n reference is sale's key, not item's.
+  EXPECT_EQ(item->options, (std::vector<std::pair<std::string, std::string>>{{"comment", "for sale"}}));
   EXPECT_TRUE(item->foreign_keys.empty());
-
   const auto *sale = store->table("sale");
   ASSERT_NE(sale, nullptr);
+  EXPECT_TRUE(sale->stub);
+  ASSERT_EQ(sale->foreign_keys.size(), 1u);
+  EXPECT_EQ(sale->foreign_keys[0].name, "sale_ibfk_1");
+  EXPECT_EQ(sale->foreign_keys[0].columns, std::vector<std::string>{"item_id"});
+  EXPECT_EQ(sale->foreign_keys[0].ref_table, "item");
+  EXPECT_EQ(sale->foreign_keys[0].ref_columns, std::vector<std::string>{"id"});
+
+  // The rest: sale's own key once, though item pointed it out too.
+  details = mdbls::fetch_mcp_details(server.caller(),
+                                     {{"store", "sale", "table"},
+                                      {"store", "cheap", "view"},
+                                      {"store", "restock", "procedure"},
+                                      {"store", "price_of", "function"}},
+                                     &error, &permanent);
+  ASSERT_TRUE(details) << error;
+  catalog = mdbls::apply_details(*catalog, *details);
+  store = catalog->find("store");
+  sale = store->table("sale");
+  EXPECT_FALSE(sale->stub);
   EXPECT_FALSE(sale->columns[0].nullable);  // not_null as a boolean
   EXPECT_EQ(sale->columns[2].default_value, "1");
   ASSERT_EQ(sale->indexes.size(), 1u);  // the FOREIGN KEY constraint is no index
   ASSERT_EQ(sale->foreign_keys.size(), 1u);
-  EXPECT_EQ(sale->foreign_keys[0].name, "sale_ibfk_1");
-  EXPECT_EQ(sale->foreign_keys[0].columns, std::vector<std::string>{"item_id"});
   EXPECT_EQ(sale->foreign_keys[0].ref_schema, "store");
-  EXPECT_EQ(sale->foreign_keys[0].ref_table, "item");
-  EXPECT_EQ(sale->foreign_keys[0].ref_columns, std::vector<std::string>{"id"});
-
   const auto *cheap = store->view("cheap");
-  ASSERT_NE(cheap, nullptr);
+  EXPECT_FALSE(cheap->stub);
   EXPECT_EQ(cheap->columns, (std::vector<std::string>{"id", "label"}));
-
   ASSERT_EQ(store->routines.size(), 2u);
-  EXPECT_EQ(store->routines[0].name, "restock");
-  EXPECT_EQ(store->routines[0].kind, "procedure");
+  EXPECT_FALSE(store->routines[0].stub);
   EXPECT_EQ(store->routines[0].parameter_list(), "IN n int(11), OUT done int(11)");
   EXPECT_EQ(store->routines[0].returns, "");
-  EXPECT_EQ(store->routines[1].kind, "function");
   EXPECT_EQ(store->routines[1].returns, "decimal(10,2)");
-
-  ASSERT_EQ(store->triggers.size(), 1u);
-  EXPECT_EQ(store->triggers[0].timing, "BEFORE");
-  EXPECT_EQ(store->triggers[0].events, "INSERT");
-  EXPECT_EQ(store->triggers[0].table, "sale");
-  ASSERT_EQ(store->events.size(), 1u);
-  EXPECT_EQ(store->events[0].name, "nightly");
-  ASSERT_EQ(store->sequences.size(), 1u);
-  EXPECT_EQ(store->sequences[0].name, "item_seq");
 }
 
 TEST(Mcp_catalog, a_failed_call_ends_the_reading_with_its_reason) {
   Fake_server server;
-  server.fail_on = "db.get_object_details store sale table";
+  server.fail_on = "db.list_objects store view";
   server.permanent = true;
   std::string error;
   bool permanent = false;
   EXPECT_FALSE(fetch_mcp_catalog(server.caller(), &error, &permanent));
-  EXPECT_EQ(error, "db.get_object_details: no such thing");
+  EXPECT_EQ(error, "db.list_objects: no such thing");
   EXPECT_TRUE(permanent);
   // Nothing after the failure was asked.
-  EXPECT_EQ(server.calls.back(), "db.get_object_details store sale table");
+  EXPECT_EQ(server.calls.back(), "db.list_objects store view");
 }
 
 TEST(Mcp_catalog, cancelled_between_calls) {

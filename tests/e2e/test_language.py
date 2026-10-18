@@ -449,13 +449,29 @@ class Mcp_mode(unittest.TestCase):
                                              "position": position_of(text, "item i")})
         self.assertIn("**table** `store`.`item`", h["contents"]["value"])
         self.assertIn("From the connected server.", h["contents"]["value"])
-        # Every object of the user schema was asked about, once.
+        # The reading listed names; the details were read for what the
+        # requests used - item, once - and for nothing else.
         self.assertEqual(self.calls[0], ("db.execute_sql",))
         self.assertEqual(self.calls[1], ("db.list_schemas",))
-        self.assertEqual(sorted(self.calls), sorted(MCP_ANSWERS))
+        details = [k for k in self.calls if k[0] == "db.get_object_details"]
+        self.assertEqual(details, [("db.get_object_details", "store", "item", "table")])
         sig = c.request("textDocument/signatureHelp", {
             "textDocument": {"uri": URI}, "position": pos})
         self.assertIsNone(sig)
+
+    def test_a_routine_is_read_when_its_signature_is_wanted(self):
+        c = self.client
+        text, pos = split_cursor("CALL restock(|")
+        self.connect(text)
+        deadline = time.monotonic() + 30
+        sig = None
+        while sig is None and time.monotonic() < deadline:
+            sig = c.request("textDocument/signatureHelp", {"textDocument": {"uri": URI},
+                                                           "position": pos})
+            time.sleep(0.1)
+        self.assertIsNotNone(sig)
+        self.assertEqual(sig["signatures"][0]["label"], "restock(IN n int(11), OUT done int(11))")
+        self.assertIn(("db.get_object_details", "store", "restock", "procedure"), self.calls)
 
     def test_refresh_asks_again(self):
         c = self.client

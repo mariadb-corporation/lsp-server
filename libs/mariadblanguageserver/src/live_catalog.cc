@@ -345,6 +345,55 @@ std::optional<Live_snapshot> fetch_live_catalog(const Connection_uri &, std::str
 
 #endif
 
+std::shared_ptr<const Catalog> apply_details(const Catalog &catalog,
+                                             const Catalog_details &details) {
+  std::vector<Schema> schemas = catalog.schemas();
+  auto schema = [&](const std::string &name) -> Schema * {
+    for (auto &s : schemas) {
+      if (iequals(s.name, name)) return &s;
+    }
+    return nullptr;
+  };
+  for (const auto &[sname, table] : details.tables) {
+    Schema *s = schema(sname);
+    Table *t = s != nullptr ? s->table(table.name) : nullptr;
+    if (t == nullptr) continue;
+    *t = table;
+    t->stub = false;
+  }
+  for (const auto &[sname, view] : details.views) {
+    Schema *s = schema(sname);
+    if (s == nullptr) continue;
+    for (auto &v : s->views) {
+      if (iequals(v.name, view.name)) {
+        v = view;
+        v.stub = false;
+      }
+    }
+  }
+  for (const auto &[sname, routine] : details.routines) {
+    Schema *s = schema(sname);
+    if (s == nullptr) continue;
+    for (auto &r : s->routines) {
+      if (iequals(r.name, routine.name) && iequals(r.kind, routine.kind)) {
+        r = routine;
+        r.stub = false;
+      }
+    }
+  }
+  // A table read in full lists its own foreign keys already.
+  for (const auto &[sname, tname, fk] : details.incoming) {
+    Schema *s = schema(sname);
+    Table *t = s != nullptr ? s->table(tname) : nullptr;
+    if (t == nullptr || !t->stub) continue;
+    const bool known = std::any_of(t->foreign_keys.begin(), t->foreign_keys.end(), [&](const Foreign_key &k) {
+      return k.name == fk.name && k.columns == fk.columns;
+    });
+    if (!known) t->foreign_keys.push_back(fk);
+  }
+  return std::make_shared<const Catalog>(Catalog::from_schemas(std::move(schemas)));
+}
+
 Live_catalog::Live_catalog(std::string uri, Live_catalog_options options,
                            std::function<void()> on_update)
     : m_uri(std::move(uri)),
@@ -362,6 +411,76 @@ Live_catalog::~Live_catalog() {
   }
   m_cv.notify_all();
   m_thread.join();
+  // Whoever still waits for details is let go.
+  for (auto &r : m_detail_requests) r.done->set_value();
+}
+
+bool Live_catalog::details(const std::set<Object_key> &objects, std::chrono::milliseconds wait) {
+  if (!m_options.fetch_details || objects.empty()) return false;
+  auto done = std::make_shared<std::promise<void>>();
+  auto future = done->get_future();
+  {
+    std::lock_guard lock(m_mutex);
+    if (m_stop) return false;
+    m_detail_requests.push_back({std::vector<Object_key>(objects.begin(), objects.end()), done});
+  }
+  m_cv.notify_all();
+  return future.wait_for(wait) == std::future_status::ready;
+}
+
+void Live_catalog::read_details(std::vector<Detail_request> requests) {
+  // Each object once, and only those still stubs that did not fail.
+  std::set<Object_key> wanted;
+  const auto snap = snapshot();
+  {
+    std::lock_guard lock(m_mutex);
+    for (const auto &r : requests) {
+      for (const auto &o : r.objects) {
+        if (m_details_failed.count(o) == 0) wanted.insert(o);
+      }
+    }
+  }
+  if (snap && snap->catalog) {
+    for (auto it = wanted.begin(); it != wanted.end();) {
+      bool stub = false;
+      if (const Schema *sc = snap->catalog->find(it->schema)) {
+        if (it->type == "table") {
+          const Table *t = sc->table(it->name);
+          stub = t != nullptr && t->stub;
+        } else if (it->type == "view") {
+          const View *v = sc->view(it->name);
+          stub = v != nullptr && v->stub;
+        } else {
+          const Routine *r = sc->routine(it->name);
+          stub = r != nullptr && r->stub;
+        }
+      }
+      it = stub ? std::next(it) : wanted.erase(it);
+    }
+  }
+  if (!wanted.empty()) {
+    std::string error;
+    const auto details = m_options.fetch_details(
+        m_uri, std::vector<Object_key>(wanted.begin(), wanted.end()), &error, [this] {
+          std::lock_guard lock(m_mutex);
+          return m_stop;
+        });
+    if (details) {
+      // Into the snapshot of now: a reading may have replaced the one the
+      // stubs were found in.
+      std::lock_guard lock(m_mutex);
+      if (m_snapshot && m_snapshot->catalog) {
+        auto next = std::make_shared<Live_snapshot>(*m_snapshot);
+        next->catalog = apply_details(*m_snapshot->catalog, *details);
+        m_snapshot = std::move(next);
+      }
+    } else {
+      if (m_options.log) m_options.log("live catalog " + m_normalized + ": details: " + error);
+      std::lock_guard lock(m_mutex);
+      m_details_failed.insert(wanted.begin(), wanted.end());
+    }
+  }
+  for (auto &r : requests) r.done->set_value();
 }
 
 void Live_catalog::refresh() {
@@ -416,7 +535,8 @@ void Live_catalog::run() {
   for (;;) {
     {
       std::unique_lock lock(m_mutex);
-      while (!m_stop && !m_wanted) {
+      bool due = false;  // the refresh interval or a retry's time came
+      while (!m_stop && !m_wanted && m_detail_requests.empty()) {
         if (m_reschedule) {
           m_reschedule = false;
           // After a failure the retry keeps its back-off.
@@ -425,10 +545,19 @@ void Live_catalog::run() {
         if (next == Clock::time_point::max()) {
           m_cv.wait(lock);
         } else if (m_cv.wait_until(lock, next) == std::cv_status::timeout) {
+          due = true;
           break;
         }
       }
       if (m_stop) return;
+      if (!m_wanted && !due) {
+        // Only details were asked for: the schedule stays as it is.
+        auto requests = std::move(m_detail_requests);
+        m_detail_requests.clear();
+        lock.unlock();
+        read_details(std::move(requests));
+        continue;
+      }
       m_wanted = false;
     }
     next = Clock::time_point::max();
@@ -484,6 +613,7 @@ void Live_catalog::run() {
       if (snap) {
         m_snapshot = std::make_shared<const Live_snapshot>(std::move(*snap));
         m_error.clear();
+        m_details_failed.clear();
         last_success = Clock::now();
         next = after(*last_success, m_interval);
       } else {

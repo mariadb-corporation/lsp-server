@@ -519,6 +519,26 @@ TEST(Completion, the_foreign_key_may_point_the_other_way) {
             "LEFT OUTER JOIN test_schema.t1 AS t ON x.t1_id = t.id;");
 }
 
+TEST(Completion, n_m_tables_are_joined_through_the_table_linking_them) {
+  const std::string schema = R"(
+CREATE TABLE school.student (id INT PRIMARY KEY, name VARCHAR(40));
+CREATE TABLE school.course (id INT PRIMARY KEY, title VARCHAR(40));
+CREATE TABLE school.enrollment (student_id INT, course_id INT,
+  FOREIGN KEY (student_id) REFERENCES school.student (id),
+  FOREIGN KEY (course_id) REFERENCES school.course (id));
+)";
+  const auto r = complete_at(schema + "SELECT s.name, school.course.| FROM school.student AS s;", false);
+  EXPECT_EQ(pick(r, "title"),
+            "SELECT s.name, c.title FROM school.student AS s "
+            "LEFT OUTER JOIN school.enrollment AS e ON e.student_id = s.id "
+            "LEFT OUTER JOIN school.course AS c ON e.course_id = c.id;");
+  // The link table's alias does not take the new table's.
+  const auto t = complete_at(schema + "SELECT x.name, school.enrollment.| FROM school.student AS x;", false);
+  EXPECT_EQ(pick(t, "course_id"),
+            "SELECT x.name, e.course_id FROM school.student AS x "
+            "LEFT OUTER JOIN school.enrollment AS e ON e.student_id = x.id;");
+}
+
 TEST(Completion, a_table_with_no_foreign_key_is_cross_joined) {
   const auto r = complete_at(
       std::string(k_fk_schema) + "SELECT t.id, test_schema.t3.| FROM test_schema.t1 AS t;", false);

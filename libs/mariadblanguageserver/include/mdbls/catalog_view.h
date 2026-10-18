@@ -20,6 +20,7 @@
 
 #include <functional>
 #include <memory>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -89,13 +90,20 @@ class Catalog_view {
   void for_each_routine(std::string_view schema,
                         const std::function<void(const Routine_hit &)> &f) const;
 
+  // The stubs (see Table::stub) find_table and find_routine have returned:
+  // what a request would have used had their details been read.
+  const std::set<Object_key> &stubs_met() const { return m_stubs; }
+
  private:
+  Table_hit find_table_in_layers(std::string_view schema, std::string_view name) const;
+
   // The schemas of `layer` that `schema` ("" = current) means.
   std::vector<const Schema *> schemas_for(const Catalog_layer &layer,
                                           std::string_view schema) const;
 
   std::vector<Catalog_layer> m_layers;
   std::string m_current;
+  mutable std::set<Object_key> m_stubs;
 };
 
 }  // namespace mdbls

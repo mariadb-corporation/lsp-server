@@ -21,7 +21,12 @@
 #include <chrono>
 #include <condition_variable>
 #include <functional>
+#include <future>
 #include <memory>
+#include <set>
+#include <tuple>
+#include <utility>
+#include <vector>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -80,7 +85,28 @@ using Catalog_fetcher = std::function<std::optional<Live_snapshot>(
     const std::string &uri, std::string *error, bool *permanent,
     const std::function<bool()> &cancelled)>;
 
+// The details of stubs (Table::stub) read for a request.
+struct Catalog_details {
+  std::vector<std::pair<std::string, Table>> tables;  // schema, table
+  std::vector<std::pair<std::string, View>> views;
+  std::vector<std::pair<std::string, Routine>> routines;
+  // Foreign keys of other tables that point at a table read: the schema and
+  // table they belong to.  Kept on those tables while they are stubs, so a
+  // table related to one in use is known as related before it is read.
+  std::vector<std::tuple<std::string, std::string, Foreign_key>> incoming;
+};
+
+// `catalog` with the stubs `details` describes filled in.
+std::shared_ptr<const Catalog> apply_details(const Catalog &catalog, const Catalog_details &details);
+
+// Reads the details of stubs; as Catalog_fetcher.
+using Detail_fetcher = std::function<std::optional<Catalog_details>(
+    const std::string &uri, const std::vector<Object_key> &objects, std::string *error,
+    const std::function<bool()> &cancelled)>;
+
 struct Live_catalog_options {
+  // With `fetch`: reads the details of stubs when a request asks.
+  Detail_fetcher fetch_details;
   // Set, the catalog is read through this and the secret store and the
   // client library are not used.
   Catalog_fetcher fetch;
@@ -113,6 +139,13 @@ class Live_catalog {
   const std::string &normalized_uri() const { return m_normalized; }
 
   void refresh();
+
+  // Has the details of `objects` (stubs of the snapshot) read on the
+  // catalog's thread, and waits up to `wait` for them.  True when they were
+  // read in time - snapshot() then has them; false when there is no detail
+  // fetcher, or they come later or not at all.  Objects that failed are
+  // not asked for again until the catalog is read again.
+  bool details(const std::set<Object_key> &objects, std::chrono::milliseconds wait);
   // Reads again this often from now on (0: only on refresh()), counted
   // from the last successful read.
   void set_refresh_interval(std::chrono::seconds interval);
@@ -126,6 +159,11 @@ class Live_catalog {
 
  private:
   void run();
+  struct Detail_request {
+    std::vector<Object_key> objects;
+    std::shared_ptr<std::promise<void>> done;
+  };
+  void read_details(std::vector<Detail_request> requests);
 
   const std::string m_uri;
   std::string m_normalized;
@@ -138,6 +176,8 @@ class Live_catalog {
   bool m_wanted = true;  // a refresh is due
   std::chrono::seconds m_interval;  // m_options.refresh_interval until set
   bool m_reschedule = false;        // m_interval changed
+  std::vector<Detail_request> m_detail_requests;
+  std::set<Object_key> m_details_failed;  // since the last reading
   std::shared_ptr<const Live_snapshot> m_snapshot;
   std::string m_error;
   uint64_t m_attempts = 0;

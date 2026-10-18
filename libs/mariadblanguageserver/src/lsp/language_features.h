@@ -42,6 +42,8 @@ struct Catalog_sources {
   std::shared_ptr<const Outline> document;            // the document's own DDL
   std::shared_ptr<const Workspace_catalog> workspace;  // the catalog files
   std::shared_ptr<const Live_snapshot> live;           // the connection's
+  // Where `live` came from: reads the details of its stubs on demand.
+  std::shared_ptr<Live_catalog> live_source;
   std::string schema_hint;  // documentContext's currentSchema
 };
 

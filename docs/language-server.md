@@ -134,7 +134,10 @@ opens at once. Picking a column of a table that is not in scope adds that table:
 - with no FROM yet, ` FROM <table> AS <alias>` goes after the select list;
 - with one, ` LEFT OUTER JOIN <table> AS <alias> ON ...` goes after its tables, on the first
   foreign key between the new table and a table in scope (either direction, in the order
-  the tables are listed), or ` CROSS JOIN <table> AS <alias>` when there is none;
+  the tables are listed); with none, through a table that has a foreign key to each (n:m:
+  ` LEFT OUTER JOIN enrollment AS e ON e.student_id = s.id LEFT OUTER JOIN course AS c ON
+  e.course_id = c.id`), looked for in the schemas of both; only when there is no such table
+  either, ` CROSS JOIN <table> AS <alias>`;
 - a table already in scope is only renamed to its alias.
 
 The edits are `additionalTextEdits`. One that would insert exactly where the item's own text
@@ -189,12 +192,19 @@ are not used.
 A reading makes these calls: `db.execute_sql` (`SELECT @@sql_mode, VERSION(),
 DATABASE()`), `db.list_schemas`, then per schema `db.list_objects` for tables and views,
 and for the user schemas (`schema_type` "User Schema") also procedures, functions,
-triggers, events and sequences, with `db.get_object_details` for every table (columns,
-primary and unique keys from `constraints`, the table's own foreign keys from the `n:1`
-`references`), view (columns), routine (parameters, `RETURNS`) and trigger (table, timing,
-event). System schemas are listed with their tables and views, without details: a call
-per object would cost more than they are used. `performance_schema` is left out, as it
-is in direct mode. A call the client does not answer within 120 s fails the reading;
+triggers, events and sequences. It reads names only: the tables, views and routines of
+the user schemas are stubs. `performance_schema` is left out, as it is in direct mode.
+
+**Details on demand.** A completion, hover or signature help that meets a stub (the
+columns of a table in scope or after `schema.table.`, a routine's parameters) has the
+live catalog read its details, one `db.get_object_details` each, on the catalog's own
+thread, waits up to 3 s, and answers again with them; a completion answered without them
+is marked incomplete, so the client asks again. A table's details give its columns,
+primary and unique keys (`constraints`), its own foreign keys (the `n:1` `references`), and
+the foreign keys of other tables pointing at it (`1:1` and `1:n`), which are kept on those
+tables while they are stubs: a table related to one in use ranks as related before it is
+read. Details read stay until the next reading; one that failed is not asked for again
+until then. A call the client does not answer within 120 s fails the reading;
 the retry schedule and `mariadb/refreshCatalog` are as in direct mode, and an error
 marked `permanent` is not retried. Shutting down releases a reading waiting on the
 client.

@@ -52,17 +52,25 @@ struct Mcp_catalog_options {
 
 // Reads the server's sql_mode, version and current schema (db.execute_sql),
 // its schemas (db.list_schemas), each schema's tables and views
-// (db.list_objects), and, for the user schemas, their routines, triggers,
-// events and sequences, with the columns, keys and foreign keys of each
-// table, the columns of each view, the parameters of each routine and the
-// table of each trigger (db.get_object_details).  System schemas are listed
-// with their tables and views, without details: one call per object would
-// make them cost more than they are used.  performance_schema is left out,
-// as the direct reader leaves it out.  nullopt, with `error` and `permanent`
-// set, on the first call that fails.
+// (db.list_objects), and, for the user schemas, the names of their
+// routines, triggers, events and sequences.  The tables, views and routines
+// of the user schemas are stubs (Table::stub): their details take a call
+// each, made when a request first needs them (fetch_mcp_details).  System
+// schemas list their tables and views by name only.  performance_schema is
+// left out, as the direct reader leaves it out.  nullopt, with `error` and
+// `permanent` set, on the first call that fails.
 std::optional<Live_snapshot> fetch_mcp_catalog(const Tool_caller &call, std::string *error,
                                                bool *permanent,
                                                const Mcp_catalog_options &options = {});
+
+// The details of stubs, one db.get_object_details call each: a table's
+// columns, primary and unique keys and its own foreign keys, and those of
+// other tables that point at it (Catalog_details::incoming); a view's
+// columns; a routine's parameters and return type.
+std::optional<Catalog_details> fetch_mcp_details(const Tool_caller &call,
+                                                const std::vector<Object_key> &objects,
+                                                std::string *error, bool *permanent,
+                                                const Mcp_catalog_options &options = {});
 
 }  // namespace mdbls
 

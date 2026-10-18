@@ -563,13 +563,14 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
           return nullptr;
         };
         // An alias for a table added to FROM: its first letter, numbered
-        // when that is taken.
-        auto new_alias = [&](const std::string &name) {
+        // when that is taken, by a table in scope or by `also`.
+        auto new_alias = [&](const std::string &name, const std::string &also = {}) {
           std::string base(1, name.empty() || !std::isalpha(static_cast<unsigned char>(name[0]))
                                   ? 't'
                                   : static_cast<char>(std::tolower(static_cast<unsigned char>(name[0]))));
           auto taken = [&](const std::string &alias) {
-            return std::any_of(tables().begin(), tables().end(),
+            return iequals(alias, also) ||
+                   std::any_of(tables().begin(), tables().end(),
                                [&](const Table_ref &t) { return iequals(t.visible_name(), alias); });
           };
           std::string alias = base;
@@ -635,9 +636,61 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
             if (!on.empty()) break;
           }
           const uint32_t at_end = to_doc(query.from_tables.end);
-          edits.push_back({at_end, at_end,
-                           on.empty() ? " CROSS JOIN " + qualified + " AS " + alias
-                                      : " LEFT OUTER JOIN " + qualified + " AS " + alias + " ON " + on});
+          if (!on.empty()) {
+            edits.push_back({at_end, at_end, " LEFT OUTER JOIN " + qualified + " AS " + alias + " ON " + on});
+            return edits;
+          }
+          // n:m: a table with a foreign key to the new one and one to a
+          // table in scope links them; it is joined first, then the new
+          // table on it.  Looked for among the tables of either schema.
+          for (const auto &t : tables()) {
+            const auto other = resolve(t);
+            if (other.table == nullptr || h.table == nullptr) continue;
+            std::string link;
+            for (const std::string &where : {schema, schema_of(other)}) {
+              catalogs.for_each_table(where, [&](const Catalog_view::Table_hit &l) {
+                if (!link.empty() || l.table == nullptr || l.table == h.table || l.table == other.table) {
+                  return;
+                }
+                const Foreign_key *to_new = nullptr;
+                const Foreign_key *to_scope = nullptr;
+                for (const auto &fk : l.table->foreign_keys) {
+                  if (to_new == nullptr && points_at(fk, schema_of(l), h)) {
+                    to_new = &fk;
+                  } else if (to_scope == nullptr && points_at(fk, schema_of(l), other)) {
+                    to_scope = &fk;
+                  }
+                }
+                if (to_new == nullptr || to_scope == nullptr) return;
+                const std::string link_schema = schema_of(l);
+                const std::string link_alias = new_alias(l.table->name, alias);
+                auto condition = [&](const Foreign_key &fk, const std::string &from, const std::string &to) {
+                  std::string c;
+                  for (size_t k = 0; k < fk.columns.size() && k < fk.ref_columns.size(); ++k) {
+                    if (!c.empty()) c += " AND ";
+                    c += from + "." + quote_identifier(fk.columns[k]) + " = " + to + "." +
+                         quote_identifier(fk.ref_columns[k]);
+                  }
+                  return c;
+                };
+                const std::string link_qualified =
+                    (link_schema.empty() || iequals(link_schema, catalogs.current_schema())
+                         ? std::string()
+                         : quote_identifier(link_schema) + ".") +
+                    quote_identifier(l.table->name);
+                link = " LEFT OUTER JOIN " + link_qualified + " AS " + link_alias + " ON " +
+                       condition(*to_scope, link_alias, quote_identifier(t.visible_name())) +
+                       " LEFT OUTER JOIN " + qualified + " AS " + alias + " ON " +
+                       condition(*to_new, link_alias, alias);
+              });
+              if (!link.empty()) break;
+            }
+            if (!link.empty()) {
+              edits.push_back({at_end, at_end, link});
+              return edits;
+            }
+          }
+          edits.push_back({at_end, at_end, " CROSS JOIN " + qualified + " AS " + alias});
           return edits;
         };
         // A table or schema to go on from: `name.`, and the list again.

@@ -72,6 +72,15 @@ std::vector<const Schema *> Catalog_view::schemas_for(const Catalog_layer &layer
 
 Catalog_view::Table_hit Catalog_view::find_table(std::string_view schema,
                                                  std::string_view name) const {
+  const Table_hit hit = find_table_in_layers(schema, name);
+  const std::string schema_name = hit.schema != nullptr ? hit.schema->name : std::string();
+  if (hit.table != nullptr && hit.table->stub) m_stubs.insert({schema_name, hit.table->name, "table"});
+  if (hit.view != nullptr && hit.view->stub) m_stubs.insert({schema_name, hit.view->name, "view"});
+  return hit;
+}
+
+Catalog_view::Table_hit Catalog_view::find_table_in_layers(std::string_view schema,
+                                                           std::string_view name) const {
   for (const auto &l : m_layers) {
     for (const Schema *s : schemas_for(l, schema)) {
       if (const Table *t = s->table(name)) return {t, nullptr, s, &l};
@@ -102,7 +111,10 @@ Catalog_view::Routine_hit Catalog_view::find_routine(std::string_view schema,
                                                      std::string_view name) const {
   for (const auto &l : m_layers) {
     for (const Schema *s : schemas_for(l, schema)) {
-      if (const Routine *r = s->routine(name)) return {r, s, &l};
+      if (const Routine *r = s->routine(name)) {
+        if (r->stub) m_stubs.insert({s->name, r->name, r->kind});
+        return {r, s, &l};
+      }
     }
   }
   return {};

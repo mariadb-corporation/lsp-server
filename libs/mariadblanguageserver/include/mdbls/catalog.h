@@ -18,6 +18,7 @@
 #ifndef MDBLS_CATALOG_H_
 #define MDBLS_CATALOG_H_
 
+#include <compare>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -92,6 +93,10 @@ struct Table {
   // engine, charset, collation, comment, auto_increment, row_format, ...
   std::vector<std::pair<std::string, std::string>> options;
   Origin origin;
+  // Only the name is known, and foreign keys of other tables that point
+  // here: a live catalog read through MCP reads the rest when a request
+  // first needs it (see Live_catalog::details).
+  bool stub = false;
 
   Column *column(std::string_view name);
   const Column *column(std::string_view name) const;
@@ -102,6 +107,7 @@ struct View {
   std::vector<std::string> columns;    // the explicit column list, if any
   std::string definition;              // the SELECT as written
   Origin origin;
+  bool stub = false;                   // as Table::stub: no columns yet
 };
 
 struct Parameter {
@@ -116,6 +122,7 @@ struct Routine {
   std::vector<Parameter> parameters;
   std::string returns;                 // functions only
   Origin origin;
+  bool stub = false;                   // as Table::stub: no parameters yet
 
   // "IN a INT, b TEXT"
   std::string parameter_list() const;
@@ -132,6 +139,15 @@ struct Trigger {
 struct Named_object {
   std::string name;
   Origin origin;
+};
+
+// A table, view or routine of a live catalog whose details a request wants.
+struct Object_key {
+  std::string schema;
+  std::string name;
+  std::string type;  // table, view, procedure, function
+
+  auto operator<=>(const Object_key &) const = default;
 };
 
 struct Schema {

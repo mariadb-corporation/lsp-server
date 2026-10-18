@@ -972,7 +972,10 @@ struct Server::Impl {
     if (const auto it = live.find(key); it != live.end()) return it->second;
     Live_catalog_options o;
     o.secrets = secrets;
-    if (options.mcp) o.fetch = mcp_fetcher();
+    if (options.mcp) {
+      o.fetch = mcp_fetcher();
+      o.fetch_details = mcp_detail_fetcher();
+    }
     o.refresh_interval = live_interval;
     o.log = [this](const std::string &line) { log(line); };
     auto box = inbox;
@@ -986,42 +989,57 @@ struct Server::Impl {
   // Reads a catalog through the client's MCP server: each db.* tool call is
   // a mariadb/dbCall request, answered by the client.  Runs on the live
   // catalog's thread; the loop thread hands the answers over.
+  // Calls a db.* tool on `uri` through the client; for as long as `uri`
+  // and `cancelled` live.
+  Tool_caller mcp_tool_caller(const std::string &uri, const std::function<bool()> &cancelled) {
+    return [this, &uri, &cancelled](std::string_view tool, const std::string &arguments,
+                                    rapidjson::Document *out) -> std::optional<Tool_failure> {
+      rapidjson::StringBuffer buf;
+      Json_writer w(buf);
+      w.StartObject();
+      w.Key("connection");
+      w.String(uri.c_str());
+      w.Key("tool");
+      w.String(tool.data(), static_cast<rapidjson::SizeType>(tool.size()));
+      w.Key("arguments");
+      w.RawValue(arguments.c_str(), arguments.size(), rapidjson::kObjectType);
+      w.EndObject();
+      auto future = client_request("mariadb/dbCall", std::string(buf.GetString(), buf.GetSize()));
+      const auto deadline = Clock::now() + k_db_call_timeout;
+      while (future.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) {
+        if (cancelled()) return Tool_failure{"cancelled", false};
+        if (Clock::now() > deadline) {
+          return Tool_failure{"the client did not answer within " +
+                                  std::to_string(k_db_call_timeout.count()) + " s",
+                              false};
+        }
+      }
+      const Client_reply reply = future.get();
+      if (!reply.ok) return Tool_failure{reply.message, reply.permanent};
+      out->Parse(reply.result.c_str(), reply.result.size());
+      if (out->HasParseError()) return Tool_failure{"the client's answer is not JSON", false};
+      return std::nullopt;
+    };
+  }
+
   Catalog_fetcher mcp_fetcher() {
     return [this](const std::string &uri, std::string *error, bool *permanent,
                   const std::function<bool()> &cancelled) {
-      const Tool_caller call = [this, &uri, &cancelled](std::string_view tool,
-                                                        const std::string &arguments,
-                                                        rapidjson::Document *out)
-          -> std::optional<Tool_failure> {
-        rapidjson::StringBuffer buf;
-        Json_writer w(buf);
-        w.StartObject();
-        w.Key("connection");
-        w.String(uri.c_str());
-        w.Key("tool");
-        w.String(tool.data(), static_cast<rapidjson::SizeType>(tool.size()));
-        w.Key("arguments");
-        w.RawValue(arguments.c_str(), arguments.size(), rapidjson::kObjectType);
-        w.EndObject();
-        auto future = client_request("mariadb/dbCall", std::string(buf.GetString(), buf.GetSize()));
-        const auto deadline = Clock::now() + k_db_call_timeout;
-        while (future.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) {
-          if (cancelled()) return Tool_failure{"cancelled", false};
-          if (Clock::now() > deadline) {
-            return Tool_failure{"the client did not answer within " +
-                                    std::to_string(k_db_call_timeout.count()) + " s",
-                                false};
-          }
-        }
-        const Client_reply reply = future.get();
-        if (!reply.ok) return Tool_failure{reply.message, reply.permanent};
-        out->Parse(reply.result.c_str(), reply.result.size());
-        if (out->HasParseError()) return Tool_failure{"the client's answer is not JSON", false};
-        return std::nullopt;
-      };
       Mcp_catalog_options mo;
       mo.cancelled = cancelled;
-      return fetch_mcp_catalog(call, error, permanent, mo);
+      return fetch_mcp_catalog(mcp_tool_caller(uri, cancelled), error, permanent, mo);
+    };
+  }
+
+  // Reads the details of stubs through the client, as mcp_fetcher reads
+  // the rest.
+  Detail_fetcher mcp_detail_fetcher() {
+    return [this](const std::string &uri, const std::vector<Object_key> &objects,
+                  std::string *error, const std::function<bool()> &cancelled) {
+      Mcp_catalog_options mo;
+      mo.cancelled = cancelled;
+      bool permanent = false;
+      return fetch_mcp_details(mcp_tool_caller(uri, cancelled), objects, error, &permanent, mo);
     };
   }
 
@@ -1130,7 +1148,10 @@ struct Server::Impl {
     r.snapshot = d.doc.snapshot();
     r.outline = d.outline;
     r.catalogs.workspace = workspace;
-    if (d.live) r.catalogs.live = d.live->snapshot();
+    if (d.live) {
+      r.catalogs.live = d.live->snapshot();
+      r.catalogs.live_source = d.live;
+    }
     r.catalogs.schema_hint = d.schema_hint;
     return r;
   }

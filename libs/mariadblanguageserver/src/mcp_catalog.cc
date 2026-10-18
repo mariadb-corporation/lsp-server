@@ -184,9 +184,10 @@ void read_constraints(const Json &details, Table &t) {
   }
 }
 
-// The foreign keys of the table itself: the n:1 references.  The 1:1 and
-// 1:n ones are the other tables' keys, read with those tables.
-void read_references(const Json &details, Table &t) {
+// The foreign keys of the table itself (the n:1 references) into `t`, and
+// those of other tables that point at it (1:1 and 1:n) into `incoming`.
+void read_references(const Json &details, const std::string &schema, Table &t,
+                     Catalog_details *incoming) {
   const Json *rows = member(details, "references");
   if (rows == nullptr || !rows->IsArray()) return;
   for (const auto &r : rows->GetArray()) {
@@ -198,19 +199,35 @@ void read_references(const Json &details, Table &t) {
       if (parsed.HasParseError()) continue;
       mapping = &parsed;
     }
-    if (mapping == nullptr || text(*mapping, "kind") != "n:1") continue;
+    if (mapping == nullptr) continue;
+    const std::string kind = text(*mapping, "kind");
     Foreign_key fk;
     const std::string constraint = text(*mapping, "constraint");
     fk.name = constraint.substr(constraint.find('.') == std::string::npos ? 0 : constraint.find('.') + 1);
-    fk.ref_schema = text(*mapping, "referenced_schema");
-    fk.ref_table = text(*mapping, "referenced_table");
-    if (const Json *pairs = member(*mapping, "column_mapping"); pairs != nullptr && pairs->IsArray()) {
-      for (const auto &pair : pairs->GetArray()) {
-        fk.columns.push_back(text(pair, "base"));
-        fk.ref_columns.push_back(text(pair, "ref"));
+    const Json *pairs = member(*mapping, "column_mapping");
+    if (kind == "n:1") {
+      fk.ref_schema = text(*mapping, "referenced_schema");
+      fk.ref_table = text(*mapping, "referenced_table");
+      if (pairs != nullptr && pairs->IsArray()) {
+        for (const auto &pair : pairs->GetArray()) {
+          fk.columns.push_back(text(pair, "base"));
+          fk.ref_columns.push_back(text(pair, "ref"));
+        }
       }
+      t.foreign_keys.push_back(std::move(fk));
+    } else if (incoming != nullptr) {
+      // "referenced" is the other table here, and "base" this one's column.
+      fk.ref_schema = schema;
+      fk.ref_table = t.name;
+      if (pairs != nullptr && pairs->IsArray()) {
+        for (const auto &pair : pairs->GetArray()) {
+          fk.columns.push_back(text(pair, "ref"));
+          fk.ref_columns.push_back(text(pair, "base"));
+        }
+      }
+      incoming->incoming.emplace_back(text(*mapping, "referenced_schema"),
+                                      text(*mapping, "referenced_table"), std::move(fk));
     }
-    t.foreign_keys.push_back(std::move(fk));
   }
 }
 
@@ -287,44 +304,24 @@ std::optional<Live_snapshot> fetch_mcp_catalog(const Tool_caller &call, std::str
     }
     if (!listed.user) continue;
 
-    for (Table &t : sc.tables) {
-      if (!reading.details(listed.name, t.name, "table", &d)) return fail();
-      read_columns(d, &t, nullptr);
-      read_constraints(d, t);
-      read_references(d, t);
-    }
-    for (View &v : sc.views) {
-      if (!reading.details(listed.name, v.name, "view", &d)) return fail();
-      read_columns(d, nullptr, &v);
-    }
+    // Names only: the details are read when a request needs them.
+    for (Table &t : sc.tables) t.stub = true;
+    for (View &v : sc.views) v.stub = true;
     for (const char *kind : {"procedure", "function"}) {
       if (!reading.list(listed.name, kind, &d)) return fail();
-      std::vector<std::string> names;
-      for (const auto &o : d.GetArray()) names.push_back(text(o, "name"));
-      for (const auto &name : names) {
+      for (const auto &o : d.GetArray()) {
         Routine rt;
-        rt.name = name;
+        rt.name = text(o, "name");
         rt.kind = kind;
-        if (!reading.details(listed.name, name, kind, &d)) return fail();
-        read_routine(d, rt);
+        rt.stub = true;
         sc.routines.push_back(std::move(rt));
       }
     }
     if (!reading.list(listed.name, "trigger", &d)) return fail();
-    {
-      std::vector<std::string> names;
-      for (const auto &o : d.GetArray()) names.push_back(text(o, "name"));
-      for (const auto &name : names) {
-        Trigger tr;
-        tr.name = name;
-        if (!reading.details(listed.name, name, "trigger", &d)) return fail();
-        if (const Json *props = member(d, "details")) {
-          tr.timing = upper(text(*props, "action_timing"));
-          tr.events = upper(text(*props, "event_manipulation"));
-          tr.table = text(*props, "table_name");
-        }
-        sc.triggers.push_back(std::move(tr));
-      }
+    for (const auto &o : d.GetArray()) {
+      Trigger tr;
+      tr.name = text(o, "name");
+      sc.triggers.push_back(std::move(tr));
     }
     if (!reading.list(listed.name, "event", &d)) return fail();
     for (const auto &o : d.GetArray()) sc.events.push_back({text(o, "name"), {}});
@@ -339,6 +336,45 @@ std::optional<Live_snapshot> fetch_mcp_catalog(const Tool_caller &call, std::str
   snap.catalog = std::make_shared<const Catalog>(Catalog::from_schemas(std::move(b.schemas)));
   snap.fetched = std::chrono::system_clock::now();
   return snap;
+}
+
+std::optional<Catalog_details> fetch_mcp_details(const Tool_caller &call,
+                                                const std::vector<Object_key> &objects,
+                                                std::string *error, bool *permanent,
+                                                const Mcp_catalog_options &options) {
+  Reading reading{call, options, {}, false};
+  Catalog_details out;
+  rapidjson::Document d;
+  for (const auto &o : objects) {
+    if (!reading.details(o.schema, o.name, o.type.c_str(), &d)) {
+      if (error != nullptr) *error = reading.error;
+      if (permanent != nullptr) *permanent = reading.permanent;
+      return std::nullopt;
+    }
+    if (o.type == "table") {
+      Table t;
+      t.name = o.name;
+      if (const Json *basic = member(d, "basic")) {
+        if (const auto comment = nonempty(*basic, "comment")) t.options.emplace_back("comment", *comment);
+      }
+      read_columns(d, &t, nullptr);
+      read_constraints(d, t);
+      read_references(d, o.schema, t, &out);
+      out.tables.emplace_back(o.schema, std::move(t));
+    } else if (o.type == "view") {
+      View v;
+      v.name = o.name;
+      read_columns(d, nullptr, &v);
+      out.views.emplace_back(o.schema, std::move(v));
+    } else {
+      Routine rt;
+      rt.name = o.name;
+      rt.kind = o.type;
+      read_routine(d, rt);
+      out.routines.emplace_back(o.schema, std::move(rt));
+    }
+  }
+  return out;
 }
 
 }  // namespace mdbls
