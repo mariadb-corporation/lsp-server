@@ -150,6 +150,8 @@ TEST(Formatter, comments_stay_before_the_token_after_them) {
   EXPECT_EQ(layout("SELECT a /* first */, b FROM t;"), "SELECT a /* first */, b FROM t;");
   EXPECT_EQ(layout("SELECT a\n-- whole line\nFROM t;"), "SELECT a\n-- whole line\nFROM t;");
   EXPECT_EQ(layout("SELECT a -- the end of the line\nFROM t;"), "SELECT a -- the end of the line\nFROM t;");
+  // A kept line break goes one level deeper, with or without a comment on it.
+  EXPECT_EQ(layout("SELECT a +\n  -- note\n  b\nFROM t;"), "SELECT a +\n         -- note\n         b\nFROM t;");
   EXPECT_EQ(layout("SELECT * FROM t WHERE x IN ( -- why\nSELECT 1);"),
             "SELECT *\nFROM t\nWHERE x IN ( -- why\n  SELECT 1\n);");
   // Any blank after "--" makes a comment, before the query too.

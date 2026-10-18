@@ -391,53 +391,53 @@ class Builder {
 
   const Syntax_tree::Token &token(uint32_t j) const { return t_.tokens()[j]; }
 
-  // The separator before token j: `kind`, unless a comment before it was on
-  // a line of its own (a line break) or needs a space.
+  // The separator before token j: `kind`, with the comments of the gap
+  // before it.  A comment on a line of its own breaks the line before it; a
+  // line comment that ended the line of the token before stays there
+  // (trailing); each comment that ended its line breaks the line after it.
+  // With a kept layout (Sep::keep) every one of those breaks goes one level
+  // deeper, so a comment and the token after it land on the same level.
   Doc separator(uint32_t j, Sep kind) const {
     const Gap &g = gaps_[j];
-    if (!g.comments.empty() && g.comments.front().own_line) {
-      return kind == Sep::keep ? nest(o_.indent, hardline()) : hardline();
+    auto line_break = [&] { return kind == Sep::keep ? nest(o_.indent, hardline()) : hardline(); };
+    if (g.comments.empty()) {
+      switch (kind) {
+        case Sep::keep:
+          return g.newline ? line_break() : text(g.any ? " " : "");
+        case Sep::space:
+          return text(" ");
+        case Sep::line:
+          return line();
+        case Sep::soft:
+          return softline();
+        case Sep::none:
+          return text("");
+      }
+      return text("");
     }
-    if (trailing(j)) {
-      return concat({text(" "), text(std::string(g.comments.front().text)),
-                     kind == Sep::keep ? nest(o_.indent, hardline()) : hardline()});
-    }
-    switch (kind) {
-      case Sep::keep:
-        if (g.newline && g.comments.empty()) return nest(o_.indent, hardline());
-        return text(g.any ? " " : "");
-      case Sep::space:
-        return text(" ");
-      case Sep::line:
-        return line();
-      case Sep::soft:
-        return g.comments.empty() ? softline() : text(" ");
-      case Sep::none:
-        return text(g.comments.empty() ? "" : " ");
-    }
-    return text("");
-  }
-
-  // Whether the first comment before token j ends the line of the token
-  // before it: it stays there, written by the separator.
-  bool trailing(uint32_t j) const {
-    const Gap &g = gaps_[j];
-    return !g.comments.empty() && !g.comments.front().own_line && g.comments.front().line_after;
-  }
-
-  // Token j with the comments before it.
-  Doc leaf(uint32_t j) const {
     std::vector<Doc> parts;
-    for (size_t k = trailing(j) ? 1 : 0; k < gaps_[j].comments.size(); ++k) {
-      const Comment &c = gaps_[j].comments[k];
-      parts.push_back(text(std::string(c.text)));
-      parts.push_back(c.line_after ? hardline() : text(c.space_after ? " " : ""));
+    const Comment &first = g.comments.front();
+    if (first.own_line) {
+      parts.push_back(line_break());
+    } else if (kind == Sep::line && !first.line_after) {
+      parts.push_back(line());
+    } else {
+      parts.push_back(text(" "));  // trailing, or a comment inside the line
     }
+    for (const Comment &c : g.comments) {
+      parts.push_back(text(std::string(c.text)));
+      parts.push_back(c.line_after ? line_break() : text(c.space_after ? " " : ""));
+    }
+    return concat(std::move(parts));
+  }
+
+  // Token j, recased when it is a keyword.  The comments before it are the
+  // separator's.
+  Doc leaf(uint32_t j) const {
     const auto &tk = token(j);
     std::string word(text_.substr(tk.begin, tk.end - tk.begin));
     if (is_keyword(j, word)) word = o_.upper_case_keywords ? upper(word) : lower(word);
-    parts.push_back(text(std::move(word)));
-    return concat(std::move(parts));
+    return text(std::move(word));
   }
 
   // A keyword, and not one standing for a name.

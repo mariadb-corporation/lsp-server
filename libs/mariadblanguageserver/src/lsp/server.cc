@@ -448,9 +448,9 @@ struct Server::Impl {
       // Parsed in situ: the message's strings stay in its buffer.
       auto msg = std::make_shared<Message>();
       if (!reader.next(&msg->body)) break;
-      if (msg->body.size() > (1u << 20)) {
-        self->log("read a message of " + std::to_string(msg->body.size()) + " bytes");
-      }
+      // `self` is touched on the loop thread only: this thread may outlive
+      // the server (see run()), and a post after it stopped is dropped.
+      const size_t bytes = msg->body.size();
       msg->json.ParseInsitu(msg->body.data());
       if (!msg->json.HasParseError() && msg->json.IsObject()) {
         // $/cancelRequest acts at once, even while the loop is busy.
@@ -464,7 +464,10 @@ struct Server::Impl {
           continue;
         }
       }
-      inbox->post([self, msg] { self->on_message(msg->json); });
+      inbox->post([self, msg, bytes] {
+        if (bytes > (1u << 20)) self->log("read a message of " + std::to_string(bytes) + " bytes");
+        self->on_message(msg->json);
+      });
     }
     std::lock_guard lock(inbox->mutex);
     inbox->eof = true;
@@ -1582,7 +1585,7 @@ struct Server::Impl {
           ++suf;
         w.Key("edits");
         w.StartArray();
-        if (pre != old.size() || pre != data.size() || old.size() != data.size()) {
+        if (pre < old.size() || pre < data.size()) {
           w.StartObject();
           w.Key("start");
           w.Uint64(pre);

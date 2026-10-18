@@ -82,12 +82,6 @@ struct Symbols {
   }
 };
 
-std::string join(const std::vector<std::string> &v) {
-  std::string out;
-  for (const auto &x : v) out += (out.empty() ? "" : ", ") + x;
-  return out;
-}
-
 // The range covering a schema's own statement and everything in it.
 Origin schema_origin(const Schema &schema) {
   uint32_t lo = UINT32_MAX, hi = 0;

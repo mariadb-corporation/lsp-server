@@ -206,10 +206,10 @@ std::string place_clauses(std::string_view text, uint32_t begin, uint32_t body_e
     if (length <= static_cast<int64_t>(width)) return flat;
   }
   // The statement's line break; a statement on one line takes the one
-  // ending that line.
+  // ending that line, or the document's when nothing ends it.
   const size_t nl = text.find('\n', body_end);
   const std::string_view eol =
-      eol_of(text.substr(begin, (nl == std::string_view::npos ? text.size() : nl + 1) - begin));
+      nl == std::string_view::npos ? eol_of(text) : eol_of(text.substr(begin, nl + 1 - begin));
   const std::string_view unit = indent_unit(indent);
   std::string out;
   for (const auto &c : clauses) {
@@ -599,6 +599,16 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
           if (t.derived) return {};
           return catalogs.find_table(t.schema, t.name);
         };
+        // The tables in scope resolved once, by index into tables(): the
+        // lookups below ask for them per candidate table.
+        std::optional<std::vector<Catalog_view::Table_hit>> hits_found;
+        auto resolved = [&]() -> const std::vector<Catalog_view::Table_hit> & {
+          if (!hits_found) {
+            hits_found.emplace();
+            for (const auto &t : tables()) hits_found->push_back(resolve(t));
+          }
+          return *hits_found;
+        };
         auto schema_of = [&](const Catalog_view::Table_hit &h) {
           return h.schema != nullptr ? h.schema->name : std::string();
         };
@@ -612,8 +622,7 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
         // Whether `h` has a foreign key to or from a table in scope.
         auto fk_related = [&](const Catalog_view::Table_hit &h) {
           if (h.table == nullptr) return false;
-          for (const auto &t : tables()) {
-            const auto other = resolve(t);
+          for (const auto &other : resolved()) {
             if (other.table == nullptr) continue;
             for (const auto &fk : h.table->foreign_keys) {
               if (points_at(fk, schema_of(h), other)) return true;
@@ -626,11 +635,11 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
         };
         // The table in scope that is `h`, if any.
         auto in_scope = [&](const Catalog_view::Table_hit &h) -> const Table_ref * {
-          for (const auto &t : tables()) {
-            const auto other = resolve(t);
-            if ((h.table != nullptr && other.table == h.table) ||
-                (h.view != nullptr && other.view == h.view)) {
-              return &t;
+          const auto &hits = resolved();
+          for (size_t k = 0; k < hits.size(); ++k) {
+            if ((h.table != nullptr && hits[k].table == h.table) ||
+                (h.view != nullptr && hits[k].view == h.view)) {
+              return &tables()[k];
             }
           }
           return nullptr;
