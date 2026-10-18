@@ -966,8 +966,12 @@ struct Server::Impl {
     const auto entries = catalog_entries;
     const auto connection = default_connection;
     const auto defaults = options.defaults;
+    const auto interval = live_interval;
     apply_settings(*settings);
     if (catalog_entries != entries) rebuild_workspace();
+    if (live_interval != interval) {
+      for (auto &[key, lc] : live) lc->set_refresh_interval(live_interval);
+    }
     const bool moved = default_connection != connection;
     if (!moved && options.defaults == defaults) return;
     // The documents the client gave no connection of their own follow the

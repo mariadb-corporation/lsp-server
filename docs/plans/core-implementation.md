@@ -1033,10 +1033,13 @@ switched off in the client's middleware: VS Code takes one provider's answer, an
 server's would hide the extension's ANSI_QUOTES marks while adding nothing over the
 TextMate grammar until identifiers are classified (next step 1). Unit tests over a fake
 client; the ui-test suite `lsp` checks a syntax error in the Problems view and its fix,
-and completion of a sandbox's tables through the live catalog. Open: the download, the
-gutter's statements from the server, a `parseProgress` status bar entry (the work done
-progress shows instead), settings for `catalogFiles`, `keywordCase` and
-`catalogRefreshSeconds`.
+and completion of a sandbox's tables through the live catalog. Since then: a status bar
+entry from `mariadb/parseProgress` (the client declines work done progress, so it is not
+shown twice), and settings for `catalogFiles`, `catalogRefreshSeconds`, `keywordCase`,
+`sqlMode`, `serverVersion`, `debounceMs`, `maxDiagnostics` and the progress threshold,
+sent through `workspace/didChangeConfiguration`; a changed `catalogRefreshSeconds` now
+applies to the connections already read (`Live_catalog::set_refresh_interval`). Open: the
+download, the gutter's statements from the server.
 
 ### P7 — Hardening and packaging (ongoing from P4; 1–2 weeks of focused work)
 

@@ -382,6 +382,31 @@ class Live_connection(unittest.TestCase):
             time.sleep(0.1)
         self.assertIn("fresh", labels())
 
+    def test_a_new_refresh_interval_applies_to_connections_already_read(self):
+        c = self.client
+        text, pos = split_cursor("SELECT * FROM |")
+        c.open(URI, text)
+        c.notify("mariadb/documentContext", {"textDocument": {"uri": URI},
+                                             "connection": self.uri, "currentSchema": "store"})
+
+        def labels():
+            r = c.request("textDocument/completion", {"textDocument": {"uri": URI},
+                                                      "position": pos})
+            return [i["label"] for i in r["items"]]
+
+        deadline = time.monotonic() + 30
+        while "item" not in labels() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertIn("item", labels())
+        # Read once, then only when asked: until the interval is set.
+        c.notify("workspace/didChangeConfiguration",
+                 {"settings": {"mariadb": {"catalogRefreshSeconds": 1}}})
+        self.server.sql("CREATE TABLE store.ticked (a INT)")
+        deadline = time.monotonic() + 30
+        while "ticked" not in labels() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertIn("ticked", labels())
+
     def test_a_connection_without_a_password_is_reported_once(self):
         c = self.client
         c.open(URI, "SELECT 1;")

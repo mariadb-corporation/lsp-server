@@ -101,6 +101,9 @@ class Live_catalog {
   const std::string &normalized_uri() const { return m_normalized; }
 
   void refresh();
+  // Reads again this often from now on (0: only on refresh()), counted
+  // from the last successful read.
+  void set_refresh_interval(std::chrono::seconds interval);
 
   // The last snapshot read, nullptr before the first one.
   std::shared_ptr<const Live_snapshot> snapshot() const;
@@ -121,6 +124,8 @@ class Live_catalog {
   std::condition_variable m_cv;
   bool m_stop = false;
   bool m_wanted = true;  // a refresh is due
+  std::chrono::seconds m_interval;  // m_options.refresh_interval until set
+  bool m_reschedule = false;        // m_interval changed
   std::shared_ptr<const Live_snapshot> m_snapshot;
   std::string m_error;
   uint64_t m_attempts = 0;

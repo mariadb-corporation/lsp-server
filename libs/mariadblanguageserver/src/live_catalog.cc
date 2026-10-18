@@ -372,7 +372,10 @@ std::optional<Live_snapshot> fetch_live_catalog(const Connection_uri &, std::str
 
 Live_catalog::Live_catalog(std::string uri, Live_catalog_options options,
                            std::function<void()> on_update)
-    : m_uri(std::move(uri)), m_options(std::move(options)), m_on_update(std::move(on_update)) {
+    : m_uri(std::move(uri)),
+      m_options(std::move(options)),
+      m_on_update(std::move(on_update)),
+      m_interval(m_options.refresh_interval) {
   m_normalized = normalize_connection_uri(m_uri).value_or("<invalid connection URI>");
   m_thread = std::thread([this] { run(); });
 }
@@ -390,6 +393,16 @@ void Live_catalog::refresh() {
   {
     std::lock_guard lock(m_mutex);
     m_wanted = true;
+  }
+  m_cv.notify_all();
+}
+
+void Live_catalog::set_refresh_interval(std::chrono::seconds interval) {
+  {
+    std::lock_guard lock(m_mutex);
+    if (interval == m_interval) return;
+    m_interval = interval;
+    m_reschedule = true;
   }
   m_cv.notify_all();
 }
@@ -413,10 +426,21 @@ void Live_catalog::run() {
   using Clock = std::chrono::steady_clock;
   auto retry = m_options.retry_after;
   Clock::time_point next = Clock::time_point::max();
+  // Whether the last attempt succeeded, and when; a new interval counts
+  // from there.
+  bool last_ok = false;
+  Clock::time_point last_success;
   for (;;) {
     {
       std::unique_lock lock(m_mutex);
       while (!m_stop && !m_wanted) {
+        if (m_reschedule) {
+          m_reschedule = false;
+          // After a failure the retry keeps its back-off.
+          if (last_ok) {
+            next = m_interval.count() > 0 ? last_success + m_interval : Clock::time_point::max();
+          }
+        }
         if (next == Clock::time_point::max()) {
           m_cv.wait(lock);
         } else if (m_cv.wait_until(lock, next) == std::cv_status::timeout) {
@@ -487,9 +511,12 @@ void Live_catalog::run() {
         m_options.log("live catalog " + m_normalized + ": " + error);
       }
     }
+    last_ok = snap.has_value();
     if (snap) {
       retry = m_options.retry_after;
-      if (m_options.refresh_interval.count() > 0) next = Clock::now() + m_options.refresh_interval;
+      last_success = Clock::now();
+      std::lock_guard lock(m_mutex);
+      if (m_interval.count() > 0) next = last_success + m_interval;
     } else if (!permanent) {
       next = Clock::now() + retry;
       retry = std::min<std::chrono::milliseconds>(retry * 2, std::chrono::minutes(5));
