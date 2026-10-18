@@ -17,7 +17,6 @@ find_package(RapidJSON CONFIG REQUIRED)
 
 add_executable(mariadb-lsp main.cc)
 target_link_libraries(mariadb-lsp PRIVATE mariadblanguageserver rapidjson)
-target_compile_definitions(mariadb-lsp PRIVATE MDBLS_VERSION="${PROJECT_VERSION}")
 mdbls_target_warnings(mariadb-lsp)
 set_target_properties(mariadb-lsp PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
@@ -29,8 +28,9 @@ add_test(NAME mariadb-lsp.split-json
 add_test(NAME mariadb-lsp.tokens COMMAND mariadb-lsp tokens "${_fixtures}/world.sql")
 add_test(NAME mariadb-lsp.usage COMMAND mariadb-lsp)
 add_test(NAME mariadb-lsp.version COMMAND mariadb-lsp --version)
+string(REPLACE "." "\\." _version_re "${PROJECT_VERSION}")
 set_tests_properties(mariadb-lsp.version PROPERTIES
-  PASS_REGULAR_EXPRESSION "^mariadb-lsp ${PROJECT_VERSION}\n$")
+  PASS_REGULAR_EXPRESSION "^mariadb-lsp ${_version_re}\r?\n$")
 set_tests_properties(mariadb-lsp.usage PROPERTIES WILL_FAIL TRUE)
 set_tests_properties(mariadb-lsp.split PROPERTIES
   PASS_REGULAR_EXPRESSION "CREATE TABLE actor")

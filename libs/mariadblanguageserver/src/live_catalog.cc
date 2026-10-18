@@ -426,10 +426,18 @@ void Live_catalog::run() {
   using Clock = std::chrono::steady_clock;
   auto retry = m_options.retry_after;
   Clock::time_point next = Clock::time_point::max();
-  // Whether the last attempt succeeded, and when; a new interval counts
-  // from there.
-  bool last_ok = false;
-  Clock::time_point last_success;
+  // When the last attempt succeeded, nullopt after a failure; a new
+  // interval counts from there.
+  std::optional<Clock::time_point> last_success;
+  // `from` + `interval`; never for 0, or one too long for the clock.
+  const auto after = [](Clock::time_point from, std::chrono::seconds interval) {
+    using std::chrono::duration_cast;
+    if (interval.count() <= 0 ||
+        interval > duration_cast<std::chrono::seconds>(Clock::time_point::max() - from)) {
+      return Clock::time_point::max();
+    }
+    return from + interval;
+  };
   for (;;) {
     {
       std::unique_lock lock(m_mutex);
@@ -437,9 +445,7 @@ void Live_catalog::run() {
         if (m_reschedule) {
           m_reschedule = false;
           // After a failure the retry keeps its back-off.
-          if (last_ok) {
-            next = m_interval.count() > 0 ? last_success + m_interval : Clock::time_point::max();
-          }
+          if (last_success) next = after(*last_success, m_interval);
         }
         if (next == Clock::time_point::max()) {
           m_cv.wait(lock);
@@ -497,7 +503,10 @@ void Live_catalog::run() {
       if (snap) {
         m_snapshot = std::make_shared<const Live_snapshot>(std::move(*snap));
         m_error.clear();
+        last_success = Clock::now();
+        next = after(*last_success, m_interval);
       } else {
+        last_success.reset();
         m_error = error;
       }
     }
@@ -511,12 +520,8 @@ void Live_catalog::run() {
         m_options.log("live catalog " + m_normalized + ": " + error);
       }
     }
-    last_ok = snap.has_value();
     if (snap) {
       retry = m_options.retry_after;
-      last_success = Clock::now();
-      std::lock_guard lock(m_mutex);
-      if (m_interval.count() > 0) next = last_success + m_interval;
     } else if (!permanent) {
       next = Clock::now() + retry;
       retry = std::min<std::chrono::milliseconds>(retry * 2, std::chrono::minutes(5));

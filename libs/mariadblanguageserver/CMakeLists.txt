@@ -48,7 +48,8 @@ find_package(RapidJSON CONFIG REQUIRED)
 # rapidjson is PUBLIC: include/mdbls/lsp/json_position.h writes with it.
 target_link_libraries(mariadblanguageserver PUBLIC sqlsplitter mariadbparser Threads::Threads
                       rapidjson)
-target_compile_definitions(mariadblanguageserver PRIVATE MDBLS_VERSION="${PROJECT_VERSION}")
+# PUBLIC: mariadb-lsp --version prints it too.
+target_compile_definitions(mariadblanguageserver PUBLIC MDBLS_VERSION="${PROJECT_VERSION}")
 # Live connections (src/live_catalog.cc) need the client library.
 if(WITH_MARIADB_CLIENT)
   target_link_libraries(mariadblanguageserver PRIVATE mariadb::client)
