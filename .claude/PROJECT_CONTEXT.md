@@ -77,4 +77,3 @@ MariaDB LSP Server (`lsp-server`): a C++ language server for MariaDB SQL, plus a
 - **Live tests:** the plaintext helper honours `MARIADB_SHELL_USER_CONFIG_HOME` (file `.mariadb-secret-store-plaintext.json` there), so tests use a private store; the sandbox's socket path must stay under 104 bytes on macOS, hence a short temp dir; root needs `--auth-root-authentication-method=normal`.
 - **Importing TestCase classes into another e2e module runs them twice** in discovery; import only constants and the test-less `Lsp_test` base.
 - **No `Co-Authored-By` lines in commits** (user rule, `~/.claude/CLAUDE.md`); four early commits had them and were rewritten.
-- `.claude/` is untracked in this repo.

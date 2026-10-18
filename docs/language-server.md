@@ -33,7 +33,7 @@ Shell's binary directory, where the secret store helpers of live connections are
 | `textDocument/prepareRename`, `rename` | aliases, CTEs, variables, and tables, views, columns and routines the document itself defines; the edits cover the document, and the new name is quoted when it has to be |
 | `textDocument/signatureHelp` | the call forms of a built-in function, or a stored function's or procedure's parameters, with the active parameter; trigger characters `(` and `,` |
 | `workspace/symbol` | tables, views, routines, triggers, events, sequences and schemas of the open documents and the workspace catalog whose name contains the query; columns too when the query is not empty |
-| `workspace/didChangeConfiguration` | `settings.mariadb` takes the same keys as the initialization options; the workspace catalog is read again when `catalogFiles` changed, and the documents on the previous `connection` move to the new one |
+| `workspace/didChangeConfiguration` | `settings.mariadb` takes the same keys as the initialization options; the workspace catalog is read again when `catalogFiles` changed, the documents that did not set a `connection` of their own through `mariadb/documentContext` move to the new `connection`, and a changed `sqlMode` or `serverVersion` applies to the open documents that did not set their own |
 | `textDocument/didSave` | saving one of the workspace catalog's files reads the catalog again |
 
 Diagnostics carry `source: "mariadb"` and a `code`: `syntax-error`, `not-checked`,

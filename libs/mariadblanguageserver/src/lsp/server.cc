@@ -228,9 +228,11 @@ struct Open_document {
   std::shared_ptr<Token_cache> tokens = std::make_shared<Token_cache>();
   std::shared_ptr<Outline_cache> outline = std::make_shared<Outline_cache>();
   // mariadb/documentContext: the connection, the schema, and whether the
-  // client set the sql_mode and version itself (else the server's apply).
+  // client set the connection, sql_mode and version itself (else the
+  // default connection and the server's apply).
   std::shared_ptr<Live_catalog> live;
   std::string schema_hint;
+  bool explicit_connection = false;
   bool explicit_mode = false;
   bool explicit_version = false;
 
@@ -832,6 +834,7 @@ struct Server::Impl {
     if (string_at(params, {"sqlMode"})) d->explicit_mode = true;
     if (string_at(params, {"serverVersion"})) d->explicit_version = true;
     if (const Json *c = member(params, "connection")) {
+      d->explicit_connection = true;
       if (c->IsString() && c->GetStringLength() > 0) {
         d->live = live_catalog(std::string(c->GetString(), c->GetStringLength()));
       } else {
@@ -962,23 +965,21 @@ struct Server::Impl {
     if (settings == nullptr || !settings->IsObject()) return;
     const auto entries = catalog_entries;
     const auto connection = default_connection;
+    const auto defaults = options.defaults;
     apply_settings(*settings);
     if (catalog_entries != entries) rebuild_workspace();
-    if (default_connection != connection) {
-      // The documents on the old default connection follow the new one;
-      // those the client gave a connection of their own stay.
-      std::shared_ptr<Live_catalog> was;
-      if (const auto key = normalize_connection_uri(connection)) {
-        if (const auto it = live.find(*key); it != live.end()) was = it->second;
-      }
-      const auto now = default_connection.empty() ? nullptr : live_catalog(default_connection);
-      for (auto &[uri, d] : documents) {
-        if (d->live != was) continue;
-        d->live = now;
-        Index_options o = d->doc.options();
-        apply_server_options(*d, o);
-        set_options(*d, o, true);
-      }
+    const bool moved = default_connection != connection;
+    if (!moved && options.defaults == defaults) return;
+    // The documents the client gave no connection of their own follow the
+    // default one, and every document takes the new defaults where neither
+    // the client nor its server set them.
+    std::shared_ptr<Live_catalog> now;
+    if (moved && !default_connection.empty()) now = live_catalog(default_connection);
+    for (auto &[uri, d] : documents) {
+      if (moved && !d->explicit_connection) d->live = now;
+      Index_options o = d->doc.options();
+      apply_server_options(*d, o);
+      set_options(*d, o, true);
     }
   }
 

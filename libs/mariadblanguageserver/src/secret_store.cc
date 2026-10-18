@@ -527,12 +527,12 @@ std::optional<std::string> Secret_store::password_for(std::string_view uri, std:
     if (error != nullptr) *error = "not a connection URI";
     return std::nullopt;
   }
-  std::string list_error;
+  std::string list_error, get_error;
   const auto specs = list("generic", &list_error);
   if (specs) {
     for (const auto &[kind, stored, spec] : stored_connections(*specs)) {
       if (normalize_connection_uri(stored) != want) continue;
-      if (auto secret = get(*spec, error)) {
+      if (auto secret = get(*spec, &get_error)) {
         if (source != nullptr) *source = std::string(kind) + " connection " + stored;
         return decode_shell_secret(*secret);
       }
@@ -551,8 +551,11 @@ std::optional<std::string> Secret_store::password_for(std::string_view uri, std:
       }
     }
   }
-  // A helper that could not list says why, not "no password stored".
-  if (error != nullptr) *error = specs ? "no password stored for " + *want : list_error;
+  // A helper that could not list, or not get a stored connection's
+  // password, says why, not "no password stored".
+  if (error != nullptr) {
+    *error = !specs ? list_error : !get_error.empty() ? get_error : "no password stored for " + *want;
+  }
   return std::nullopt;
 }
 
