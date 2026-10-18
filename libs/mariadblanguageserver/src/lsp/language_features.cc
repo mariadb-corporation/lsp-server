@@ -221,6 +221,12 @@ void completion(Json_writer &w, const Snapshot &s, Position pos, const Catalog_s
       w.Key("insertTextFormat");
       w.Int(2);
     }
+    // Lines the server laid out: VS Code would indent them again by the
+    // current line's indentation.
+    if (it.insert_text.find('\n') != std::string::npos) {
+      w.Key("insertTextMode");
+      w.Int(1);  // asIs
+    }
     if (!it.additional_edits.empty()) {
       w.Key("additionalTextEdits");
       w.StartArray();

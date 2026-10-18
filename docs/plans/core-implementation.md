@@ -1044,7 +1044,8 @@ extension's MCP server through `mariadb/dbCall`, so one MCP server serves both a
 credentials reach the server), and completion that goes from a schema to a table to a
 column and adds the table to FROM, joined on a foreign key or through an n:m link table;
 in MCP mode the details of tables, views and routines are read when a request first
-needs them. Open: the download, the
+needs them. Since then: the added FROM and JOIN clauses follow the statement's layout and
+the `lineWidth` setting (default 80) instead of growing the line being typed. Open: the download, the
 gutter's statements from the server.
 
 ### P7 — Hardening and packaging (ongoing from P4; 1–2 weeks of focused work)

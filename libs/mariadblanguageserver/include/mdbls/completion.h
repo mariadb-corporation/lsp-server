@@ -84,6 +84,9 @@ struct Completion_options {
   unsigned long version_id = k_default_version_id;
   bool upper_case_keywords = true;
   bool snippets = false;        // the client takes snippets: functions get ($0)
+  // Lines a completion lays out (the FROM or JOIN a column brings) stay
+  // within this many characters; 0: no limit.
+  size_t line_width = 80;
   size_t max_items = 500;
 };
 

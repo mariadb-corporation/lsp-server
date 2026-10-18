@@ -164,6 +164,77 @@ std::string snippet_escape(std::string_view text) {
   return out;
 }
 
+// Characters, not bytes, of UTF-8 text.
+size_t char_count(std::string_view text) {
+  return static_cast<size_t>(std::count_if(text.begin(), text.end(), [](char ch) {
+    return (static_cast<unsigned char>(ch) & 0xC0) != 0x80;
+  }));
+}
+
+uint32_t line_begin(std::string_view text, uint32_t offset) {
+  while (offset > 0 && text[offset - 1] != '\n') --offset;
+  return offset;
+}
+
+uint32_t line_end(std::string_view text, uint32_t offset) {
+  while (offset < text.size() && text[offset] != '\n' && text[offset] != '\r') ++offset;
+  return offset;
+}
+
+// The blanks the line holding `offset` starts with.
+std::string_view indentation(std::string_view text, uint32_t offset) {
+  const uint32_t b = line_begin(text, offset);
+  uint32_t e = b;
+  while (e < text.size() && (text[e] == ' ' || text[e] == '\t')) ++e;
+  return text.substr(b, e - b);
+}
+
+// A clause completion adds to a query: `FROM t AS a`, or `LEFT OUTER JOIN
+// t AS a` with its `ON ...`.
+struct Added_clause {
+  std::string head;
+  std::string on;  // "ON <condition>", or empty
+};
+
+// The text inserting `clauses` at `at` in the statement [begin, body_end)
+// of `text`.  They stay on the line, one space apart, unless the statement
+// spans lines already or the line would grow past `width` characters (0:
+// no limit); `extra` is what the item's other edits add to that line.
+// Then each clause starts a line of its own at `indent`, and an ON that
+// would pass the width goes on the next line, one level deeper.
+std::string place_clauses(std::string_view text, uint32_t begin, uint32_t body_end, uint32_t at,
+                          std::string_view indent, const std::vector<Added_clause> &clauses,
+                          int64_t extra, size_t width) {
+  std::string flat;
+  for (const auto &c : clauses) {
+    flat += " " + c.head;
+    if (!c.on.empty()) flat += " " + c.on;
+  }
+  const std::string_view statement = text.substr(begin, body_end - begin);
+  if (statement.find('\n') == std::string_view::npos) {
+    if (width == 0) return flat;
+    const uint32_t lb = line_begin(text, at);
+    const auto length = static_cast<int64_t>(char_count(text.substr(lb, line_end(text, at) - lb)) +
+                                             char_count(flat)) +
+                        extra;
+    if (length <= static_cast<int64_t>(width)) return flat;
+  }
+  const std::string_view eol = statement.find("\r\n") != std::string_view::npos ? "\r\n" : "\n";
+  const std::string_view unit = indent.find('\t') != std::string_view::npos ? "\t" : "  ";
+  std::string out;
+  for (const auto &c : clauses) {
+    const std::string line = std::string(indent) + c.head;
+    out += std::string(eol) + line;
+    if (c.on.empty()) continue;
+    if (width != 0 && char_count(line) + 1 + char_count(c.on) > width) {
+      out += std::string(eol) + std::string(indent) + std::string(unit) + c.on;
+    } else {
+      out += " " + c.on;
+    }
+  }
+  return out;
+}
+
 class Builder {
  public:
   explicit Builder(Completion_list &out) : out_(out) {}
@@ -577,12 +648,27 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
           for (int n = 2; taken(alias); ++n) alias = base + std::to_string(n);
           return alias;
         };
+        auto kw = [&](std::string_view keyword) {
+          return options.upper_case_keywords ? std::string(keyword) : lower(keyword);
+        };
+        // `from`.col = `to`.ref_col for each column of `fk`.
+        auto condition = [&](const Foreign_key &fk, const std::string &from, const std::string &to) {
+          std::string c;
+          for (size_t k = 0; k < fk.columns.size() && k < fk.ref_columns.size(); ++k) {
+            if (!c.empty()) c += " " + kw("AND") + " ";
+            c += from + "." + quote_identifier(fk.columns[k]) + " = " + to + "." +
+                 quote_identifier(fk.ref_columns[k]);
+          }
+          return c;
+        };
         // What makes a column of `h` usable here when `h` is not in scope:
         // the qualifiers typed ([qual_begin, word_begin)) become its alias,
         // and the table goes into FROM - after the select list when there
-        // is none, else joined on a foreign key to a table in scope.
-        auto table_edits = [&](const Catalog_view::Table_hit &h,
-                               uint32_t qual_begin) -> std::vector<Text_edit> {
+        // is none, else joined on a foreign key to a table in scope.  The
+        // clauses follow the statement's layout (place_clauses); `cols`
+        // are the items that bring them, whose text counts for the width.
+        auto table_edits = [&](const Catalog_view::Table_hit &h, uint32_t qual_begin,
+                               const std::vector<Col> &cols) -> std::vector<Text_edit> {
           if (!can_add_table || (h.table == nullptr && h.view == nullptr)) return {};
           if (const Table_ref *t = in_scope(h)) {
             return {{qual_begin, word_begin, quote_identifier(t->visible_name()) + "."}};
@@ -595,11 +681,44 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
                                                                             : quote_identifier(schema) + ".") +
               quote_identifier(name);
           std::vector<Text_edit> edits{{qual_begin, word_begin, alias + "."}};
-          if (!query.has_from) {
-            const uint32_t at_end = to_doc(query.select_list.end);
-            edits.push_back({at_end, at_end, " FROM " + qualified + " AS " + alias});
+          // The edit adding `clauses` at `at`, laid out.  What the item
+          // writes on that line besides counts towards its width: the
+          // alias for the qualifiers and the column (its longest name).
+          auto add = [&](uint32_t at, std::string_view indent, const std::vector<Added_clause> &clauses) {
+            int64_t extra = 0;
+            if (line_begin(text, at) == line_begin(text, word_begin)) {
+              size_t longest = 0;
+              for (const auto &c : cols) longest = std::max(longest, char_count(quote_identifier(c.name)));
+              extra = static_cast<int64_t>(char_count(alias) + 1 + longest) -
+                      static_cast<int64_t>(char_count(text.substr(qual_begin, out.replace_end - qual_begin)));
+            }
+            edits.push_back(
+                {at, at, place_clauses(text, begin, body_end, at, indent, clauses, extra, options.line_width)});
             return edits;
+          };
+          auto joined = [&](const std::string &table, const std::string &as, const std::string &on) {
+            return Added_clause{kw("LEFT OUTER JOIN") + " " + table + " " + kw("AS") + " " + as,
+                                kw("ON") + " " + on};
+          };
+          if (!query.has_from) {
+            // FROM goes at the indentation of the line holding SELECT (the
+            // query's, which in a routine body or a subquery is not the
+            // statement's first line): the line before the select list's
+            // leading blanks.
+            uint32_t select_at = to_doc(query.select_list.begin);
+            while (select_at > begin && std::isspace(static_cast<unsigned char>(text[select_at - 1]))) {
+              --select_at;
+            }
+            return add(to_doc(query.select_list.end), indentation(text, select_at > begin ? select_at - 1 : begin),
+                       {{kw("FROM") + " " + qualified + " " + kw("AS") + " " + alias, ""}});
           }
+          // A JOIN goes at the indentation of the FROM line, or of the
+          // last line of the tables when they span lines (joins on lines
+          // of their own).
+          const uint32_t at_end = to_doc(query.from_tables.end);
+          const uint32_t from_begin = to_doc(query.from_tables.begin);
+          const std::string_view join_indent =
+              indentation(text, line_begin(text, from_begin) == line_begin(text, at_end) ? from_begin : at_end);
           // ON the first foreign key between it and a table in scope, in
           // the order the tables are listed.
           std::string on;
@@ -607,16 +726,6 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
             const auto other = resolve(t);
             if (other.table == nullptr) continue;
             const std::string them = quote_identifier(t.visible_name());
-            auto condition = [&](const Foreign_key &fk, const std::string &from,
-                                 const std::string &to) {
-              std::string c;
-              for (size_t k = 0; k < fk.columns.size() && k < fk.ref_columns.size(); ++k) {
-                if (!c.empty()) c += " AND ";
-                c += from + "." + quote_identifier(fk.columns[k]) + " = " + to + "." +
-                     quote_identifier(fk.ref_columns[k]);
-              }
-              return c;
-            };
             if (h.table != nullptr) {
               for (const auto &fk : h.table->foreign_keys) {
                 if (points_at(fk, schema, other)) {
@@ -635,18 +744,14 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
             }
             if (!on.empty()) break;
           }
-          const uint32_t at_end = to_doc(query.from_tables.end);
-          if (!on.empty()) {
-            edits.push_back({at_end, at_end, " LEFT OUTER JOIN " + qualified + " AS " + alias + " ON " + on});
-            return edits;
-          }
+          if (!on.empty()) return add(at_end, join_indent, {joined(qualified, alias, on)});
           // n:m: a table with a foreign key to the new one and one to a
           // table in scope links them; it is joined first, then the new
           // table on it.  Looked for among the tables of either schema.
           for (const auto &t : tables()) {
             const auto other = resolve(t);
             if (other.table == nullptr || h.table == nullptr) continue;
-            std::string link;
+            std::vector<Added_clause> link;
             for (const std::string &where : {schema, schema_of(other)}) {
               catalogs.for_each_table(where, [&](const Catalog_view::Table_hit &l) {
                 if (!link.empty() || l.table == nullptr || l.table == h.table || l.table == other.table) {
@@ -664,34 +769,20 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
                 if (to_new == nullptr || to_scope == nullptr) return;
                 const std::string link_schema = schema_of(l);
                 const std::string link_alias = new_alias(l.table->name, alias);
-                auto condition = [&](const Foreign_key &fk, const std::string &from, const std::string &to) {
-                  std::string c;
-                  for (size_t k = 0; k < fk.columns.size() && k < fk.ref_columns.size(); ++k) {
-                    if (!c.empty()) c += " AND ";
-                    c += from + "." + quote_identifier(fk.columns[k]) + " = " + to + "." +
-                         quote_identifier(fk.ref_columns[k]);
-                  }
-                  return c;
-                };
                 const std::string link_qualified =
                     (link_schema.empty() || iequals(link_schema, catalogs.current_schema())
                          ? std::string()
                          : quote_identifier(link_schema) + ".") +
                     quote_identifier(l.table->name);
-                link = " LEFT OUTER JOIN " + link_qualified + " AS " + link_alias + " ON " +
-                       condition(*to_scope, link_alias, quote_identifier(t.visible_name())) +
-                       " LEFT OUTER JOIN " + qualified + " AS " + alias + " ON " +
-                       condition(*to_new, link_alias, alias);
+                link = {joined(link_qualified, link_alias,
+                               condition(*to_scope, link_alias, quote_identifier(t.visible_name()))),
+                        joined(qualified, alias, condition(*to_new, link_alias, alias))};
               });
               if (!link.empty()) break;
             }
-            if (!link.empty()) {
-              edits.push_back({at_end, at_end, link});
-              return edits;
-            }
+            if (!link.empty()) return add(at_end, join_indent, link);
           }
-          edits.push_back({at_end, at_end, " CROSS JOIN " + qualified + " AS " + alias});
-          return edits;
+          return add(at_end, join_indent, {{kw("CROSS JOIN") + " " + qualified + " " + kw("AS") + " " + alias, ""}});
         };
         // A table or schema to go on from: `name.`, and the list again.
         auto add_dotted = [&](const std::string &label, Completion_kind kind, int rank,
@@ -785,7 +876,7 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
             const auto hit = catalogs.find_table("", q);
             columns_of_table(hit, q, &cols);
             found = hit.table != nullptr || hit.view != nullptr;
-            add_columns_with(cols, 1, table_edits(hit, ref.qualifier_ranges[0].begin));
+            add_columns_with(cols, 1, table_edits(hit, ref.qualifier_ranges[0].begin, cols));
           }
           if (!found && catalogs.has_schema(q)) {
             // schema.table.column, one name at a time.
@@ -796,7 +887,7 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
         if (ref.qualifiers.size() == 2) {
           const auto hit = catalogs.find_table(ref.qualifiers[0], ref.qualifiers[1]);
           columns_of_table(hit, ref.qualifiers[1], &cols);
-          add_columns_with(cols, 1, table_edits(hit, ref.qualifier_ranges[0].begin));
+          add_columns_with(cols, 1, table_edits(hit, ref.qualifier_ranges[0].begin, cols));
           break;
         }
         if (tables().empty() && query.found && !query.has_from) {

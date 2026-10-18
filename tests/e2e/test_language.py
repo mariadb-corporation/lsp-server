@@ -137,7 +137,23 @@ class Completion(Language_test):
         r = self.at("textDocument/completion", position_of(text3, "orders. FROM", 7))
         total = next(i for i in r["items"] if i["label"] == "total")
         self.assertEqual([e["newText"] for e in total["additionalTextEdits"]],
-                         ["o.", " LEFT OUTER JOIN orders AS o ON o.customer_id = c.id"])
+                         ["o.", "\nLEFT OUTER JOIN orders AS o ON o.customer_id = c.id"])
+
+    def test_without_a_line_width_the_join_stays_on_the_line(self):
+        # No limit: the join stays on the line.
+        text, pos = self.open_at("SELECT c.name, orders.| FROM customer AS c;", {"lineWidth": 0})
+        total = next(i for i in self.at("textDocument/completion", pos)["items"] if i["label"] == "total")
+        self.assertEqual(total["additionalTextEdits"][-1]["newText"],
+                         " LEFT OUTER JOIN orders AS o ON o.customer_id = c.id")
+        self.assertNotIn("insertTextMode", total)
+
+    def test_a_snippet_with_a_line_break_is_inserted_as_is(self):
+        # A FROM in the item's own text, on a line of its own.
+        caps = {"textDocument": {"completion": {"completionItem": {"snippetSupport": True}}}}
+        text, pos = self.open_at("SELECT 1,\n  customer.|;", capabilities=caps)
+        name = next(i for i in self.at("textDocument/completion", pos)["items"] if i["label"] == "name")
+        self.assertEqual(name["textEdit"]["newText"], "name$0\nFROM customer AS c")
+        self.assertEqual(name["insertTextMode"], 1)
 
     def test_lower_case_keywords(self):
         text, pos = self.open_at("sel|", {"keywordCase": "lower"})

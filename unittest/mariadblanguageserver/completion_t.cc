@@ -72,7 +72,7 @@ struct Result {
 
 // Completes at the '|' in `sql`, which follows the schema above.
 Result complete_at(const std::string &sql, bool with_schema = true, size_t max_items = 2000,
-                   bool snippets = false) {
+                   bool snippets = false, size_t line_width = 80, bool upper_case_keywords = true) {
   static Parser_pool pool(2);
   Result r;
   r.text = (with_schema ? std::string(k_schema) : std::string()) + sql;
@@ -90,6 +90,8 @@ Result complete_at(const std::string &sql, bool with_schema = true, size_t max_i
   Completion_options o;
   o.max_items = max_items;
   o.snippets = snippets;
+  o.line_width = line_width;
+  o.upper_case_keywords = upper_case_keywords;
   r.list = complete(r.text, index, r.cursor, view, cache, o);
   return r;
 }
@@ -507,7 +509,7 @@ TEST(Completion, a_second_table_is_joined_on_its_foreign_key) {
   const auto r = complete_at(
       std::string(k_fk_schema) + "SELECT t.id, test_schema.t2.| FROM test_schema.t1 AS t;", false);
   EXPECT_EQ(pick(r, "t1_id"),
-            "SELECT t.id, t2.t1_id FROM test_schema.t1 AS t "
+            "SELECT t.id, t2.t1_id FROM test_schema.t1 AS t\n"
             "LEFT OUTER JOIN test_schema.t2 AS t2 ON t2.t1_id = t.id;");
 }
 
@@ -515,7 +517,7 @@ TEST(Completion, the_foreign_key_may_point_the_other_way) {
   const auto r = complete_at(
       std::string(k_fk_schema) + "SELECT x.id, test_schema.t1.| FROM test_schema.t2 AS x;", false);
   EXPECT_EQ(pick(r, "name"),
-            "SELECT x.id, t.name FROM test_schema.t2 AS x "
+            "SELECT x.id, t.name FROM test_schema.t2 AS x\n"
             "LEFT OUTER JOIN test_schema.t1 AS t ON x.t1_id = t.id;");
 }
 
@@ -529,14 +531,30 @@ CREATE TABLE school.enrollment (student_id INT, course_id INT,
 )";
   const auto r = complete_at(schema + "SELECT s.name, school.course.| FROM school.student AS s;", false);
   EXPECT_EQ(pick(r, "title"),
-            "SELECT s.name, c.title FROM school.student AS s "
-            "LEFT OUTER JOIN school.enrollment AS e ON e.student_id = s.id "
+            "SELECT s.name, c.title FROM school.student AS s\n"
+            "LEFT OUTER JOIN school.enrollment AS e ON e.student_id = s.id\n"
             "LEFT OUTER JOIN school.course AS c ON e.course_id = c.id;");
   // The link table's alias does not take the new table's.
   const auto t = complete_at(schema + "SELECT x.name, school.enrollment.| FROM school.student AS x;", false);
   EXPECT_EQ(pick(t, "course_id"),
-            "SELECT x.name, e.course_id FROM school.student AS x "
+            "SELECT x.name, e.course_id FROM school.student AS x\n"
             "LEFT OUTER JOIN school.enrollment AS e ON e.student_id = x.id;");
+}
+
+TEST(Completion, n_m_tables_stay_on_one_line_without_a_width) {
+  const std::string schema = R"(
+CREATE TABLE school.student (id INT PRIMARY KEY, name VARCHAR(40));
+CREATE TABLE school.course (id INT PRIMARY KEY, title VARCHAR(40));
+CREATE TABLE school.enrollment (student_id INT, course_id INT,
+  FOREIGN KEY (student_id) REFERENCES school.student (id),
+  FOREIGN KEY (course_id) REFERENCES school.course (id));
+)";
+  const auto r =
+      complete_at(schema + "SELECT s.name, school.course.| FROM school.student AS s;", false, 2000, false, 0);
+  EXPECT_EQ(pick(r, "title"),
+            "SELECT s.name, c.title FROM school.student AS s "
+            "LEFT OUTER JOIN school.enrollment AS e ON e.student_id = s.id "
+            "LEFT OUTER JOIN school.course AS c ON e.course_id = c.id;");
 }
 
 TEST(Completion, a_table_with_no_foreign_key_is_cross_joined) {
@@ -567,6 +585,72 @@ TEST(Completion, a_table_is_not_added_where_the_rest_of_the_statement_is_unknown
       std::string(k_fk_schema) + "SELECT test_schema.t1.| FROM WHERE;", false);
   EXPECT_TRUE(r.has("id"));
   EXPECT_TRUE(r.item("id")->additional_edits.empty());
+}
+
+TEST(Completion, a_statement_on_several_lines_gets_its_clauses_on_lines_of_their_own) {
+  // FROM at the indentation of the SELECT line, a JOIN at that of FROM.
+  const auto f = complete_at(std::string(k_fk_schema) + "  SELECT 1,\n    test_schema.t1.|;", false);
+  EXPECT_EQ(pick(f, "id"), "  SELECT 1,\n    t.id\n  FROM test_schema.t1 AS t;");
+  const auto j = complete_at(
+      std::string(k_fk_schema) + "SELECT t.id,\n       test_schema.t2.|\n  FROM test_schema.t1 AS t;", false);
+  EXPECT_EQ(pick(j, "t1_id"),
+            "SELECT t.id,\n       t2.t1_id\n  FROM test_schema.t1 AS t\n"
+            "  LEFT OUTER JOIN test_schema.t2 AS t2 ON t2.t1_id = t.id;");
+  // Joins on lines of their own already: at the last one's indentation.
+  const auto k = complete_at(std::string(k_fk_schema) +
+                                 "SELECT t.id, test_schema.t2.|\nFROM test_schema.t1 AS t\n"
+                                 "    CROSS JOIN test_schema.t3 AS z;",
+                             false);
+  EXPECT_EQ(pick(k, "t1_id"),
+            "SELECT t.id, t2.t1_id\nFROM test_schema.t1 AS t\n    CROSS JOIN test_schema.t3 AS z\n"
+            "    LEFT OUTER JOIN test_schema.t2 AS t2 ON t2.t1_id = t.id;");
+}
+
+TEST(Completion, a_query_in_a_routine_body_keeps_its_indentation) {
+  const auto r = complete_at(std::string(k_fk_schema) +
+                                 "DELIMITER //\n"
+                                 "CREATE PROCEDURE p()\n"
+                                 "BEGIN\n"
+                                 "\tSELECT 1, test_schema.t1.|;\n"
+                                 "END//\n",
+                             false);
+  EXPECT_EQ(pick(r, "id"),
+            "DELIMITER //\nCREATE PROCEDURE p()\nBEGIN\n\tSELECT 1, t.id\n\tFROM test_schema.t1 AS t;\nEND//\n");
+}
+
+TEST(Completion, an_on_past_the_width_goes_on_the_next_line) {
+  const auto r = complete_at(
+      std::string(k_fk_schema) + "SELECT t.id, test_schema.t2.| FROM test_schema.t1 AS t;", false, 2000, false, 40);
+  EXPECT_EQ(pick(r, "t1_id"),
+            "SELECT t.id, t2.t1_id FROM test_schema.t1 AS t\n"
+            "LEFT OUTER JOIN test_schema.t2 AS t2\n  ON t2.t1_id = t.id;");
+}
+
+TEST(Completion, added_lines_end_as_the_statement_s_do) {
+  const auto r = complete_at(
+      std::string(k_fk_schema) + "SELECT t.id,\r\n  test_schema.t2.|\r\nFROM test_schema.t1 AS t;", false);
+  EXPECT_EQ(pick(r, "t1_id"),
+            "SELECT t.id,\r\n  t2.t1_id\r\nFROM test_schema.t1 AS t\r\n"
+            "LEFT OUTER JOIN test_schema.t2 AS t2 ON t2.t1_id = t.id;");
+}
+
+TEST(Completion, added_keywords_follow_the_keyword_case) {
+  const auto f = complete_at(std::string(k_fk_schema) + "SELECT test_schema.t1.|;", false, 2000, false, 80, false);
+  EXPECT_EQ(pick(f, "id"), "SELECT t.id from test_schema.t1 as t;");
+  const auto j = complete_at(
+      std::string(k_fk_schema) + "SELECT t.id, test_schema.t2.| FROM test_schema.t1 AS t;", false, 2000, false, 80,
+      false);
+  EXPECT_EQ(pick(j, "t1_id"),
+            "SELECT t.id, t2.t1_id FROM test_schema.t1 AS t\n"
+            "left outer join test_schema.t2 as t2 on t2.t1_id = t.id;");
+}
+
+TEST(Completion, a_snippet_may_carry_the_from_on_a_line_of_its_own) {
+  const auto r = complete_at(std::string(k_fk_schema) + "SELECT 1,\n  test_schema.t1.|;", false, 2000, true);
+  const auto *id = r.item("id");
+  ASSERT_NE(id, nullptr);
+  EXPECT_TRUE(id->snippet);
+  EXPECT_EQ(id->insert_text, "id$0\nFROM test_schema.t1 AS t");
 }
 
 }  // namespace mdbls

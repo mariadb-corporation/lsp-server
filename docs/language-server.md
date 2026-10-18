@@ -64,7 +64,8 @@ first statement of each run in that mode.
 | `shellBinDir` | `--shell-bin-dir` | that directory directly |
 | `credentialStoreHelper` | the shell's | the secret store helper's name (`keychain`, `login-path`, `windows-credential`, `plaintext`) |
 | `catalogRefreshSeconds` | `0` | read a connection's catalog again this often; 0 reads it on demand only |
-| `keywordCase` | `"upper"` | `"lower"` completes keywords and built-in functions in lower case |
+| `keywordCase` | `"upper"` | `"lower"` completes keywords and built-in functions in lower case, and writes the FROM and JOIN a column brings in lower case |
+| `lineWidth` | `80` | characters; the FROM and JOIN a column brings start lines of their own when the line would grow past this; 0 = no limit |
 
 The client's `textDocument.completion.completionItem.snippetSupport` makes function
 completions snippets (`CONCAT($0)`).
@@ -140,10 +141,22 @@ opens at once. Picking a column of a table that is not in scope adds that table:
   either, ` CROSS JOIN <table> AS <alias>`;
 - a table already in scope is only renamed to its alias.
 
+The added clauses follow the statement's layout. They stay on the line, one space apart,
+unless the statement already spans lines or the line would pass `lineWidth` (the column
+being inserted counts, taken at the table's longest column name). Then each clause starts
+a line of its own: `FROM` at the indentation of the line holding the query's `SELECT`,
+a JOIN at that of the FROM line, or of the last line of the tables when its joins are on
+lines of their own; each JOIN of an n:m pair gets its own line, and an `ON` that would pass
+the width goes on the next line one level deeper (two spaces, a tab when the indentation
+has tabs). Lines end in `\r\n` when the statement's do. The keywords follow `keywordCase`.
+Only the inserted text is placed; text after the insert point (`;`, ` WHERE ...`) stays
+where it is, after the last inserted line. Moving existing text is formatting.
+
 The edits are `additionalTextEdits`. One that would insert exactly where the item's own text
 ends (FROM after the last select item) is applied before the item by VS Code, so for a
 client that takes snippets it is part of the item's text instead (`name$0 FROM ...`, the
-caret after the column). The FROM is added only when the whole statement parses, so the
+caret after the column), with `insertTextMode` 1 (as is) when that text has a line break,
+since VS Code would otherwise indent it again. The FROM is added only when the whole statement parses, so the
 FROM clause after the cursor is known.
 
 Once a table has an alias, the select list offers its columns qualified (`c.name`), the

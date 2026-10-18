@@ -317,6 +317,7 @@ struct Server::Impl {
   std::set<std::string> reported;            // connection errors shown once
   bool snippets = false;                     // the client takes snippets
   bool upper_keywords = true;
+  size_t line_width = 80;                    // lineWidth
 
   // Destroyed first: their running jobs may still post and send.
   std::unique_ptr<Parser_pool> parse_pool;
@@ -755,6 +756,7 @@ struct Server::Impl {
     if (const auto v = uint_at("semanticTokensFullLimit")) options.full_semantic_tokens_limit = *v;
     if (const auto v = uint_at("progressThreshold")) options.progress_threshold = *v;
     if (const auto v = uint_at("catalogRefreshSeconds")) live_interval = std::chrono::seconds(*v);
+    if (const auto v = uint_at("lineWidth")) line_width = *v;
     if (const Json *f = member(o, "catalogFiles"); f != nullptr && f->IsArray()) {
       catalog_entries.clear();
       for (const auto &e : f->GetArray()) {
@@ -1616,6 +1618,7 @@ struct Server::Impl {
     Completion_options o;
     o.upper_case_keywords = upper_keywords;
     o.snippets = snippets;
+    o.line_width = line_width;
     position_request(id, d, params, false,
                      [o](Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
                          Parser_cache &cache) {
