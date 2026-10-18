@@ -47,6 +47,10 @@ std::optional<size_t> first_invalid_utf8(std::string_view text);
 // are those of the original file.
 std::string latin1_to_utf8(std::string_view latin1);
 
+// The inverse of latin1_to_utf8, for text it produced (edited only with
+// characters it can produce); any other character becomes '?'.
+std::string utf8_to_latin1(std::string_view utf8);
+
 struct Charset_declaration {
   size_t offset;     // where the declaring statement starts
   std::string name;  // as written, lower-cased

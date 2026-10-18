@@ -35,6 +35,7 @@ connections through the client instead of connecting itself, see [MCP mode](#mcp
 | `textDocument/documentHighlight` | the references within the statement at the cursor; the defining one is a write |
 | `textDocument/prepareRename`, `rename` | aliases, CTEs, variables, and tables, views, columns and routines the document itself defines; the edits cover the document, and the new name is quoted when it has to be |
 | `textDocument/signatureHelp` | the call forms of a built-in function, or a stored function's or procedure's parameters, with the active parameter; trigger characters `(` and `,` |
+| `textDocument/formatting`, `rangeFormatting` | lays out queries (see [Formatting](#formatting)): the whole document, or the statements the range touches; one edit per statement that changes |
 | `workspace/symbol` | tables, views, routines, triggers, events, sequences and schemas of the open documents and the workspace catalog whose name contains the query; columns too when the query is not empty |
 | `workspace/didChangeConfiguration` | `settings.mariadb` takes the same keys as the initialization options; the workspace catalog is read again when `catalogFiles` changed, the documents that did not set a `connection` of their own through `mariadb/documentContext` move to the new `connection`, and a changed `sqlMode` or `serverVersion` applies to the open documents that did not set their own; a changed `catalogRefreshSeconds` applies to the connections already read, counted from their last read |
 | `textDocument/didSave` | saving one of the workspace catalog's files reads the catalog again |
@@ -65,7 +66,7 @@ first statement of each run in that mode.
 | `credentialStoreHelper` | the shell's | the secret store helper's name (`keychain`, `login-path`, `windows-credential`, `plaintext`) |
 | `catalogRefreshSeconds` | `0` | read a connection's catalog again this often; 0 reads it on demand only |
 | `keywordCase` | `"upper"` | `"lower"` completes keywords and built-in functions in lower case, and writes the FROM and JOIN a column brings in lower case |
-| `lineWidth` | `80` | characters; the FROM and JOIN a column brings start lines of their own when the line would grow past this; 0 = no limit |
+| `lineWidth` | `80` | characters; the FROM and JOIN a column brings start lines of their own when the line would grow past this, and formatting keeps lines within it where a break can; 0 = no limit |
 
 The client's `textDocument.completion.completionItem.snippetSupport` makes function
 completions snippets (`CONCAT($0)`).
@@ -162,6 +163,55 @@ FROM clause after the cursor is known.
 Once a table has an alias, the select list offers its columns qualified (`c.name`), the
 first table's first, then the other tables of its schema to join, those with a foreign
 key to or from a table in scope first.
+
+## Formatting
+
+`textDocument/formatting` and `rangeFormatting` lay out queries: statements that start
+with `SELECT` or `WITH` (or a parenthesized query) and parse whole. Every other
+statement, and any statement that holds a versioned comment (`/*!NNNNN`), is left as it
+is, so DDL, routines and mysqldump files keep their own layout. A range formats each
+statement it touches, whole. `keywordCase` sets the keywords' case, `lineWidth` the
+width, and the request's `tabSize`/`insertSpaces` one level of indentation (a tab when
+`insertSpaces` is false).
+
+```sql
+SELECT f.title, c.name AS category, count(r.rental_id) AS rentals,
+       sum(p.amount) revenue
+FROM film f
+  JOIN film_category fc ON fc.film_id = f.film_id
+  LEFT JOIN inventory i ON i.film_id = f.film_id
+WHERE f.rating IN ('PG', 'PG-13') AND f.length > 90
+GROUP BY f.title, c.name
+ORDER BY revenue DESC
+LIMIT 20;
+```
+
+- **Clauses** (FROM, WHERE, GROUP BY, HAVING, WINDOW, ORDER BY, LIMIT, INTO, FOR UPDATE,
+  UNION and its kin) stay on one line when the query fits there and the statement was on
+  one line; otherwise each starts a line of its own at the statement's indentation.
+- **Lists** of select items, GROUP BY and ORDER BY items continue after the comma on the
+  same line up to the width, then on the next, aligned with the first item.
+- **Joins** go on lines of their own one level under FROM when the query breaks; a join
+  in parentheses stays inline when it fits. `ON` stays on the JOIN's line, or goes one
+  level deeper on the next line when that line would pass the width.
+- **AND and OR** chains that do not fit break before each operator, one level deeper
+  than the clause or JOIN they belong to.
+- **Subqueries** stay inline when they fit; otherwise the opening parenthesis ends the
+  line, the subquery's clauses follow one level deeper, and the closing parenthesis
+  gets a line of its own.
+- **Kept as they are:** names (a keyword used as a name keeps its case), strings, the
+  spacing inside expressions (`x=1` stays `x=1`; runs of blanks become one), and line
+  breaks inside other constructs (CASE, function arguments), which continue one level
+  deeper. A comment stays before the token after it: at the end of its line when it
+  ended one, on a line of its own when it had one.
+- **Safety:** a layout that would not keep exactly the statement's tokens and comments,
+  or would not parse again, is dropped and the statement left as it is.
+
+Formatting a layout again changes nothing: a statement on several lines keeps its
+clauses apart, which is also what makes completion's inserted FROM and JOIN agree with
+the formatter (JOIN one level under FROM, `ON` on its line). Completion's inserts take two
+spaces (a tab when the statement's indentation has tabs) as the level; formatting takes
+the editor's `tabSize`.
 
 ## Live connections
 

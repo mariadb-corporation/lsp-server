@@ -23,6 +23,7 @@ add_library(mariadblanguageserver STATIC
   src/completion.cc
   src/connection_uri.cc
   src/document.cc
+  src/formatter.cc
   src/keywords.cc
   src/line_map.cc
   src/live_catalog.cc

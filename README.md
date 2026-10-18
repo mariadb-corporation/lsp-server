@@ -24,6 +24,8 @@ mariadb-lsp lsp                   # the language server, LSP over stdin and stdo
 mariadb-lsp check FILE...         # syntax errors as FILE:LINE:COL, exit 1 if any
 mariadb-lsp check --format json FILE...
 mariadb-lsp outline FILE          # the schema objects the file defines, as JSON
+mariadb-lsp format FILE           # the file with its queries laid out, to stdout
+mariadb-lsp format --line-width 100 --keyword-case lower FILE
 mariadb-lsp split FILE            # the statements: position, kind, delimiter, sql_mode
 mariadb-lsp split --format json --text FILE
 mariadb-lsp tokens FILE           # the tokens of every statement

@@ -616,6 +616,8 @@ struct Server::Impl {
       if (*method == "textDocument/prepareRename") return on_prepare_rename(id, d, params);
       if (*method == "textDocument/rename") return on_rename(id, d, params);
       if (*method == "textDocument/signatureHelp") return on_signature_help(id, d, params);
+      if (*method == "textDocument/formatting") return on_formatting(id, d, params, false);
+      if (*method == "textDocument/rangeFormatting") return on_formatting(id, d, params, true);
       reply_error(id, k_method_not_found, "unknown method " + *method);
     } catch (const std::exception &e) {
       if (request) reply_error(id, k_internal_error, e.what());
@@ -711,6 +713,10 @@ struct Server::Impl {
       w.EndArray();
       w.EndObject();
       w.Key("workspaceSymbolProvider");
+      w.Bool(true);
+      w.Key("documentFormattingProvider");
+      w.Bool(true);
+      w.Key("documentRangeFormattingProvider");
       w.Bool(true);
       w.Key("semanticTokensProvider");
       w.StartObject();
@@ -1682,6 +1688,34 @@ struct Server::Impl {
                          throw Request_failed(error);
                        }
                      });
+  }
+
+  // The indentation unit from the request's FormattingOptions (tabSize,
+  // insertSpaces), the keyword case and width from the settings.
+  void on_formatting(const std::string &id, Open_document *d, const Json &params, bool range) {
+    if (d == nullptr) return reply_null(id);
+    Position from{}, to{};
+    if (range) {
+      const auto a = position_of(path(params, {"range", "start"}));
+      const auto b = position_of(path(params, {"range", "end"}));
+      if (!a || !b) return reply_error(id, k_invalid_params, "range expected");
+      from = *a;
+      to = *b;
+    }
+    Format_options o;
+    o.upper_case_keywords = upper_keywords;
+    o.line_width = line_width;
+    const Json *spaces = path(params, {"options", "insertSpaces"});
+    const Json *size = path(params, {"options", "tabSize"});
+    if (spaces != nullptr && spaces->IsBool() && !spaces->GetBool()) {
+      o.indent = "\t";
+    } else if (size != nullptr && size->IsUint() && size->GetUint() > 0 && size->GetUint() <= 16) {
+      o.indent = std::string(size->GetUint(), ' ');
+    }
+    run_request(id, [snap = d->doc.snapshot(), range, from, to, o](Json_writer &w, Parser_cache &cache) mutable {
+      o.version_id = snap->version_id;
+      formatting(w, *snap, range, from, to, o, cache);
+    });
   }
 
   void on_signature_help(const std::string &id, Open_document *d, const Json &params) {

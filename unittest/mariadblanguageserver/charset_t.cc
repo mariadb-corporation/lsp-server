@@ -54,6 +54,13 @@ TEST(Charset, latin1_is_mariadbs_cp1252) {
   EXPECT_FALSE(first_invalid_utf8(latin1_to_utf8(all)));
 }
 
+TEST(Charset, latin1_comes_back_byte_for_byte) {
+  std::string all;
+  for (int b = 0; b < 256; ++b) all.push_back(static_cast<char>(b));
+  EXPECT_EQ(all, utf8_to_latin1(latin1_to_utf8(all)));
+  EXPECT_EQ("a?b", utf8_to_latin1("a\xE4\xB8\xAD" "b"));  // not in latin1
+}
+
 TEST(Charset, columns_survive_the_conversion) {
   const std::string latin1 = "SELECT '\xE9t\xE9', x";
   const std::string utf8 = latin1_to_utf8(latin1);

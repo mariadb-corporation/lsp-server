@@ -508,4 +508,21 @@ void workspace_symbols(Json_writer &w, std::string_view query,
   w.EndArray();
 }
 
+void formatting(Json_writer &w, const Snapshot &s, bool range, Position from, Position to,
+                const Format_options &o, Parser_cache &cache) {
+  const std::string &text = *s.text;
+  const uint32_t begin = range ? s.lines->offset(text, from) : 0;
+  const uint32_t end = range ? s.lines->offset(text, to) : static_cast<uint32_t>(text.size());
+  w.StartArray();
+  for (const auto &e : format_sql(text, *s.index, begin, end, cache, o)) {
+    w.StartObject();
+    w.Key("range");
+    write_range(w, s, e.begin, e.end);
+    w.Key("newText");
+    w.String(e.text.data(), static_cast<rapidjson::SizeType>(e.text.size()));
+    w.EndObject();
+  }
+  w.EndArray();
+}
+
 }  // namespace mdbls::lsp

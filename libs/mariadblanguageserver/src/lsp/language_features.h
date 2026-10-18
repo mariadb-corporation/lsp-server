@@ -26,6 +26,7 @@
 #include "mdbls/catalog_view.h"
 #include "mdbls/completion.h"
 #include "mdbls/document.h"
+#include "mdbls/formatter.h"
 #include "mdbls/live_catalog.h"
 #include "mdbls/lsp/json_position.h"
 #include "mdbls/outline.h"
@@ -82,6 +83,11 @@ bool rename(Json_writer &w, const Snapshot &s, const std::string &uri, Position 
 
 void signature_help(Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
                     Parser_cache &cache);
+
+// TextEdit[] laying out the queries of the statements that overlap
+// [from, to), or of the whole document when `range` is false.
+void formatting(Json_writer &w, const Snapshot &s, bool range, Position from, Position to,
+                const Format_options &o, Parser_cache &cache);
 
 struct Symbol_document {
   std::string uri;

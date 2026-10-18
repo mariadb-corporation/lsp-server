@@ -123,6 +123,33 @@ std::string latin1_to_utf8(std::string_view latin1) {
   return out;
 }
 
+std::string utf8_to_latin1(std::string_view utf8) {
+  std::string out;
+  out.reserve(utf8.size());
+  for (size_t i = 0; i < utf8.size();) {
+    const auto b = static_cast<unsigned char>(utf8[i]);
+    if (b < 0x80) {
+      out.push_back(static_cast<char>(b));
+      ++i;
+      continue;
+    }
+    const size_t n = b >= 0xF0 ? 4 : b >= 0xE0 ? 3 : 2;
+    uint32_t cp = b & (0x7F >> n);
+    for (size_t k = 1; k < n && i + k < utf8.size(); ++k) {
+      cp = (cp << 6) | (static_cast<unsigned char>(utf8[i + k]) & 0x3F);
+    }
+    i += n;
+    if (cp >= 0xA0 && cp <= 0xFF) {
+      out.push_back(static_cast<char>(cp));
+      continue;
+    }
+    const auto *hit = std::find(std::begin(k_latin1_80_9f), std::end(k_latin1_80_9f), cp);
+    out.push_back(hit != std::end(k_latin1_80_9f) ? static_cast<char>(0x80 + (hit - std::begin(k_latin1_80_9f)))
+                                                  : '?');
+  }
+  return out;
+}
+
 std::vector<Charset_declaration> charset_declarations(std::string_view text, size_t before) {
   // The index splits byte-wise and every character set considered here is
   // ASCII-compatible, so it can run on text that is not UTF-8.

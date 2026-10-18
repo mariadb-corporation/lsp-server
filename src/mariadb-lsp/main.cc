@@ -46,6 +46,7 @@
 #include "mdbls/charset.h"
 #include "mdbls/completion.h"
 #include "mdbls/connection_uri.h"
+#include "mdbls/formatter.h"
 #include "mdbls/live_catalog.h"
 #include "mdbls/navigation.h"
 #include "mdbls/secret_store.h"
@@ -77,6 +78,8 @@ const char *const k_usage =
     "           (with --format json, a summary); exit 0 when there are none,\n"
     "           1 when there are\n"
     "  outline  the schema objects a SQL file defines, as JSON\n"
+    "  format   print a SQL file with its queries laid out (SELECT and WITH\n"
+    "           statements that parse; the rest as it is)\n"
     "  split    list the statements of a SQL file\n"
     "  tokens   list the tokens of every statement of a SQL file\n"
     "  tree     print the parse tree of every statement of a SQL file\n"
@@ -98,6 +101,10 @@ const char *const k_usage =
     "  --format tsv|json  output format (default tsv)\n"
     "  --text             split: include each statement's text in the output\n"
     "  --at LINE:COL      complete: the position, 1-based (COL in characters)\n"
+    "  --line-width N     format: the width lines are kept within (default 80,\n"
+    "                     0 = no limit)\n"
+    "  --keyword-case upper|lower\n"
+    "                     format: the case of keywords (default upper)\n"
     "  --connection URI   check, outline, complete: read the sql_mode, the version\n"
     "                     and the catalog from this server (its password from the\n"
     "                     shell's secret store); check then also reports tables and\n"
@@ -139,6 +146,7 @@ struct Options {
   bool mcp = false;
   bool sql_mode_given = false;
   bool version_given = false;
+  mdbls::Format_options format;
 };
 
 // The --connection server's catalog, read once.
@@ -736,6 +744,17 @@ std::optional<Options> parse_args(int argc, char **argv) {
         return std::nullopt;
       }
       o.at = mdbls::Position{line - 1, col - 1};
+    } else if (arg == "--line-width") {
+      const auto n = number();
+      if (!n) return std::nullopt;
+      o.format.line_width = *n;
+    } else if (arg == "--keyword-case") {
+      const auto v = value();
+      if (!v || (*v != "upper" && *v != "lower")) {
+        std::cerr << "mariadb-lsp: --keyword-case is upper or lower\n";
+        return std::nullopt;
+      }
+      o.format.upper_case_keywords = *v == "upper";
     } else if (arg == "--stdio") {
       // The default and only transport.
     } else if (arg == "--mcp") {
@@ -755,7 +774,7 @@ std::optional<Options> parse_args(int argc, char **argv) {
   }
   if (o.command != "split" && o.command != "tokens" && o.command != "check" &&
       o.command != "tree" && o.command != "outline" && o.command != "lsp" &&
-      o.command != "complete" && o.command != "connections") {
+      o.command != "complete" && o.command != "connections" && o.command != "format") {
     std::cerr << (o.command.empty() ? std::string("mariadb-lsp: no command given\n")
                                     : "mariadb-lsp: unknown command " + o.command + "\n")
               << k_usage;
@@ -940,6 +959,21 @@ int main(int argc, char **argv) {
       run_tree(*o, text, lines, index);
     } else if (o->command == "complete") {
       run_complete(*o, text, lines, index, *pool);
+    } else if (o->command == "format") {
+      mdbls::Parser_cache cache;
+      mdbls::Format_options fo = o->format;
+      fo.version_id = o->index.version_id;
+      auto edits = mdbls::format_sql(text, index, 0, static_cast<uint32_t>(text.size()), cache, fo);
+      std::string out;
+      size_t at = 0;
+      for (const auto &e : edits) {
+        out.append(text, at, e.begin - at);
+        out += e.text;
+        at = e.end;
+      }
+      out.append(text, at);
+      // In the file's own character set.
+      std::cout << (charset == "latin1" ? mdbls::utf8_to_latin1(out) : out);
     } else if (o->command == "outline") {
       mdbls::Outline_options oo;
       oo.version_id = o->index.version_id;

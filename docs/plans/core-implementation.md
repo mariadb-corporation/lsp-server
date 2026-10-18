@@ -488,7 +488,7 @@ folding ranges (one per statement, plus `BEGIN...END`); selection ranges; semant
 document highlight for tables/columns/aliases; references within the document; rename of
 aliases and, within the document, of objects defined there; signature help for built-in
 functions (from the function list the extension's grammar tool already extracts);
-workspace symbols over the workspace catalog. Formatting is not in this plan.
+workspace symbols over the workspace catalog. Formatting was added later as P8.
 
 Custom messages: `mariadb/documentContext` (client → server: connection URI, `sql_mode`,
 current schema, server version for a document), `mariadb/viewport` (client → server:
@@ -1055,6 +1055,28 @@ gutter's statements from the server.
   with the generated fixtures, static analysis as `cmake/static_analysis.cmake`.
 - `cpack` packages per platform; install into the shell's `bin/`; release workflow.
 
+### P8 — Formatting (added 2026-10-18)
+
+`textDocument/formatting` and `rangeFormatting`, and `mariadb-lsp format FILE`. The
+style, as the user chose it: comma-last lists that continue on the same line up to the
+width (no break after every comma); JOINs indented one level under FROM with `ON` on the
+JOIN's line (one level deeper on the next when too long); subqueries inline when they
+fit, else on lines of their own one level deeper; keyword case from `keywordCase`, width
+from `lineWidth`; statements that do not parse are left untouched. Completion's inserted
+FROM and JOIN follow the same rules, so the two agree.
+
+Built on the parse tree and the gaps between its tokens: a small Wadler/Prettier-style
+printer (texts, lines that break or not, groups, nests, aligns, fills) and a builder that
+maps the grammar's clause nodes onto it (`src/formatter.cc`). Comments are kept before
+the token after them; versioned comments, routine bodies and every non-query statement
+are left alone. Each layout is checked: the same tokens and comments, and it parses.
+
+**Status 2026-10-18: queries done** (SELECT, WITH, UNION, SELECT ... INTO), see
+`docs/language-server.md` "Formatting". Open: other statements (INSERT ... SELECT,
+UPDATE, DELETE, CREATE VIEW ... AS SELECT, DDL), the original relative indentation of
+line breaks inside other constructs (they all continue one level deeper),
+`onTypeFormatting`.
+
 Estimated total: about four months of one engineer's work to the end of P6, with P0–P2
 being the part that de-risks everything else and should be done first in exactly that
 order.
@@ -1091,7 +1113,7 @@ order.
 
 ## 6. Out of scope for this plan
 
-Formatting; `ALTER` generation from two catalogs and EER rendering (the model is shaped
+`ALTER` generation from two catalogs and EER rendering (the model is shaped
 for them, the code is not written here); Oracle `sql_mode`; multi-version grammar pins
 inside libmariadbparser (one pin now; the option is left in the API); re-extracting the
 parser against a newer server tree (deferred by decision); an MCP transport; packaging

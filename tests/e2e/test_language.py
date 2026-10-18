@@ -161,6 +161,47 @@ class Completion(Language_test):
         self.assertIn("select", labels)
 
 
+class Formatting(Lsp_test):
+    QUERY = ("select o.id, c.name from orders o join customer c on c.id = o.customer_id "
+             "where o.total > 100 and c.name like 'A%';\n")
+
+    def format(self, method, text, options=None, **params):
+        result = self.client.initialize(options)
+        caps = result["capabilities"]
+        self.assertTrue(caps["documentFormattingProvider"])
+        self.assertTrue(caps["documentRangeFormattingProvider"])
+        self.client.open(URI, text)
+        return self.client.request(method, {"textDocument": {"uri": URI},
+                                            "options": {"tabSize": 4, "insertSpaces": True},
+                                            **params})
+
+    def test_a_document_gets_its_queries_laid_out(self):
+        text = "CREATE TABLE t (id INT);\n" + self.QUERY
+        edits = self.format("textDocument/formatting", text)
+        self.assertEqual(len(edits), 1)
+        self.assertEqual(edits[0]["range"]["start"], {"line": 1, "character": 0})
+        # tabSize 4: the join one level of four spaces under FROM.
+        self.assertEqual(edits[0]["newText"],
+                         "SELECT o.id, c.name\n"
+                         "FROM orders o\n"
+                         "    JOIN customer c ON c.id = o.customer_id\n"
+                         "WHERE o.total > 100 AND c.name LIKE 'A%'")
+
+    def test_a_range_formats_the_statements_it_touches(self):
+        text = "select 1;\n" + self.QUERY
+
+        def line(n):
+            return {"start": {"line": n, "character": 0}, "end": {"line": n, "character": 3}}
+
+        edits = self.format("textDocument/rangeFormatting", text, {"lineWidth": 0}, range=line(1))
+        self.assertEqual([e["newText"] for e in edits],
+                         ["SELECT o.id, c.name FROM orders o JOIN customer c ON c.id = o.customer_id "
+                          "WHERE o.total > 100 AND c.name LIKE 'A%'"])
+        edits = self.client.request("textDocument/rangeFormatting", {
+            "textDocument": {"uri": URI}, "options": {"tabSize": 2, "insertSpaces": True}, "range": line(0)})
+        self.assertEqual([e["newText"] for e in edits], ["SELECT 1"])
+
+
 class Navigation(Language_test):
     def test_hover(self):
         text, pos = self.open_at("SELECT o.total, c.na|me FROM orders o JOIN customer c "
