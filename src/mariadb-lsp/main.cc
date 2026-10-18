@@ -110,6 +110,7 @@ const char *const k_usage =
     "  --log FILE         lsp: write a log to FILE\n"
     "  --stdio            lsp: talk on stdin and stdout (the only transport)\n"
     "  --stats            print sizes and timings to stderr\n"
+    "  --version          print \"mariadb-lsp <version>\" and exit\n"
     "  --help             this text\n"
     "\n"
     "Lines and columns are 1-based in text output and 0-based (LSP, UTF-16\n"
@@ -660,6 +661,9 @@ std::optional<Options> parse_args(int argc, char **argv) {
     };
     if (arg == "--help" || arg == "-h") {
       std::cout << k_usage;
+      std::exit(k_exit_ok);
+    } else if (arg == "--version") {
+      std::cout << "mariadb-lsp " MDBLS_VERSION "\n";
       std::exit(k_exit_ok);
     } else if (arg == "--sql-mode") {
       const auto v = value();

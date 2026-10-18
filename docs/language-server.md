@@ -9,6 +9,8 @@ mariadb-lsp lsp [--stdio] [--threads N] [--log FILE] [--shell-bin-dir DIR]
                 [--sql-mode M] [--delimiter D] [--version-id N]
 ```
 
+`mariadb-lsp --version` prints `mariadb-lsp <version>` (the `VERSION` file's) and exits;
+the VS Code extension probes it to tell a usable binary from anything else of that name.
 `--threads` limits the parser threads (default: one per core). `--log` appends a log
 with timestamps. `--sql-mode`, `--delimiter` and `--version-id` set the defaults for
 documents; the client can override them, see below. `--shell-bin-dir` is MariaDB

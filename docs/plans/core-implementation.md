@@ -1019,6 +1019,25 @@ identifiers; references and rename stay within one document.
 - Extend the vscode mock for unit tests; one ui-test that opens a SQL file and sees a
   diagnostic.
 
+**Status 2026-10-18: started, on vscode-extension's `wip/lsp-integration`.** The extension
+finds `mariadb-lsp` through `mariadb.lsp.path`, else the PATH, else `~/.local/bin` (the
+user's choice over "next to `mariadb-shell`"; downloading it when missing, as the shell
+is, comes later), probing `mariadb-lsp --version`, added here for that. It starts the
+server when the first SQL document opens, sends `mariadb/documentContext` with each
+document's connection (picked, header or default), and `mariadb/refreshCatalog` after a
+script with DDL runs from the editor, since the live catalog is otherwise read once. A
+shell the extension installed is passed as `shellBinary`, since its secret store helpers
+are not on the PATH. The settings are the four above (`mariadb.lsp.trace.server`) and a
+`MariaDB: Restart SQL Language Server` command. The server's semantic tokens are
+switched off in the client's middleware: VS Code takes one provider's answer, and the
+server's would hide the extension's ANSI_QUOTES marks while adding nothing over the
+TextMate grammar until identifiers are classified (next step 1). Unit tests over a fake
+client; the ui-test suite `lsp` checks a syntax error in the Problems view and its fix,
+and completion of a sandbox's tables through the live catalog. Open: the download, the
+gutter's statements from the server, a `parseProgress` status bar entry (the work done
+progress shows instead), settings for `catalogFiles`, `keywordCase` and
+`catalogRefreshSeconds`.
+
 ### P7 — Hardening and packaging (ongoing from P4; 1–2 weeks of focused work)
 
 - ASan/UBSan and TSan CI flavours, Valgrind on Linux, fuzzing of the splitter and the

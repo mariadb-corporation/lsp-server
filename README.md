@@ -30,6 +30,7 @@ mariadb-lsp tokens FILE           # the tokens of every statement
 mariadb-lsp tree FILE             # the parse tree of every statement
 mariadb-lsp complete --at 12:8 FILE   # the completion candidates at line 12, column 8
 mariadb-lsp connections           # the connections MariaDB Shell's secret store holds
+mariadb-lsp --version             # "mariadb-lsp 26.9.4"
 mariadb-lsp check --connection app@db.example.com/shop FILE
                                   # with the server's sql_mode, version and catalog:
                                   # unknown tables and columns are warnings
