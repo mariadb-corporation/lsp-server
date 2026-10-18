@@ -137,7 +137,7 @@ class Completion(Language_test):
         r = self.at("textDocument/completion", position_of(text3, "orders. FROM", 7))
         total = next(i for i in r["items"] if i["label"] == "total")
         self.assertEqual([e["newText"] for e in total["additionalTextEdits"]],
-                         ["o.", "\nLEFT OUTER JOIN orders AS o ON o.customer_id = c.id"])
+                         ["o.", "\n  LEFT OUTER JOIN orders AS o ON o.customer_id = c.id"])
 
     def test_without_a_line_width_the_join_stays_on_the_line(self):
         # No limit: the join stays on the line.

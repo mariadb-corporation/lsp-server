@@ -189,6 +189,12 @@ std::string_view indentation(std::string_view text, uint32_t offset) {
   return text.substr(b, e - b);
 }
 
+// One level of indentation deeper than `indent`: a tab when it has tabs,
+// else two spaces.
+std::string_view indent_unit(std::string_view indent) {
+  return indent.find('\t') != std::string_view::npos ? "\t" : "  ";
+}
+
 // A clause completion adds to a query: `FROM t AS a`, or `LEFT OUTER JOIN
 // t AS a` with its `ON ...`.
 struct Added_clause {
@@ -220,7 +226,7 @@ std::string place_clauses(std::string_view text, uint32_t begin, uint32_t body_e
     if (length <= static_cast<int64_t>(width)) return flat;
   }
   const std::string_view eol = statement.find("\r\n") != std::string_view::npos ? "\r\n" : "\n";
-  const std::string_view unit = indent.find('\t') != std::string_view::npos ? "\t" : "  ";
+  const std::string_view unit = indent_unit(indent);
   std::string out;
   for (const auto &c : clauses) {
     const std::string line = std::string(indent) + c.head;
@@ -712,13 +718,18 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
             return add(to_doc(query.select_list.end), indentation(text, select_at > begin ? select_at - 1 : begin),
                        {{kw("FROM") + " " + qualified + " " + kw("AS") + " " + alias, ""}});
           }
-          // A JOIN goes at the indentation of the FROM line, or of the
-          // last line of the tables when they span lines (joins on lines
-          // of their own).
+          // A JOIN goes one level deeper than the FROM line, or at the
+          // indentation of the last line of the tables when they span
+          // lines (joins on lines of their own).
           const uint32_t at_end = to_doc(query.from_tables.end);
           const uint32_t from_begin = to_doc(query.from_tables.begin);
-          const std::string_view join_indent =
-              indentation(text, line_begin(text, from_begin) == line_begin(text, at_end) ? from_begin : at_end);
+          std::string join_indent;
+          if (line_begin(text, from_begin) == line_begin(text, at_end)) {
+            const std::string_view from_indent = indentation(text, from_begin);
+            join_indent = std::string(from_indent) + std::string(indent_unit(from_indent));
+          } else {
+            join_indent = std::string(indentation(text, at_end));
+          }
           // ON the first foreign key between it and a table in scope, in
           // the order the tables are listed.
           std::string on;

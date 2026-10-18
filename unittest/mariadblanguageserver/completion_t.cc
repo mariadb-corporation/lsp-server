@@ -510,7 +510,7 @@ TEST(Completion, a_second_table_is_joined_on_its_foreign_key) {
       std::string(k_fk_schema) + "SELECT t.id, test_schema.t2.| FROM test_schema.t1 AS t;", false);
   EXPECT_EQ(pick(r, "t1_id"),
             "SELECT t.id, t2.t1_id FROM test_schema.t1 AS t\n"
-            "LEFT OUTER JOIN test_schema.t2 AS t2 ON t2.t1_id = t.id;");
+            "  LEFT OUTER JOIN test_schema.t2 AS t2 ON t2.t1_id = t.id;");
 }
 
 TEST(Completion, the_foreign_key_may_point_the_other_way) {
@@ -518,7 +518,7 @@ TEST(Completion, the_foreign_key_may_point_the_other_way) {
       std::string(k_fk_schema) + "SELECT x.id, test_schema.t1.| FROM test_schema.t2 AS x;", false);
   EXPECT_EQ(pick(r, "name"),
             "SELECT x.id, t.name FROM test_schema.t2 AS x\n"
-            "LEFT OUTER JOIN test_schema.t1 AS t ON x.t1_id = t.id;");
+            "  LEFT OUTER JOIN test_schema.t1 AS t ON x.t1_id = t.id;");
 }
 
 TEST(Completion, n_m_tables_are_joined_through_the_table_linking_them) {
@@ -532,13 +532,13 @@ CREATE TABLE school.enrollment (student_id INT, course_id INT,
   const auto r = complete_at(schema + "SELECT s.name, school.course.| FROM school.student AS s;", false);
   EXPECT_EQ(pick(r, "title"),
             "SELECT s.name, c.title FROM school.student AS s\n"
-            "LEFT OUTER JOIN school.enrollment AS e ON e.student_id = s.id\n"
-            "LEFT OUTER JOIN school.course AS c ON e.course_id = c.id;");
+            "  LEFT OUTER JOIN school.enrollment AS e ON e.student_id = s.id\n"
+            "  LEFT OUTER JOIN school.course AS c ON e.course_id = c.id;");
   // The link table's alias does not take the new table's.
   const auto t = complete_at(schema + "SELECT x.name, school.enrollment.| FROM school.student AS x;", false);
   EXPECT_EQ(pick(t, "course_id"),
             "SELECT x.name, e.course_id FROM school.student AS x\n"
-            "LEFT OUTER JOIN school.enrollment AS e ON e.student_id = x.id;");
+            "  LEFT OUTER JOIN school.enrollment AS e ON e.student_id = x.id;");
 }
 
 TEST(Completion, n_m_tables_stay_on_one_line_without_a_width) {
@@ -588,14 +588,14 @@ TEST(Completion, a_table_is_not_added_where_the_rest_of_the_statement_is_unknown
 }
 
 TEST(Completion, a_statement_on_several_lines_gets_its_clauses_on_lines_of_their_own) {
-  // FROM at the indentation of the SELECT line, a JOIN at that of FROM.
+  // FROM at the indentation of the SELECT line, a JOIN one level deeper.
   const auto f = complete_at(std::string(k_fk_schema) + "  SELECT 1,\n    test_schema.t1.|;", false);
   EXPECT_EQ(pick(f, "id"), "  SELECT 1,\n    t.id\n  FROM test_schema.t1 AS t;");
   const auto j = complete_at(
       std::string(k_fk_schema) + "SELECT t.id,\n       test_schema.t2.|\n  FROM test_schema.t1 AS t;", false);
   EXPECT_EQ(pick(j, "t1_id"),
             "SELECT t.id,\n       t2.t1_id\n  FROM test_schema.t1 AS t\n"
-            "  LEFT OUTER JOIN test_schema.t2 AS t2 ON t2.t1_id = t.id;");
+            "    LEFT OUTER JOIN test_schema.t2 AS t2 ON t2.t1_id = t.id;");
   // Joins on lines of their own already: at the last one's indentation.
   const auto k = complete_at(std::string(k_fk_schema) +
                                  "SELECT t.id, test_schema.t2.|\nFROM test_schema.t1 AS t\n"
@@ -623,7 +623,7 @@ TEST(Completion, an_on_past_the_width_goes_on_the_next_line) {
       std::string(k_fk_schema) + "SELECT t.id, test_schema.t2.| FROM test_schema.t1 AS t;", false, 2000, false, 40);
   EXPECT_EQ(pick(r, "t1_id"),
             "SELECT t.id, t2.t1_id FROM test_schema.t1 AS t\n"
-            "LEFT OUTER JOIN test_schema.t2 AS t2\n  ON t2.t1_id = t.id;");
+            "  LEFT OUTER JOIN test_schema.t2 AS t2\n    ON t2.t1_id = t.id;");
 }
 
 TEST(Completion, added_lines_end_as_the_statement_s_do) {
@@ -631,7 +631,7 @@ TEST(Completion, added_lines_end_as_the_statement_s_do) {
       std::string(k_fk_schema) + "SELECT t.id,\r\n  test_schema.t2.|\r\nFROM test_schema.t1 AS t;", false);
   EXPECT_EQ(pick(r, "t1_id"),
             "SELECT t.id,\r\n  t2.t1_id\r\nFROM test_schema.t1 AS t\r\n"
-            "LEFT OUTER JOIN test_schema.t2 AS t2 ON t2.t1_id = t.id;");
+            "  LEFT OUTER JOIN test_schema.t2 AS t2 ON t2.t1_id = t.id;");
 }
 
 TEST(Completion, added_keywords_follow_the_keyword_case) {
@@ -642,7 +642,7 @@ TEST(Completion, added_keywords_follow_the_keyword_case) {
       false);
   EXPECT_EQ(pick(j, "t1_id"),
             "SELECT t.id, t2.t1_id FROM test_schema.t1 AS t\n"
-            "left outer join test_schema.t2 as t2 on t2.t1_id = t.id;");
+            "  left outer join test_schema.t2 as t2 on t2.t1_id = t.id;");
 }
 
 TEST(Completion, a_snippet_may_carry_the_from_on_a_line_of_its_own) {

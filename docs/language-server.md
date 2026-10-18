@@ -145,8 +145,8 @@ The added clauses follow the statement's layout. They stay on the line, one spac
 unless the statement already spans lines or the line would pass `lineWidth` (the column
 being inserted counts, taken at the table's longest column name). Then each clause starts
 a line of its own: `FROM` at the indentation of the line holding the query's `SELECT`,
-a JOIN at that of the FROM line, or of the last line of the tables when its joins are on
-lines of their own; each JOIN of an n:m pair gets its own line, and an `ON` that would pass
+a JOIN one level deeper than the FROM line, or at the indentation of the last line of the
+tables when its joins are on lines of their own; each JOIN of an n:m pair gets its own line, and an `ON` that would pass
 the width goes on the next line one level deeper (two spaces, a tab when the indentation
 has tabs). Lines end in `\r\n` when the statement's do. The keywords follow `keywordCase`.
 Only the inserted text is placed; text after the insert point (`;`, ` WHERE ...`) stays
