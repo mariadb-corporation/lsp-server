@@ -49,6 +49,7 @@ struct Name_syms {
   S(query_specification) S(query_expression_body_ext) S(update) S(insert) S(replace)
   S(table_primary_ident) S(table_primary_derived) S(table_name_with_opt_use_partition)
   S(delete_single_table) S(select_item) S(select_item_list) S(expr) S(sp_param_name_and_mode)
+  S(query_specification_start) S(from_clause) S(table_reference_list) S(DUAL_SYM)
   // tokens
   S(TABLE_SYM) S(VIEW_SYM) S(SEQUENCE_SYM) S(INDEX_SYM) S(DATABASE)
 #undef S
@@ -711,9 +712,7 @@ void Statement_names::collect_tables(uint32_t scope, std::vector<Table_ref> *out
   }
 }
 
-std::vector<Table_ref> Statement_names::tables_at(uint32_t offset) const {
-  const auto &s = syms();
-  std::vector<Table_ref> out;
+uint32_t Statement_names::node_at(uint32_t offset) const {
   const uint32_t tok = token_at(offset);
   uint32_t node = tok == npos ? npos : leaf(tok);
   if (node == npos) {
@@ -722,6 +721,36 @@ std::vector<Table_ref> Statement_names::tables_at(uint32_t offset) const {
       if (leaf(i) != npos) node = leaf(i);
     }
   }
+  return node;
+}
+
+Query_shape Statement_names::query_at(uint32_t offset) const {
+  const auto &s = syms();
+  Query_shape out;
+  const uint32_t q = ancestor(node_at(offset), s.query_specification);
+  if (q == npos) return out;
+  const uint32_t list = m_tree.find(q, s.select_item_list);
+  if (list == npos) return out;
+  out.found = true;
+  out.select_list = {m_tree.begin(list), m_tree.end(list)};
+  // The query's own FROM, not one of a subquery in its select list.
+  for (const uint32_t c : m_tree.children(q)) {
+    const uint32_t from = m_tree.node(c).symbol == s.from_clause ? c : m_tree.find(c, s.from_clause);
+    if (from == npos || ancestor(from, s.query_specification) != q) continue;
+    const uint32_t tables = m_tree.find(from, s.table_reference_list);
+    if (tables == npos) continue;
+    out.has_from = true;
+    out.from_tables = {m_tree.begin(tables), m_tree.end(tables)};
+    out.dual = m_tree.find(tables, s.DUAL_SYM) != npos;
+    break;
+  }
+  return out;
+}
+
+std::vector<Table_ref> Statement_names::tables_at(uint32_t offset) const {
+  const auto &s = syms();
+  std::vector<Table_ref> out;
+  const uint32_t node = node_at(offset);
   bool found_scope = false;
   for (uint32_t n = node; n != npos; n = m_tree.node(n).parent) {
     const int sym = m_tree.node(n).symbol;

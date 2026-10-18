@@ -198,6 +198,25 @@ void completion(Json_writer &w, const Snapshot &s, Position pos, const Catalog_s
       w.Key("insertTextFormat");
       w.Int(2);
     }
+    if (!it.additional_edits.empty()) {
+      w.Key("additionalTextEdits");
+      w.StartArray();
+      for (const auto &e : it.additional_edits) {
+        w.StartObject();
+        w.Key("range");
+        write_range(w, s, e.begin, e.end);
+        str(w, "newText", e.text);
+        w.EndObject();
+      }
+      w.EndArray();
+    }
+    if (it.retrigger) {
+      w.Key("command");
+      w.StartObject();
+      str(w, "title", "");
+      str(w, "command", "editor.action.triggerSuggest");
+      w.EndObject();
+    }
     w.EndObject();
   }
   w.EndArray();

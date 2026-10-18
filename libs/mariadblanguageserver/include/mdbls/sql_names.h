@@ -84,6 +84,16 @@ struct Table_ref {
 };
 
 // A routine parameter or DECLAREd variable.
+// The SELECT a position is in, for completion that adds the table a column
+// comes from: where its select list ends, and the tables after its FROM.
+struct Query_shape {
+  bool found = false;
+  Range select_list;   // the select items
+  bool has_from = false;
+  bool dual = false;   // FROM DUAL: nothing to join to
+  Range from_tables;   // the table references after FROM, joins included
+};
+
 struct Variable {
   std::string name;
   std::string type;
@@ -129,6 +139,8 @@ class Statement_names {
   std::vector<Table_ref> scanned_tables() const;
   // The select aliases visible at `offset` (in ORDER BY, GROUP BY, HAVING).
   std::vector<std::string> select_aliases_at(uint32_t offset) const;
+  // The innermost SELECT around `offset`; `found` false outside one.
+  Query_shape query_at(uint32_t offset) const;
   // The common table expressions the statement defines.
   const std::vector<Table_ref> &ctes() const { return m_ctes; }
   // Parameters and local variables the statement declares.
@@ -140,6 +152,7 @@ class Statement_names {
 
  private:
   uint32_t ancestor(uint32_t n, int symbol) const;
+  uint32_t node_at(uint32_t offset) const;
   // The leaf of token `token`, npos when the parser never shifted it.
   uint32_t leaf(uint32_t token) const {
     return token < m_leaves.size() ? m_leaves[token] : Syntax_tree::npos;

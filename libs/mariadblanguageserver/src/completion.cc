@@ -154,17 +154,30 @@ Prefix_parse parse_prefix(mdbp_parser *p, std::string_view sql) {
   return out;
 }
 
+// `text` as literal text of an LSP snippet.
+std::string snippet_escape(std::string_view text) {
+  std::string out;
+  for (const char ch : text) {
+    if (ch == '$' || ch == '}' || ch == '\\') out += '\\';
+    out += ch;
+  }
+  return out;
+}
+
 class Builder {
  public:
   explicit Builder(Completion_list &out) : out_(out) {}
 
   bool matches(std::string_view label) const { return istarts_with(label, out_.prefix); }
 
-  void add(const std::string &label, Completion_kind kind, int rank, std::string detail = {},
-           std::string doc = {}, std::string insert = {}, bool snippet = false) {
-    if (!matches(label)) return;
+  // The item added, valid until the next add; nullptr when the label does
+  // not match what is typed or is there already.
+  Completion_item *add(const std::string &label, Completion_kind kind, int rank,
+                       std::string detail = {}, std::string doc = {}, std::string insert = {},
+                       bool snippet = false) {
+    if (!matches(label)) return nullptr;
     const std::string key = std::to_string(static_cast<int>(kind)) + lower(label);
-    if (!seen_.insert(key).second) return;
+    if (!seen_.insert(key).second) return nullptr;
     Completion_item it;
     it.label = label;
     it.kind = kind;
@@ -183,7 +196,10 @@ class Builder {
     char r[4] = {static_cast<char>('0' + rank / 10), static_cast<char>('0' + rank % 10), '_', 0};
     it.sort_text = r + lower(label);
     out_.items.push_back(std::move(it));
+    return &out_.items.back();
   }
+
+  bool quoted() const { return out_.quoted; }
 
 
  private:
@@ -352,6 +368,12 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
     truncated += k_sentinel;
     const std::string full = truncated + std::string(text.substr(word_end, body_end - word_end));
     const Statement_names a(tp, full, begin);
+    // Offsets of `a` past the sentinel are the document's shifted by this.
+    const auto shift = static_cast<int64_t>(k_sentinel.size()) -
+                       static_cast<int64_t>(word_end - word_begin);
+    auto to_doc = [&](uint32_t x) {
+      return x > word_begin ? static_cast<uint32_t>(static_cast<int64_t>(x) - shift) : x;
+    };
     Name_ref ref;
     if (a.accepted()) {
       ref = a.name_at(word_begin);
@@ -489,6 +511,197 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
         add_visible_tables(1);
         break;
       case Name_kind::column: {
+        // ---- the tables a column may come from, and adding one
+        // The query the cursor is in: where FROM goes, or what it lists.
+        // Only from a parse of the whole statement: a FROM after the
+        // cursor has to be known before one is added.
+        const Query_shape query = a.accepted() ? a.query_at(word_begin) : Query_shape{};
+        const bool can_add_table =
+            query.found && !query.dual &&
+            (query.has_from || (word_begin >= query.select_list.begin &&
+                                word_begin <= query.select_list.end));
+        // A table in scope, resolved in the catalog; nullptr for derived
+        // tables and tables the catalog does not know.
+        auto resolve = [&](const Table_ref &t) -> Catalog_view::Table_hit {
+          if (t.derived) return {};
+          return catalogs.find_table(t.schema, t.name);
+        };
+        auto schema_of = [&](const Catalog_view::Table_hit &h) {
+          return h.schema != nullptr ? h.schema->name : std::string();
+        };
+        // Whether `fk` of a table in `owner_schema` points at `target`.
+        auto points_at = [&](const Foreign_key &fk, const std::string &owner_schema,
+                             const Catalog_view::Table_hit &target) {
+          if (target.table == nullptr || !iequals(fk.ref_table, target.table->name)) return false;
+          const std::string &ref_schema = fk.ref_schema.empty() ? owner_schema : fk.ref_schema;
+          return iequals(ref_schema, schema_of(target));
+        };
+        // Whether `h` has a foreign key to or from a table in scope.
+        auto fk_related = [&](const Catalog_view::Table_hit &h) {
+          if (h.table == nullptr) return false;
+          for (const auto &t : tables()) {
+            const auto other = resolve(t);
+            if (other.table == nullptr) continue;
+            for (const auto &fk : h.table->foreign_keys) {
+              if (points_at(fk, schema_of(h), other)) return true;
+            }
+            for (const auto &fk : other.table->foreign_keys) {
+              if (points_at(fk, schema_of(other), h)) return true;
+            }
+          }
+          return false;
+        };
+        // The table in scope that is `h`, if any.
+        auto in_scope = [&](const Catalog_view::Table_hit &h) -> const Table_ref * {
+          for (const auto &t : tables()) {
+            const auto other = resolve(t);
+            if ((h.table != nullptr && other.table == h.table) ||
+                (h.view != nullptr && other.view == h.view)) {
+              return &t;
+            }
+          }
+          return nullptr;
+        };
+        // An alias for a table added to FROM: its first letter, numbered
+        // when that is taken.
+        auto new_alias = [&](const std::string &name) {
+          std::string base(1, name.empty() || !std::isalpha(static_cast<unsigned char>(name[0]))
+                                  ? 't'
+                                  : static_cast<char>(std::tolower(static_cast<unsigned char>(name[0]))));
+          auto taken = [&](const std::string &alias) {
+            return std::any_of(tables().begin(), tables().end(),
+                               [&](const Table_ref &t) { return iequals(t.visible_name(), alias); });
+          };
+          std::string alias = base;
+          for (int n = 2; taken(alias); ++n) alias = base + std::to_string(n);
+          return alias;
+        };
+        // What makes a column of `h` usable here when `h` is not in scope:
+        // the qualifiers typed ([qual_begin, word_begin)) become its alias,
+        // and the table goes into FROM - after the select list when there
+        // is none, else joined on a foreign key to a table in scope.
+        auto table_edits = [&](const Catalog_view::Table_hit &h,
+                               uint32_t qual_begin) -> std::vector<Text_edit> {
+          if (!can_add_table || (h.table == nullptr && h.view == nullptr)) return {};
+          if (const Table_ref *t = in_scope(h)) {
+            return {{qual_begin, word_begin, quote_identifier(t->visible_name()) + "."}};
+          }
+          const std::string name = h.table != nullptr ? h.table->name : h.view->name;
+          const std::string schema = schema_of(h);
+          const std::string alias = new_alias(name);
+          const std::string qualified =
+              (schema.empty() || iequals(schema, catalogs.current_schema()) ? std::string()
+                                                                            : quote_identifier(schema) + ".") +
+              quote_identifier(name);
+          std::vector<Text_edit> edits{{qual_begin, word_begin, alias + "."}};
+          if (!query.has_from) {
+            const uint32_t at_end = to_doc(query.select_list.end);
+            edits.push_back({at_end, at_end, " FROM " + qualified + " AS " + alias});
+            return edits;
+          }
+          // ON the first foreign key between it and a table in scope, in
+          // the order the tables are listed.
+          std::string on;
+          for (const auto &t : tables()) {
+            const auto other = resolve(t);
+            if (other.table == nullptr) continue;
+            const std::string them = quote_identifier(t.visible_name());
+            auto condition = [&](const Foreign_key &fk, const std::string &from,
+                                 const std::string &to) {
+              std::string c;
+              for (size_t k = 0; k < fk.columns.size() && k < fk.ref_columns.size(); ++k) {
+                if (!c.empty()) c += " AND ";
+                c += from + "." + quote_identifier(fk.columns[k]) + " = " + to + "." +
+                     quote_identifier(fk.ref_columns[k]);
+              }
+              return c;
+            };
+            if (h.table != nullptr) {
+              for (const auto &fk : h.table->foreign_keys) {
+                if (points_at(fk, schema, other)) {
+                  on = condition(fk, alias, them);
+                  break;
+                }
+              }
+            }
+            if (on.empty()) {
+              for (const auto &fk : other.table->foreign_keys) {
+                if (points_at(fk, schema_of(other), h)) {
+                  on = condition(fk, them, alias);
+                  break;
+                }
+              }
+            }
+            if (!on.empty()) break;
+          }
+          const uint32_t at_end = to_doc(query.from_tables.end);
+          edits.push_back({at_end, at_end,
+                           on.empty() ? " CROSS JOIN " + qualified + " AS " + alias
+                                      : " LEFT OUTER JOIN " + qualified + " AS " + alias + " ON " + on});
+          return edits;
+        };
+        // A table or schema to go on from: `name.`, and the list again.
+        auto add_dotted = [&](const std::string &label, Completion_kind kind, int rank,
+                              std::string detail, std::string insert) {
+          if (Completion_item *it = b.add(label, kind, rank, std::move(detail), {},
+                                          (b.quoted() ? backtick_quote(insert) : quote_identifier(insert)) + ".")) {
+            it->retrigger = true;
+            // A quoted name is one word: the dot after it is the next.
+            if (b.quoted() && insert != label) it->insert_text = insert + ".";
+          }
+        };
+        // The tables of `schema` not in scope, those with a foreign key to
+        // or from one in scope first; with `with_schema`, written with
+        // their schema unless it is the current one.
+        auto add_dotted_tables = [&](const std::string &schema, int related_rank, int rank,
+                                     bool with_schema) {
+          const bool qualify =
+              with_schema && !schema.empty() && !iequals(schema, catalogs.current_schema());
+          catalogs.for_each_table(schema, [&](const Catalog_view::Table_hit &h) {
+            if (in_scope(h) != nullptr) return;
+            const std::string &name = h.table != nullptr ? h.table->name : h.view->name;
+            const std::string where = h.schema != nullptr && !h.schema->name.empty()
+                                          ? " in " + h.schema->name
+                                          : std::string();
+            const int r = fk_related(h) ? related_rank : rank;
+            const auto kind = h.table != nullptr ? Completion_kind::table : Completion_kind::view;
+            const std::string what = (h.table != nullptr ? "table" : "view") + where;
+            if (qualify) {
+              if (Completion_item *it = b.add(name, kind, r, what, {},
+                                              quote_identifier(schema) + "." + quote_identifier(name) + ".")) {
+                it->retrigger = true;
+              }
+            } else {
+              add_dotted(name, kind, r, what, name);
+            }
+          });
+        };
+        auto is_system_schema = [](std::string_view schema) {
+          return iequals(schema, "information_schema") || iequals(schema, "mysql") ||
+                 iequals(schema, "performance_schema") || iequals(schema, "sys");
+        };
+        // Columns that bring their table along.  An edit that inserts
+        // right where the item's own text ends (FROM after the last select
+        // item) is applied before it by VS Code, which puts the column
+        // after the FROM clause; it goes into the item's own text instead,
+        // as a snippet with the caret after the column.  A client that
+        // takes no snippets gets it as an additional edit.
+        auto add_columns_with = [&](const std::vector<Col> &cols, int rank,
+                                    const std::vector<Text_edit> &edits) {
+          for (const auto &c : cols) {
+            Completion_item *it = b.add(c.name, Completion_kind::column, rank, c.detail, c.doc);
+            if (it == nullptr) continue;
+            for (const auto &e : edits) {
+              if (options.snippets && e.begin == e.end && e.begin == out.replace_end) {
+                it->insert_text = snippet_escape(it->insert_text) + "$0" + snippet_escape(e.text);
+                it->snippet = true;
+              } else {
+                it->additional_edits.push_back(e);
+              }
+            }
+          }
+        };
+
         std::vector<Col> cols;
         if (ref.has_owner) {
           const auto hit = catalogs.find_table(ref.owner_schema, ref.owner);
@@ -513,33 +726,81 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
           bool found = t != nullptr;
           if (t != nullptr) {
             columns_of_ref(*t, &cols);
+            add_columns(cols, 1);
           } else {
+            // A table of the current schema, not in FROM yet.
             const auto hit = catalogs.find_table("", q);
             columns_of_table(hit, q, &cols);
             found = hit.table != nullptr || hit.view != nullptr;
+            add_columns_with(cols, 1, table_edits(hit, ref.qualifier_ranges[0].begin));
           }
-          add_columns(cols, 1);
           if (!found && catalogs.has_schema(q)) {
-            // schema.table in an expression
-            add_tables(q, 2);
+            // schema.table.column, one name at a time.
+            add_dotted_tables(q, 1, 2, false);
           }
           break;
         }
         if (ref.qualifiers.size() == 2) {
-          columns_of_table(catalogs.find_table(ref.qualifiers[0], ref.qualifiers[1]),
-                           ref.qualifiers[1], &cols);
-          add_columns(cols, 1);
+          const auto hit = catalogs.find_table(ref.qualifiers[0], ref.qualifiers[1]);
+          columns_of_table(hit, ref.qualifiers[1], &cols);
+          add_columns_with(cols, 1, table_edits(hit, ref.qualifier_ranges[0].begin));
           break;
         }
-        for (const auto &t : tables()) columns_of_ref(t, &cols);
-        add_columns(cols, 1);
-        for (const auto &al : a.select_aliases_at(word_begin)) {
-          b.add(al, Completion_kind::alias, 1, "select alias");
+        if (tables().empty() && query.found && !query.has_from) {
+          // Nothing to take columns from yet: the way to a table, one
+          // name at a time - the current schema's tables, else the
+          // schemas, user schemas first.  A column picked at the end
+          // brings its table into FROM.
+          const std::string current = catalogs.current_schema();
+          if (!current.empty()) add_dotted_tables(current, 1, 1, false);
+          for (const auto &sc : catalogs.schema_names()) {
+            if (sc.empty()) continue;
+            add_dotted(sc, Completion_kind::schema, is_system_schema(sc) ? 3 : current.empty() ? 1 : 2,
+                       "schema", sc);
+          }
+          for (const auto &v : a.variables()) b.add(v.name, Completion_kind::variable, 4, v.type);
+          add_routines("", "function", 5);
+          add_builtins(6);
+          break;
         }
-        for (const auto &v : a.variables()) b.add(v.name, Completion_kind::variable, 2, v.type);
-        add_visible_tables(3);
-        add_routines("", "function", 4);
-        add_builtins(5);
+        // Qualified as `t.column` where a table has an alias, as every
+        // table completion adds has: the first table's columns first.
+        const bool qualify = std::any_of(tables().begin(), tables().end(),
+                                         [](const Table_ref &t) { return !t.alias.empty(); });
+        if (qualify && !b.quoted()) {
+          for (size_t k = 0; k < tables().size(); ++k) {
+            std::vector<Col> own;
+            columns_of_ref(tables()[k], &own);
+            const std::string q = quote_identifier(tables()[k].visible_name()) + ".";
+            for (const auto &c : own) {
+              b.add(tables()[k].visible_name() + "." + c.name, Completion_kind::column, k == 0 ? 1 : 2,
+                    c.detail, c.doc, q + quote_identifier(c.name));
+            }
+          }
+        } else {
+          for (const auto &t : tables()) columns_of_ref(t, &cols);
+          add_columns(cols, 1);
+        }
+        for (const auto &al : a.select_aliases_at(word_begin)) {
+          b.add(al, Completion_kind::alias, 3, "select alias");
+        }
+        for (const auto &v : a.variables()) b.add(v.name, Completion_kind::variable, 3, v.type);
+        add_visible_tables(4);
+        // The other tables of the first table's schema, to join: those
+        // with a foreign key to or from a table in scope first.
+        if (can_add_table && query.has_from) {
+          std::string schema = catalogs.current_schema();
+          for (const auto &t : tables()) {
+            const auto h = resolve(t);
+            if (h.table != nullptr || h.view != nullptr) {
+              schema = schema_of(h);
+              break;
+            }
+          }
+          if (!schema.empty()) add_dotted_tables(schema, 5, 6, true);
+        }
+        add_routines("", "function", 7);
+        add_builtins(8);
         break;
       }
       case Name_kind::none:

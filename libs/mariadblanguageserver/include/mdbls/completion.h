@@ -45,6 +45,14 @@ enum class Completion_kind : uint8_t {
 
 const char *completion_kind_name(Completion_kind kind);
 
+// A change elsewhere in the document that an item brings with it: the
+// table a column comes from, added to the FROM clause.
+struct Text_edit {
+  uint32_t begin = 0;
+  uint32_t end = 0;
+  std::string text;
+};
+
 struct Completion_item {
   std::string label;
   Completion_kind kind = Completion_kind::keyword;
@@ -53,6 +61,10 @@ struct Completion_item {
   std::string insert_text;    // replaces the word being typed
   bool snippet = false;       // insert_text is an LSP snippet
   std::string sort_text;
+  // Applied with the item, outside the word it replaces; none overlaps it.
+  std::vector<Text_edit> additional_edits;
+  // The item ends in a '.': the next names are asked for at once.
+  bool retrigger = false;
 };
 
 struct Completion_list {

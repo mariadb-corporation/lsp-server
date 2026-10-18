@@ -114,6 +114,31 @@ class Completion(Language_test):
         self.assertEqual(item["textEdit"]["newText"], "order_count($0)")
         self.assertEqual(item["insertTextFormat"], 2)
 
+    def test_a_column_brings_its_table_and_a_table_asks_again(self):
+        # shop is the current schema (USE shop): its tables first, then on.
+        text, pos = self.open_at("SELECT |;")
+        r = self.at("textDocument/completion", pos)
+        customer = next(i for i in r["items"] if i["label"] == "customer")
+        self.assertEqual(customer["textEdit"]["newText"], "customer.")
+        self.assertEqual(customer["command"]["command"], "editor.action.triggerSuggest")
+
+        self.client.change(URI, 2, [{"text": text.replace("SELECT ;", "SELECT customer.;")}])
+        text2 = text.replace("SELECT ;", "SELECT customer.;")
+        r = self.at("textDocument/completion", position_of(text2, "customer.;", 9))
+        name = next(i for i in r["items"] if i["label"] == "name")
+        edits = name["additionalTextEdits"]
+        self.assertEqual([range_text(text2, e["range"]) for e in edits], ["customer.", ""])
+        self.assertEqual([e["newText"] for e in edits], ["c.", " FROM customer AS c"])
+        self.assertNotIn("command", name)
+
+        # A second table: joined on its foreign key.
+        text3 = text.replace("SELECT ;", "SELECT c.name, orders. FROM customer AS c;")
+        self.client.change(URI, 3, [{"text": text3}])
+        r = self.at("textDocument/completion", position_of(text3, "orders. FROM", 7))
+        total = next(i for i in r["items"] if i["label"] == "total")
+        self.assertEqual([e["newText"] for e in total["additionalTextEdits"]],
+                         ["o.", " LEFT OUTER JOIN orders AS o ON o.customer_id = c.id"])
+
     def test_lower_case_keywords(self):
         text, pos = self.open_at("sel|", {"keywordCase": "lower"})
         labels = [i["label"] for i in self.at("textDocument/completion", pos)["items"]]

@@ -1038,8 +1038,12 @@ entry from `mariadb/parseProgress` (the client declines work done progress, so i
 shown twice), and settings for `catalogFiles`, `catalogRefreshSeconds`, `keywordCase`,
 `sqlMode`, `serverVersion`, `debounceMs`, `maxDiagnostics` and the progress threshold,
 sent through `workspace/didChangeConfiguration`; a changed `catalogRefreshSeconds` now
-applies to the connections already read (`Live_catalog::set_refresh_interval`). Open: the
-download, the gutter's statements from the server.
+applies to the connections already read (`Live_catalog::set_refresh_interval`). Since then:
+`--mcp` (the extension runs the server so; catalogs are read with the `db.*` tools of the
+extension's MCP server through `mariadb/dbCall`, so one MCP server serves both and no
+credentials reach the server), and completion that goes from a schema to a table to a
+column and adds the table to FROM, joined on a foreign key. Open: the download, the
+gutter's statements from the server.
 
 ### P7 — Hardening and packaging (ongoing from P4; 1–2 weeks of focused work)
 

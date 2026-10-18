@@ -71,7 +71,8 @@ struct Result {
 };
 
 // Completes at the '|' in `sql`, which follows the schema above.
-Result complete_at(const std::string &sql, bool with_schema = true, size_t max_items = 2000) {
+Result complete_at(const std::string &sql, bool with_schema = true, size_t max_items = 2000,
+                   bool snippets = false) {
   static Parser_pool pool(2);
   Result r;
   r.text = (with_schema ? std::string(k_schema) : std::string()) + sql;
@@ -88,6 +89,7 @@ Result complete_at(const std::string &sql, bool with_schema = true, size_t max_i
   Parser_cache cache;
   Completion_options o;
   o.max_items = max_items;
+  o.snippets = snippets;
   r.list = complete(r.text, index, r.cursor, view, cache, o);
   return r;
 }
@@ -406,6 +408,145 @@ TEST(Keywords, expected_after_a_complete_statement) {
   EXPECT_NE(std::find(e->begin(), e->end(), grammar::symbol("WHERE")), e->end());
   // A syntax error before the end: nothing known.
   EXPECT_FALSE(expected_after(p, "SELECT FROM WHERE x").has_value());
+}
+
+namespace {
+
+// Two related tables and one on its own, and no USE: no schema is current.
+const char *const k_fk_schema = R"(
+CREATE TABLE test_schema.t1 (id INT PRIMARY KEY, name VARCHAR(10));
+CREATE TABLE test_schema.t2 (id INT PRIMARY KEY, t1_id INT,
+  FOREIGN KEY (t1_id) REFERENCES test_schema.t1 (id));
+CREATE TABLE test_schema.t3 (x INT);
+CREATE TABLE other.o1 (x INT);
+)";
+
+// The statement after picking `label` at the cursor: its insert and its
+// additional edits applied.
+std::string pick(const Result &r, const std::string &label) {
+  const Completion_item *it = r.item(label);
+  EXPECT_NE(it, nullptr) << label;
+  if (it == nullptr) return {};
+  std::vector<Text_edit> edits = it->additional_edits;
+  edits.push_back({r.list.replace_begin, r.list.replace_end, it->insert_text});
+  std::sort(edits.begin(), edits.end(),
+            [](const Text_edit &x, const Text_edit &y) { return x.begin > y.begin; });
+  std::string text = r.text;
+  for (const auto &e : edits) text.replace(e.begin, e.end - e.begin, e.text);
+  // The statement the cursor was in: from the last line of DDL on.
+  const size_t from = text.rfind(";\n", r.list.replace_begin);
+  return text.substr(from == std::string::npos ? 0 : from + 2);
+}
+
+std::vector<std::string> first_labels(const Result &r, size_t n) {
+  std::vector<std::string> out;
+  for (size_t k = 0; k < r.list.items.size() && k < n; ++k) out.push_back(r.list.items[k].label);
+  return out;
+}
+
+}  // namespace
+
+TEST(Completion, select_with_nothing_to_take_columns_from_offers_schemas) {
+  const auto r = complete_at(std::string(k_fk_schema) + "SELECT |;", false);
+  EXPECT_EQ(first_labels(r, 2), (std::vector<std::string>{"other", "test_schema"}));
+  const auto *it = r.item("test_schema");
+  ASSERT_NE(it, nullptr);
+  EXPECT_EQ(it->insert_text, "test_schema.");
+  EXPECT_TRUE(it->retrigger);
+}
+
+TEST(Completion, a_schema_then_its_tables) {
+  const auto r = complete_at(std::string(k_fk_schema) + "SELECT test_schema.|;", false);
+  EXPECT_EQ(sorted(r.labels()), (std::vector<std::string>{"t1", "t2", "t3"}));
+  EXPECT_EQ(r.item("t1")->insert_text, "t1.");
+  EXPECT_TRUE(r.item("t1")->retrigger);
+}
+
+TEST(Completion, a_column_brings_its_table_into_from) {
+  const auto r = complete_at(std::string(k_fk_schema) + "SELECT test_schema.t1.|;", false);
+  EXPECT_EQ(sorted(r.labels()), (std::vector<std::string>{"id", "name"}));
+  EXPECT_EQ(pick(r, "id"), "SELECT t.id FROM test_schema.t1 AS t;");
+}
+
+TEST(Completion, after_a_comma_the_columns_in_scope_then_related_tables) {
+  const auto r =
+      complete_at(std::string(k_fk_schema) + "SELECT t.id, | FROM test_schema.t1 AS t;", false);
+  EXPECT_EQ(first_labels(r, 2), (std::vector<std::string>{"t.id", "t.name"}));
+  EXPECT_EQ(r.item("t.name")->insert_text, "t.name");
+  // t2 has a foreign key to t1: before t3.
+  const auto labels = r.labels();
+  const auto t2 = std::find(labels.begin(), labels.end(), "t2");
+  const auto t3 = std::find(labels.begin(), labels.end(), "t3");
+  ASSERT_NE(t2, labels.end());
+  ASSERT_NE(t3, labels.end());
+  EXPECT_LT(t2, t3);
+  EXPECT_FALSE(r.has("t1"));  // in scope already
+  EXPECT_FALSE(r.has("o1"));  // another schema
+  // No schema is current: the table goes in with its schema.
+  EXPECT_EQ(r.item("t2")->insert_text, "test_schema.t2.");
+  EXPECT_TRUE(r.item("t2")->retrigger);
+}
+
+TEST(Completion, a_from_clause_right_after_the_column_is_part_of_its_snippet) {
+  // An insert where the column's own text ends would be applied before
+  // it: with snippets, it is the column's text, the caret after the name.
+  const auto r = complete_at(std::string(k_fk_schema) + "SELECT test_schema.t1.|;", false, 2000, true);
+  const auto *id = r.item("id");
+  ASSERT_NE(id, nullptr);
+  EXPECT_TRUE(id->snippet);
+  EXPECT_EQ(id->insert_text, "id$0 FROM test_schema.t1 AS t");
+  ASSERT_EQ(id->additional_edits.size(), 1u);
+  EXPECT_EQ(id->additional_edits[0].text, "t.");
+  // Not at the end of the select list: an additional edit as before.
+  const auto m = complete_at(std::string(k_fk_schema) + "SELECT test_schema.t1.|, 1;", false, 2000, true);
+  EXPECT_FALSE(m.item("id")->snippet);
+  EXPECT_EQ(pick(m, "id"), "SELECT t.id, 1 FROM test_schema.t1 AS t;");
+}
+
+TEST(Completion, a_second_table_is_joined_on_its_foreign_key) {
+  const auto r = complete_at(
+      std::string(k_fk_schema) + "SELECT t.id, test_schema.t2.| FROM test_schema.t1 AS t;", false);
+  EXPECT_EQ(pick(r, "t1_id"),
+            "SELECT t.id, t2.t1_id FROM test_schema.t1 AS t "
+            "LEFT OUTER JOIN test_schema.t2 AS t2 ON t2.t1_id = t.id;");
+}
+
+TEST(Completion, the_foreign_key_may_point_the_other_way) {
+  const auto r = complete_at(
+      std::string(k_fk_schema) + "SELECT x.id, test_schema.t1.| FROM test_schema.t2 AS x;", false);
+  EXPECT_EQ(pick(r, "name"),
+            "SELECT x.id, t.name FROM test_schema.t2 AS x "
+            "LEFT OUTER JOIN test_schema.t1 AS t ON x.t1_id = t.id;");
+}
+
+TEST(Completion, a_table_with_no_foreign_key_is_cross_joined) {
+  const auto r = complete_at(
+      std::string(k_fk_schema) + "SELECT t.id, test_schema.t3.| FROM test_schema.t1 AS t;", false);
+  EXPECT_EQ(pick(r, "x"),
+            "SELECT t.id, t2.x FROM test_schema.t1 AS t CROSS JOIN test_schema.t3 AS t2;");
+}
+
+TEST(Completion, a_table_in_scope_is_named_by_its_alias) {
+  const auto r = complete_at(
+      std::string(k_fk_schema) + "SELECT test_schema.t1.| FROM test_schema.t1 AS t;", false);
+  EXPECT_EQ(pick(r, "name"), "SELECT t.name FROM test_schema.t1 AS t;");
+}
+
+TEST(Completion, with_a_current_schema_its_tables_come_first_unqualified) {
+  const auto r = complete_at(std::string(k_fk_schema) + "USE test_schema;\nSELECT |;", false);
+  EXPECT_EQ(first_labels(r, 3), (std::vector<std::string>{"t1", "t2", "t3"}));
+  EXPECT_EQ(r.item("t1")->insert_text, "t1.");
+  EXPECT_TRUE(r.has("other"));
+  const auto c = complete_at(std::string(k_fk_schema) + "USE test_schema;\nSELECT t1.|;", false);
+  EXPECT_EQ(pick(c, "id"), "SELECT t.id FROM t1 AS t;");
+}
+
+TEST(Completion, a_table_is_not_added_where_the_rest_of_the_statement_is_unknown) {
+  // The statement does not parse whole: where FROM would go is unknown.
+  const auto r = complete_at(
+      std::string(k_fk_schema) + "SELECT test_schema.t1.| FROM WHERE;", false);
+  EXPECT_TRUE(r.has("id"));
+  EXPECT_TRUE(r.item("id")->additional_edits.empty());
 }
 
 }  // namespace mdbls

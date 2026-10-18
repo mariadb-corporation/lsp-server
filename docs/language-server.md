@@ -120,6 +120,33 @@ Items are ranked columns, then aliases and variables, then functions, then keywo
 name that needs quoting is inserted in backticks; typing an opening backtick completes
 inside it.
 
+**From a schema to a column.** In a select list with no table to take columns from
+(`SELECT |` with no FROM), completion leads to a table one name at a time: the current
+schema's tables first when there is one (a `USE`, `currentSchema`, or the schema of the
+connection's URI), then the schemas, user schemas before `information_schema`, `mysql`,
+`performance_schema` and `sys`. A schema or table is inserted with a dot after it (`shop.`,
+`customer.`) and carries the command `editor.action.triggerSuggest`, so the next list
+opens at once. Picking a column of a table that is not in scope adds that table:
+
+- the qualifiers typed become an alias, the table's first letter, numbered when taken
+  (`c`, `c2`): `SELECT shop.customer.name` becomes `SELECT c.name FROM shop.customer AS c`,
+  the schema left out when it is the current one;
+- with no FROM yet, ` FROM <table> AS <alias>` goes after the select list;
+- with one, ` LEFT OUTER JOIN <table> AS <alias> ON ...` goes after its tables, on the first
+  foreign key between the new table and a table in scope (either direction, in the order
+  the tables are listed), or ` CROSS JOIN <table> AS <alias>` when there is none;
+- a table already in scope is only renamed to its alias.
+
+The edits are `additionalTextEdits`. One that would insert exactly where the item's own text
+ends (FROM after the last select item) is applied before the item by VS Code, so for a
+client that takes snippets it is part of the item's text instead (`name$0 FROM ...`, the
+caret after the column). The FROM is added only when the whole statement parses, so the
+FROM clause after the cursor is known.
+
+Once a table has an alias, the select list offers its columns qualified (`c.name`), the
+first table's first, then the other tables of its schema to join, those with a foreign
+key to or from a table in scope first.
+
 ## Live connections
 
 A connection is named by its URI, in MariaDB Shell's syntax
