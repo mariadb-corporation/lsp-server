@@ -172,6 +172,9 @@ TEST(Formatter, other_statements_are_left_alone) {
 
 TEST(Formatter, the_indentation_and_line_endings_of_the_statement_are_kept) {
   EXPECT_EQ(layout("  SELECT a FROM t\r\n  WHERE b = 1;"), "  SELECT a\r\n  FROM t\r\n  WHERE b = 1;");
+  // A statement on one line breaks the way the document's lines end.
+  EXPECT_EQ(layout("SELECT a FROM t WHERE b = 1;\r\nSELECT 1;\r\n", 20),
+            "SELECT a\r\nFROM t\r\nWHERE b = 1;\r\nSELECT 1;\r\n");
   EXPECT_EQ(layout("SELECT *\nFROM a\nJOIN b ON a.id = b.id;", 80, true, "\t"),
             "SELECT *\nFROM a\n\tJOIN b ON a.id = b.id;");
 }

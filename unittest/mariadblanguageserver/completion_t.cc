@@ -429,12 +429,13 @@ std::string pick(const Result &r, const std::string &label) {
   const Completion_item *it = r.item(label);
   EXPECT_NE(it, nullptr) << label;
   if (it == nullptr) return {};
-  std::vector<Text_edit> edits = it->additional_edits;
-  edits.push_back({r.list.replace_begin, r.list.replace_end, it->insert_text});
-  std::sort(edits.begin(), edits.end(),
-            [](const Text_edit &x, const Text_edit &y) { return x.begin > y.begin; });
-  std::string text = r.text;
-  for (const auto &e : edits) text.replace(e.begin, e.end - e.begin, e.text);
+  // In order; the item's own text goes before what is added at the same
+  // place (the FROM clause after the select list it ends).
+  std::vector<Text_edit> edits{{r.list.replace_begin, r.list.replace_end, it->insert_text}};
+  edits.insert(edits.end(), it->additional_edits.begin(), it->additional_edits.end());
+  std::stable_sort(edits.begin(), edits.end(),
+                   [](const Text_edit &x, const Text_edit &y) { return x.begin < y.begin; });
+  const std::string text = apply_edits(r.text, edits);
   // The statement the cursor was in: from the last line of DDL on.
   const size_t from = text.rfind(";\n", r.list.replace_begin);
   return text.substr(from == std::string::npos ? 0 : from + 2);

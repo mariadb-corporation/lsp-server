@@ -742,13 +742,14 @@ bool parses(mdbp_parser *parser, std::string_view sql) {
 }
 
 // The layout of the statement [st_begin, st_end) of `text`, parsed with
-// `parser` (one that records derivations): the edit replacing its first
-// token to its last, or nullopt when the statement stays as it is - it is
-// already laid out, it is not a query (SELECT, WITH, a parenthesized
-// query), does not parse whole, holds a versioned comment, or the layout
-// would not keep its tokens and comments.
+// `parser` (one that records derivations), its lines ending in `eol`: the
+// edit replacing its first token to its last, or nullopt when the statement
+// stays as it is - it is already laid out, it is not a query (SELECT, WITH,
+// a parenthesized query), does not parse whole, holds a versioned comment,
+// or the layout would not keep its tokens and comments.
 std::optional<Text_edit> format_statement(std::string_view text, uint32_t st_begin, uint32_t st_end,
-                                          mdbp_parser *parser, const Format_options &options) {
+                                          mdbp_parser *parser, const Format_options &options,
+                                          std::string_view eol) {
   const std::string_view sql = text.substr(st_begin, st_end - st_begin);
   if (parser == nullptr || !starts_with_query(sql)) return std::nullopt;
   mdbp_result r;
@@ -786,7 +787,7 @@ std::optional<Text_edit> format_statement(std::string_view text, uint32_t st_beg
 
   // At the indentation and the column of the line the statement starts on.
   const uint32_t line_start = line_begin(text, b);
-  Printer printer(options.line_width, eol_of(original));
+  Printer printer(options.line_width, eol);
   std::string out = printer.print(doc, indentation(text, b), char_count(text.substr(line_start, b - line_start)));
   if (out == original) return std::nullopt;
 
@@ -804,27 +805,19 @@ std::optional<Text_edit> format_statement(std::string_view text, uint32_t st_beg
 std::vector<Text_edit> format_sql(std::string_view text, const Statement_index &index, uint32_t begin,
                                   uint32_t end, Parser_cache &cache, const Format_options &options) {
   std::vector<Text_edit> edits;
+  // The document's line break: a statement on one line has none of its own.
+  const std::string_view eol = eol_of(text);
   const auto &stmts = index.statements();
   for (size_t i = index.find(begin); i < stmts.size(); ++i) {
     const Statement &st = stmts[i];
     if (st.begin >= end && !(begin == end && st.begin == end)) break;
     if (st.body_end < begin || st.kind != Statement_kind::sql) continue;
     mdbp_parser *parser = cache.get(index.modes()[st.mode].mode, options.version_id, true);
-    if (auto edit = format_statement(text, st.begin, st.body_end, parser, options)) edits.push_back(std::move(*edit));
+    if (auto edit = format_statement(text, st.begin, st.body_end, parser, options, eol)) {
+      edits.push_back(std::move(*edit));
+    }
   }
   return edits;
-}
-
-std::string apply_edits(std::string_view text, const std::vector<Text_edit> &edits) {
-  std::string out;
-  size_t at = 0;
-  for (const auto &e : edits) {
-    out.append(text, at, e.begin - at);
-    out += e.text;
-    at = e.end;
-  }
-  out.append(text, at);
-  return out;
 }
 
 }  // namespace mdbls

@@ -53,6 +53,9 @@ struct Text_edit {
   std::string text;
 };
 
+// `text` with `edits` (in order, not overlapping) applied.
+std::string apply_edits(std::string_view text, const std::vector<Text_edit> &edits);
+
 struct Completion_item {
   std::string label;
   Completion_kind kind = Completion_kind::keyword;

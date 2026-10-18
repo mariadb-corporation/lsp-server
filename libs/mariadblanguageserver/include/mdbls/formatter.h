@@ -63,11 +63,9 @@ struct Format_options {
 //    (CASE, function arguments) is kept, one level deeper.
 //  - Comments stay before the token after them, on a line of their own when
 //    they were.
+//  - The lines end as the document's do: "\r\n" when it has one, else "\n".
 std::vector<Text_edit> format_sql(std::string_view text, const Statement_index &index, uint32_t begin,
                                   uint32_t end, Parser_cache &cache, const Format_options &options = {});
-
-// `text` with `edits` (in order, not overlapping) applied.
-std::string apply_edits(std::string_view text, const std::vector<Text_edit> &edits);
 
 }  // namespace mdbls
 

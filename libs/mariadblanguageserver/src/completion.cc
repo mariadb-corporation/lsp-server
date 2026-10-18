@@ -205,7 +205,11 @@ std::string place_clauses(std::string_view text, uint32_t begin, uint32_t body_e
                         extra;
     if (length <= static_cast<int64_t>(width)) return flat;
   }
-  const std::string_view eol = eol_of(statement);
+  // The statement's line break; a statement on one line takes the one
+  // ending that line.
+  const size_t nl = text.find('\n', body_end);
+  const std::string_view eol =
+      eol_of(text.substr(begin, (nl == std::string_view::npos ? text.size() : nl + 1) - begin));
   const std::string_view unit = indent_unit(indent);
   std::string out;
   for (const auto &c : clauses) {
@@ -289,6 +293,18 @@ const char *completion_kind_name(Completion_kind kind) {
     case Completion_kind::variable: return "variable";
   }
   return "keyword";
+}
+
+std::string apply_edits(std::string_view text, const std::vector<Text_edit> &edits) {
+  std::string out;
+  size_t at = 0;
+  for (const auto &e : edits) {
+    out.append(text, at, e.begin - at);
+    out += e.text;
+    at = e.end;
+  }
+  out.append(text, at);
+  return out;
 }
 
 std::optional<size_t> statement_at(const Statement_index &index, uint32_t offset) {
