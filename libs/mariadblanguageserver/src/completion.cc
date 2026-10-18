@@ -164,29 +164,9 @@ std::string snippet_escape(std::string_view text) {
   return out;
 }
 
-// Characters, not bytes, of UTF-8 text.
-size_t char_count(std::string_view text) {
-  return static_cast<size_t>(std::count_if(text.begin(), text.end(), [](char ch) {
-    return (static_cast<unsigned char>(ch) & 0xC0) != 0x80;
-  }));
-}
-
-uint32_t line_begin(std::string_view text, uint32_t offset) {
-  while (offset > 0 && text[offset - 1] != '\n') --offset;
-  return offset;
-}
-
 uint32_t line_end(std::string_view text, uint32_t offset) {
   while (offset < text.size() && text[offset] != '\n' && text[offset] != '\r') ++offset;
   return offset;
-}
-
-// The blanks the line holding `offset` starts with.
-std::string_view indentation(std::string_view text, uint32_t offset) {
-  const uint32_t b = line_begin(text, offset);
-  uint32_t e = b;
-  while (e < text.size() && (text[e] == ' ' || text[e] == '\t')) ++e;
-  return text.substr(b, e - b);
 }
 
 // One level of indentation deeper than `indent`: a tab when it has tabs,
@@ -225,7 +205,7 @@ std::string place_clauses(std::string_view text, uint32_t begin, uint32_t body_e
                         extra;
     if (length <= static_cast<int64_t>(width)) return flat;
   }
-  const std::string_view eol = statement.find("\r\n") != std::string_view::npos ? "\r\n" : "\n";
+  const std::string_view eol = eol_of(statement);
   const std::string_view unit = indent_unit(indent);
   std::string out;
   for (const auto &c : clauses) {
@@ -657,6 +637,10 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
         auto kw = [&](std::string_view keyword) {
           return options.upper_case_keywords ? std::string(keyword) : lower(keyword);
         };
+        // `KEYWORD table AS alias`.
+        auto clause = [&](std::string_view keyword, const std::string &table, const std::string &as) {
+          return kw(keyword) + " " + table + " " + kw("AS") + " " + as;
+        };
         // `from`.col = `to`.ref_col for each column of `fk`.
         auto condition = [&](const Foreign_key &fk, const std::string &from, const std::string &to) {
           std::string c;
@@ -703,8 +687,7 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
             return edits;
           };
           auto joined = [&](const std::string &table, const std::string &as, const std::string &on) {
-            return Added_clause{kw("LEFT OUTER JOIN") + " " + table + " " + kw("AS") + " " + as,
-                                kw("ON") + " " + on};
+            return Added_clause{clause("LEFT OUTER JOIN", table, as), kw("ON") + " " + on};
           };
           if (!query.has_from) {
             // FROM goes at the indentation of the line holding SELECT (the
@@ -716,7 +699,7 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
               --select_at;
             }
             return add(to_doc(query.select_list.end), indentation(text, select_at > begin ? select_at - 1 : begin),
-                       {{kw("FROM") + " " + qualified + " " + kw("AS") + " " + alias, ""}});
+                       {{clause("FROM", qualified, alias), ""}});
           }
           // A JOIN goes one level deeper than the FROM line, or at the
           // indentation of the last line of the tables when they span
@@ -793,7 +776,7 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
             }
             if (!link.empty()) return add(at_end, join_indent, link);
           }
-          return add(at_end, join_indent, {{kw("CROSS JOIN") + " " + qualified + " " + kw("AS") + " " + alias, ""}});
+          return add(at_end, join_indent, {{clause("CROSS JOIN", qualified, alias), ""}});
         };
         // A table or schema to go on from: `name.`, and the list again.
         auto add_dotted = [&](const std::string &label, Completion_kind kind, int rank,

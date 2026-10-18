@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstring>
 #include <optional>
 #include <string>
@@ -168,6 +169,32 @@ inline std::string percent_encode(std::string_view s, std::string_view keep = {}
 inline bool starts_with_word(std::string_view text, std::string_view word) {
   if (text.size() < word.size() || !iequals(text.substr(0, word.size()), word)) return false;
   return text.size() == word.size() || !std::isalnum(static_cast<unsigned char>(text[word.size()]));
+}
+
+// Characters, not bytes, of UTF-8 text.
+inline size_t char_count(std::string_view text) {
+  return static_cast<size_t>(std::count_if(text.begin(), text.end(), [](char ch) {
+    return (static_cast<unsigned char>(ch) & 0xC0) != 0x80;
+  }));
+}
+
+// The start of the line holding `offset`.
+inline uint32_t line_begin(std::string_view text, uint32_t offset) {
+  while (offset > 0 && text[offset - 1] != '\n') --offset;
+  return offset;
+}
+
+// The blanks the line holding `offset` starts with.
+inline std::string_view indentation(std::string_view text, uint32_t offset) {
+  const uint32_t b = line_begin(text, offset);
+  uint32_t e = b;
+  while (e < text.size() && (text[e] == ' ' || text[e] == '\t')) ++e;
+  return text.substr(b, e - b);
+}
+
+// The line break `text` uses: "\r\n" when it has one, else "\n".
+inline std::string_view eol_of(std::string_view text) {
+  return text.find("\r\n") != std::string_view::npos ? "\r\n" : "\n";
 }
 
 }  // namespace mdbls

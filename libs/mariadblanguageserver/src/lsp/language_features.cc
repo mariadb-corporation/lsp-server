@@ -145,6 +145,19 @@ std::vector<Reference> references_of(const Snapshot &s, const At &at, const Cata
 
 int symbol_kind_of_routine(const Routine &r) { return r.kind == "function" ? 12 : 6; }
 
+// `edits` as an array of LSP TextEdits.
+void write_text_edits(Json_writer &w, const Snapshot &s, const std::vector<Text_edit> &edits) {
+  w.StartArray();
+  for (const auto &e : edits) {
+    w.StartObject();
+    w.Key("range");
+    write_range(w, s, e.begin, e.end);
+    str(w, "newText", e.text);
+    w.EndObject();
+  }
+  w.EndArray();
+}
+
 }  // namespace
 
 // How long a request waits for the details of stubs it met.
@@ -229,15 +242,7 @@ void completion(Json_writer &w, const Snapshot &s, Position pos, const Catalog_s
     }
     if (!it.additional_edits.empty()) {
       w.Key("additionalTextEdits");
-      w.StartArray();
-      for (const auto &e : it.additional_edits) {
-        w.StartObject();
-        w.Key("range");
-        write_range(w, s, e.begin, e.end);
-        str(w, "newText", e.text);
-        w.EndObject();
-      }
-      w.EndArray();
+      write_text_edits(w, s, it.additional_edits);
     }
     if (it.retrigger) {
       w.Key("command");
@@ -513,16 +518,7 @@ void formatting(Json_writer &w, const Snapshot &s, bool range, Position from, Po
   const std::string &text = *s.text;
   const uint32_t begin = range ? s.lines->offset(text, from) : 0;
   const uint32_t end = range ? s.lines->offset(text, to) : static_cast<uint32_t>(text.size());
-  w.StartArray();
-  for (const auto &e : format_sql(text, *s.index, begin, end, cache, o)) {
-    w.StartObject();
-    w.Key("range");
-    write_range(w, s, e.begin, e.end);
-    w.Key("newText");
-    w.String(e.text.data(), static_cast<rapidjson::SizeType>(e.text.size()));
-    w.EndObject();
-  }
-  w.EndArray();
+  write_text_edits(w, s, format_sql(text, *s.index, begin, end, cache, o));
 }
 
 }  // namespace mdbls::lsp

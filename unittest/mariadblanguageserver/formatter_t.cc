@@ -19,7 +19,6 @@
 
 #include <gtest/gtest.h>
 
-#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -37,11 +36,7 @@ std::string layout(const std::string &sql, size_t width = 80, bool upper = true,
   o.line_width = width;
   o.upper_case_keywords = upper;
   o.indent = std::move(indent);
-  auto edits = format_sql(sql, index, 0, static_cast<uint32_t>(sql.size()), cache, o);
-  std::sort(edits.begin(), edits.end(), [](const Text_edit &a, const Text_edit &b) { return a.begin > b.begin; });
-  std::string out = sql;
-  for (const auto &e : edits) out.replace(e.begin, e.end - e.begin, e.text);
-  return out;
+  return apply_edits(sql, format_sql(sql, index, 0, static_cast<uint32_t>(sql.size()), cache, o));
 }
 
 }  // namespace
@@ -67,6 +62,12 @@ TEST(Formatter, select_items_wrap_at_the_width_aligned_with_the_first) {
                    "length FROM film;"),
             "SELECT film_id, title, description, release_year, language_id, rental_duration,\n"
             "       rental_rate, length\n"
+            "FROM film;");
+  // Aligned with the first item, wherever the words before it end it.
+  EXPECT_EQ(layout("SELECT DISTINCT film_id, title, description, release_year, language_id, rental_duration, "
+                   "length FROM film;"),
+            "SELECT DISTINCT film_id, title, description, release_year, language_id,\n"
+            "                rental_duration, length\n"
             "FROM film;");
 }
 
@@ -151,6 +152,8 @@ TEST(Formatter, comments_stay_before_the_token_after_them) {
   EXPECT_EQ(layout("SELECT a -- the end of the line\nFROM t;"), "SELECT a -- the end of the line\nFROM t;");
   EXPECT_EQ(layout("SELECT * FROM t WHERE x IN ( -- why\nSELECT 1);"),
             "SELECT *\nFROM t\nWHERE x IN ( -- why\n  SELECT 1\n);");
+  // Any blank after "--" makes a comment, before the query too.
+  EXPECT_EQ(layout("--\tlead\nselect a,b from t;"), "--\tlead\nSELECT a, b FROM t;");
 }
 
 TEST(Formatter, line_breaks_inside_other_constructs_are_kept) {

@@ -128,6 +128,17 @@ bool is_name_symbol(int symbol) {
   return symbol == ident || symbol == quoted || is_nonreserved_keyword(symbol);
 }
 
+bool is_name_wrapper(int symbol) {
+  static const std::vector<int> wrappers = {
+      grammar::symbol("ident"),          grammar::symbol("ident_cli"),
+      grammar::symbol("IDENT_sys"),      grammar::symbol("IDENT_cli"),
+      grammar::symbol("ident_cli_func"), grammar::symbol("ident_cli_set_usual_case"),
+      grammar::symbol("label_ident"),
+  };
+  if (std::find(wrappers.begin(), wrappers.end(), symbol) != wrappers.end()) return true;
+  return !grammar::is_terminal(symbol) && std::string_view(grammar::name(symbol)).starts_with("keyword");
+}
+
 bool is_left_paren(int symbol) {
   // By symbol: '(' and every LEFT_PAREN_* terminal, found once.
   static const std::vector<uint8_t> parens = [] {

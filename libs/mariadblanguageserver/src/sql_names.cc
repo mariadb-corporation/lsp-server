@@ -32,9 +32,7 @@ constexpr uint32_t npos = Syntax_tree::npos;
 // The grammar symbols the analysis looks for, resolved once.
 struct Name_syms {
 #define S(x) int x = grammar::symbol(#x);
-  // wrappers around one name token
-  S(ident) S(ident_cli) S(IDENT_sys) S(IDENT_cli) S(ident_cli_func) S(ident_cli_set_usual_case)
-  S(label_ident)
+  S(ident)
   // names
   S(table_ident) S(simple_ident) S(simple_ident_nospvar) S(field_ident) S(key_part_simple)
   S(insert_ident) S(select_alias) S(ident_table_alias) S(table_alias_clause) S(table_alias_ref)
@@ -63,18 +61,6 @@ struct Name_syms {
 const Name_syms &syms() {
   static const Name_syms s;
   return s;
-}
-
-// A nonterminal that only wraps one name token: ident, IDENT_sys, keyword_*.
-bool is_wrapper(int symbol) {
-  const auto &s = syms();
-  if (symbol == s.ident || symbol == s.ident_cli || symbol == s.IDENT_sys ||
-      symbol == s.IDENT_cli || symbol == s.ident_cli_func ||
-      symbol == s.ident_cli_set_usual_case || symbol == s.label_ident) {
-    return true;
-  }
-  return !grammar::is_terminal(symbol) &&
-         std::string_view(grammar::name(symbol)).substr(0, 7) == "keyword";
 }
 
 // A node whose FROM list (or target table) names the tables in scope.
@@ -319,7 +305,7 @@ Name_ref Statement_names::classify(uint32_t token) const {
   // Up through the wrappers of the one token.
   uint32_t child = leaf_node;
   uint32_t a = m_tree.node(leaf_node).parent;
-  while (a != npos && is_wrapper(m_tree.node(a).symbol)) {
+  while (a != npos && is_name_wrapper(m_tree.node(a).symbol)) {
     child = a;
     a = m_tree.node(a).parent;
   }
@@ -333,7 +319,7 @@ Name_ref Statement_names::classify(uint32_t token) const {
   size_t at = 0;
   for (const uint32_t c : m_tree.children(a)) {
     const int cs = m_tree.node(c).symbol;
-    const bool part = grammar::is_terminal(cs) ? is_name_symbol(cs) : is_wrapper(cs);
+    const bool part = grammar::is_terminal(cs) ? is_name_symbol(cs) : is_name_wrapper(cs);
     if (!part || m_tree.node(c).token_count == 0) continue;
     if (c == child) at = ids.size();
     ids.push_back(c);

@@ -40,6 +40,10 @@ bool is_nonreserved_keyword(int symbol);
 // name.
 bool is_name_symbol(int symbol);
 
+// A nonterminal that only wraps one name token: ident, IDENT_sys,
+// keyword_*.
+bool is_name_wrapper(int symbol);
+
 // '(' or one of the lexer's spellings of it (LEFT_PAREN_ALT, ...).
 bool is_left_paren(int symbol);
 

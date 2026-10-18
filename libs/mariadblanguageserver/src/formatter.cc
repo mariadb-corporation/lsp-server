@@ -19,6 +19,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <deque>
+#include <optional>
 
 #include "mdbls/keywords.h"
 #include "mdbls/syntax_tree.h"
@@ -31,12 +33,6 @@ namespace {
 
 constexpr uint32_t npos = Syntax_tree::npos;
 
-size_t char_count(std::string_view text) {
-  return static_cast<size_t>(std::count_if(text.begin(), text.end(), [](char ch) {
-    return (static_cast<unsigned char>(ch) & 0xC0) != 0x80;
-  }));
-}
-
 // ---- the layout: a document of texts and possible line breaks, printed
 // to a width (after Wadler's "A prettier printer" and Prettier's printer)
 
@@ -47,7 +43,6 @@ struct Doc {
   Line line = Line::normal;  // normal: a space when flat; soft: nothing
   bool hard = false;         // a hard line inside: the groups around it break
   bool force = false;        // a group that breaks whether it fits or not
-  size_t align = 0;          // align: spaces added to the indentation
   std::string text;          // text; nest: the indentation added
   std::vector<Doc> parts;    // concat, fill (content, separator, content, ...);
                              // one for nest, align and group
@@ -93,11 +88,8 @@ Doc nest(std::string indent, Doc inner) {
   return d;
 }
 
-Doc align(size_t n, Doc inner) {
-  Doc d = wrap(Doc::Kind::align, std::move(inner));
-  d.align = n;
-  return d;
-}
+// `inner`, its lines indented to the column it starts at.
+Doc align(Doc inner) { return wrap(Doc::Kind::align, std::move(inner)); }
 
 Doc group(Doc inner, bool force = false) {
   Doc d = wrap(Doc::Kind::group, std::move(inner));
@@ -115,10 +107,12 @@ class Printer {
  public:
   Printer(size_t width, std::string_view eol) : width_(width), eol_(eol) {}
 
-  std::string print(const Doc &doc, const std::string &indent, size_t column) {
+  std::string print(const Doc &doc, std::string_view indent, size_t column) {
     out_.clear();
     column_ = column;
-    std::vector<Cmd> stack{{indent, false, &doc, 0}};
+    // The indentations in use; a command points at its own.
+    std::deque<std::string> indents{std::string(indent)};
+    std::vector<Cmd> stack{{&indents.back(), false, &doc, 0}};
     while (!stack.empty()) {
       Cmd c = std::move(stack.back());
       stack.pop_back();
@@ -136,11 +130,15 @@ class Printer {
           for (auto it = d.parts.rbegin(); it != d.parts.rend(); ++it) stack.push_back({c.indent, c.flat, &*it, 0});
           break;
         case Doc::Kind::nest:
-          stack.push_back({c.indent + d.text, c.flat, &d.parts[0], 0});
+          indents.push_back(*c.indent + d.text);
+          stack.push_back({&indents.back(), c.flat, &d.parts[0], 0});
           break;
-        case Doc::Kind::align:
-          stack.push_back({c.indent + std::string(d.align, ' '), c.flat, &d.parts[0], 0});
+        case Doc::Kind::align: {
+          const size_t width = char_count(*c.indent);
+          indents.push_back(*c.indent + std::string(column_ > width ? column_ - width : 0, ' '));
+          stack.push_back({&indents.back(), c.flat, &d.parts[0], 0});
           break;
+        }
         case Doc::Kind::group: {
           bool flat = !d.force && !d.hard;
           if (flat && !c.flat) flat = fits({{c.indent, true, &d.parts[0], 0}}, &stack);
@@ -156,8 +154,8 @@ class Printer {
           } else {
             while (!out_.empty() && (out_.back() == ' ' || out_.back() == '\t')) out_.pop_back();
             out_ += eol_;
-            out_ += c.indent;
-            column_ = char_count(c.indent);
+            out_ += *c.indent;
+            column_ = char_count(*c.indent);
           }
           break;
         case Doc::Kind::fill: {
@@ -174,11 +172,6 @@ class Printer {
             break;
           }
           const Doc &separator = d.parts[i + 1];
-          if (i + 2 == d.parts.size()) {
-            stack.push_back({c.indent, content_fits, &separator, 0});
-            stack.push_back({c.indent, content_fits, &content, 0});
-            break;
-          }
           // The separator breaks unless the next content fits after it.
           const bool both_fit = fits({{c.indent, true, &d.parts[i + 2], 0},
                                       {c.indent, true, &separator, 0},
@@ -196,7 +189,7 @@ class Printer {
 
  private:
   struct Cmd {
-    std::string indent;
+    const std::string *indent;  // null in fits(), which does not need it
     bool flat;
     const Doc *doc;
     size_t from;  // fill: the first part left
@@ -226,14 +219,14 @@ class Printer {
         }
         case Doc::Kind::concat:
         case Doc::Kind::fill:
-          for (size_t k = d.parts.size(); k-- > c.from;) next.push_back({{}, c.flat, &d.parts[k], 0});
+          for (size_t k = d.parts.size(); k-- > c.from;) next.push_back({nullptr, c.flat, &d.parts[k], 0});
           break;
         case Doc::Kind::nest:
         case Doc::Kind::align:
-          next.push_back({{}, c.flat, &d.parts[0], 0});
+          next.push_back({nullptr, c.flat, &d.parts[0], 0});
           break;
         case Doc::Kind::group:
-          next.push_back({{}, c.flat && !d.force && !d.hard, &d.parts[0], 0});
+          next.push_back({nullptr, c.flat && !d.force && !d.hard, &d.parts[0], 0});
           break;
         case Doc::Kind::line:
           if (!c.flat || d.line == Doc::Line::hard) return true;
@@ -273,7 +266,6 @@ struct Symbols {
   int into = grammar::symbol("into");
   int opt_procedure_or_into = grammar::symbol("opt_procedure_or_into");
   int select_into_query_specification = grammar::symbol("select_into_query_specification");
-  int query_specification = grammar::symbol("query_specification");
   int query_specification_start = grammar::symbol("query_specification_start");
   // Each starts a line of its own when its query breaks.
   std::vector<int> clauses = {
@@ -320,6 +312,12 @@ struct Gap {
   std::vector<Comment> comments;
 };
 
+// Whether a line comment starts at s[i]: '#', or "--" and a blank.
+bool line_comment_at(std::string_view s, size_t i) {
+  return s[i] == '#' ||
+         (s.substr(i, 2) == "--" && (i + 2 == s.size() || std::isspace(static_cast<unsigned char>(s[i + 2]))));
+}
+
 // The gap `s`, or false when it holds something else than blanks and
 // comments, or a versioned comment.
 bool read_gap(std::string_view s, Gap *gap) {
@@ -335,8 +333,7 @@ bool read_gap(std::string_view s, Gap *gap) {
     } else if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\f' || ch == '\v') {
       if (!gap->comments.empty()) gap->comments.back().space_after = true;
       ++i;
-    } else if (ch == '#' || (s.substr(i, 2) == "--" &&
-                             (i + 2 == s.size() || std::isspace(static_cast<unsigned char>(s[i + 2]))))) {
+    } else if (line_comment_at(s, i)) {
       size_t e = s.find('\n', i);
       if (e == std::string_view::npos) e = s.size();
       size_t te = e;
@@ -360,8 +357,8 @@ bool read_gap(std::string_view s, Gap *gap) {
 
 class Builder {
  public:
-  Builder(const Syntax_tree &tree, std::string_view text, const Format_options &options, bool multiline)
-      : t_(tree), text_(text), o_(options), multiline_(multiline), s_(syms()) {
+  Builder(const Syntax_tree &tree, std::string_view text, const Format_options &options)
+      : t_(tree), text_(text), o_(options), s_(syms()) {
     const auto &tokens = t_.tokens();
     gaps_.resize(tokens.size());
     leaves_.assign(tokens.size(), npos);
@@ -380,16 +377,13 @@ class Builder {
 
   bool ok() const { return ok_; }
 
-  Doc statement(uint32_t select) {
-    Piece p = build(select);
-    return group(std::move(p.doc), multiline_);
-  }
+  // The query `select`; its clauses on lines of their own when `multiline`.
+  Doc statement(uint32_t select, bool multiline) { return group(build(select).doc, multiline); }
 
  private:
   struct Piece {
     Doc doc;
-    uint32_t first = npos;  // the first and last non-empty tokens
-    uint32_t last = npos;
+    uint32_t first = npos;  // the first non-empty token
     bool empty() const { return first == npos; }
   };
 
@@ -455,9 +449,7 @@ class Builder {
     const uint32_t leaf_node = leaves_[j];
     if (leaf_node == npos) return false;
     const uint32_t parent = t_.node(leaf_node).parent;
-    if (parent == npos) return true;
-    const std::string_view name = t_.name(parent);
-    return name.find("ident") == std::string_view::npos && !name.starts_with("keyword");
+    return parent == npos || !is_name_wrapper(symbol(parent));
   }
 
   int symbol(uint32_t n) const { return t_.node(n).symbol; }
@@ -483,7 +475,6 @@ class Builder {
       } else {
         parts.push_back(separator(p.first, sep(k)));
       }
-      out.last = p.last;
       parts.push_back(std::move(p.doc));
     }
     out.doc = concat(std::move(parts));
@@ -494,12 +485,13 @@ class Builder {
     if (t_.is_token(n)) {
       const uint32_t j = t_.node(n).first_token;
       if (token(j).begin == token(j).end) return {};
-      return {leaf(j), j, j};
+      return {leaf(j), j};
     }
     const int sym = symbol(n);
-    if (sym == s_.select_item_list) return list(n, 7);
-    if (sym == s_.group_list || sym == s_.order_list) return list(n, 9);
-    if (sym == s_.derived_table_list && has_comma(n)) return list(n, 5);
+    if (sym == s_.select_item_list || sym == s_.group_list || sym == s_.order_list ||
+        (sym == s_.derived_table_list && has_comma(n))) {
+      return list(n);
+    }
     if (sym == s_.join_table) return joins(n);
     if (sym == s_.expr && chain_operator(n) != -1) return chain(n);
     return children(n);
@@ -567,7 +559,6 @@ class Builder {
     if (body.empty()) return join({std::move(lp), std::move(rp)}, [](size_t) { return Sep::none; });
     Piece out;
     out.first = lp.first;
-    out.last = rp.last;
     out.doc = group(concat({std::move(lp.doc),
                             nest(o_.indent, concat({separator(body.first, Sep::soft), std::move(body.doc)})),
                             separator(rp.first, Sep::soft), std::move(rp.doc)}));
@@ -576,7 +567,7 @@ class Builder {
 
   // A comma list (select items, GROUP BY, ORDER BY, tables): the items fill
   // the line, the comma after each, and continue aligned with the first.
-  Piece list(uint32_t n, size_t indent) {
+  Piece list(uint32_t n) {
     const int sym = symbol(n);
     std::vector<std::vector<uint32_t>> items;
     std::vector<uint32_t> commas;
@@ -604,19 +595,8 @@ class Builder {
         return i < commas.size() && k == last ? Sep::none : Sep::keep;
       }));
     }
-    Piece out;
-    std::vector<Doc> parts;
-    for (Piece &p : docs) {
-      if (p.empty()) continue;
-      if (out.empty()) {
-        out.first = p.first;
-      } else {
-        parts.push_back(separator(p.first, Sep::line));
-      }
-      out.last = p.last;
-      parts.push_back(std::move(p.doc));
-    }
-    out.doc = align(indent, fill(std::move(parts)));
+    Piece out = join(std::move(docs), [](size_t) { return Sep::line; });
+    out.doc = align(fill(std::move(out.doc.parts)));
     return out;
   }
 
@@ -653,26 +633,20 @@ class Builder {
       if (h.empty()) continue;
       joined.push_back(separator(h.first, Sep::line));
       joined.push_back(std::move(h.doc));
-      out.last = h.last;
       // ON stays on the JOIN's line, or goes one level deeper on the next.
-      size_t k = right + 1;
-      if (k < kids.size() && t_.is_token(kids[k]) && symbol(kids[k]) == s_.on) {
+      const size_t k = right + 1;
+      const bool has_on = k < kids.size() && t_.is_token(kids[k]) && symbol(kids[k]) == s_.on;
+      std::vector<Piece> rest;
+      for (size_t r = has_on ? k + 1 : k; r < kids.size(); ++r) rest.push_back(build(kids[r]));
+      Piece tail = join(std::move(rest), [&](size_t) { return has_on ? Sep::space : Sep::keep; });
+      if (tail.empty()) continue;
+      if (has_on) {
         Piece on = build(kids[k]);
-        std::vector<Piece> rest;
-        for (size_t r = k + 1; r < kids.size(); ++r) rest.push_back(build(kids[r]));
-        Piece cond = join(std::move(rest), [](size_t) { return Sep::space; });
-        if (cond.empty()) continue;
         joined.push_back(group(concat({nest(o_.indent, separator(on.first, Sep::line)), std::move(on.doc),
-                                       separator(cond.first, Sep::space), std::move(cond.doc)})));
-        out.last = cond.last;
+                                       separator(tail.first, Sep::space), std::move(tail.doc)})));
       } else {
-        std::vector<Piece> rest;
-        for (size_t r = k; r < kids.size(); ++r) rest.push_back(build(kids[r]));
-        Piece tail = join(std::move(rest), [](size_t) { return Sep::keep; });
-        if (tail.empty()) continue;
         joined.push_back(separator(tail.first, Sep::space));
         joined.push_back(std::move(tail.doc));
-        out.last = tail.last;
       }
     }
     // The JOIN lines break with the query's clauses; in parentheses, (a
@@ -717,7 +691,6 @@ class Builder {
       rest.push_back(std::move(o.doc));
       rest.push_back(separator(e.first, Sep::keep));
       rest.push_back(std::move(e.doc));
-      out.last = e.last;
     }
     out.doc = group(concat({std::move(out.doc), nest(o_.indent, concat(std::move(rest)))}));
     return out;
@@ -726,7 +699,6 @@ class Builder {
   const Syntax_tree &t_;
   std::string_view text_;
   const Format_options &o_;
-  bool multiline_;
   const Symbols &s_;
   std::vector<Gap> gaps_;
   std::vector<uint32_t> leaves_;
@@ -749,11 +721,11 @@ bool starts_with_query(std::string_view s) {
   while (i < s.size()) {
     if (std::isspace(static_cast<unsigned char>(s[i])) || s[i] == '(') {
       ++i;
-    } else if (s.substr(i, 2) == "/*" && s.substr(i, 3) != "/*!") {
+    } else if (s.substr(i, 2) == "/*") {
       const size_t e = s.find("*/", i + 2);
       if (e == std::string_view::npos) return false;
       i = e + 2;
-    } else if (s[i] == '#' || s.substr(i, 3) == "-- ") {
+    } else if (line_comment_at(s, i)) {
       const size_t e = s.find('\n', i);
       if (e == std::string_view::npos) return false;
       i = e + 1;
@@ -769,14 +741,16 @@ bool parses(mdbp_parser *parser, std::string_view sql) {
   return mdbp_parse_sql(parser, sql.data(), sql.size(), &r) == MDBP_OK && r.accepted;
 }
 
-}  // namespace
-
-std::optional<std::string> format_statement(std::string_view text, uint32_t st_begin, uint32_t st_end,
-                                            mdbp_parser *parser, const Format_options &options,
-                                            uint32_t *begin, uint32_t *end) {
+// The layout of the statement [st_begin, st_end) of `text`, parsed with
+// `parser` (one that records derivations): the edit replacing its first
+// token to its last, or nullopt when the statement stays as it is - it is
+// already laid out, it is not a query (SELECT, WITH, a parenthesized
+// query), does not parse whole, holds a versioned comment, or the layout
+// would not keep its tokens and comments.
+std::optional<Text_edit> format_statement(std::string_view text, uint32_t st_begin, uint32_t st_end,
+                                          mdbp_parser *parser, const Format_options &options) {
   const std::string_view sql = text.substr(st_begin, st_end - st_begin);
   if (parser == nullptr || !starts_with_query(sql)) return std::nullopt;
-  if (sql.find("/*!") != std::string_view::npos || sql.find("/*M!") != std::string_view::npos) return std::nullopt;
   mdbp_result r;
   if (mdbp_parse_sql(parser, sql.data(), sql.size(), &r) != MDBP_OK || !r.accepted) return std::nullopt;
   const Syntax_tree tree = Syntax_tree::build(parser, r, st_begin);
@@ -799,21 +773,22 @@ std::optional<std::string> format_statement(std::string_view text, uint32_t st_b
   const uint32_t b = tree.tokens()[first].begin;
   const uint32_t e = tree.tokens()[last].end;
   const std::string_view original = text.substr(b, e - b);
-  const bool multiline = original.find('\n') != std::string_view::npos;
+  // No versioned comment before or after the query either (the Builder
+  // checks those between its tokens).
+  Gap outside;
+  if (!read_gap(text.substr(st_begin, b - st_begin), &outside) || !read_gap(text.substr(e, st_end - e), &outside)) {
+    return std::nullopt;
+  }
 
-  Builder builder(tree, text, options, multiline);
+  Builder builder(tree, text, options);
   if (!builder.ok()) return std::nullopt;
-  const Doc doc = builder.statement(select);
+  const Doc doc = builder.statement(select, original.find('\n') != std::string_view::npos);
 
-  // The line the statement starts on: its indentation, and the column.
-  uint32_t line_start = b;
-  while (line_start > 0 && text[line_start - 1] != '\n') --line_start;
-  uint32_t indent_end = line_start;
-  while (indent_end < b && (text[indent_end] == ' ' || text[indent_end] == '\t')) ++indent_end;
-  const std::string indent(text.substr(line_start, indent_end - line_start));
-  const std::string_view eol = original.find("\r\n") != std::string_view::npos ? "\r\n" : "\n";
-  Printer printer(options.line_width, eol);
-  std::string out = printer.print(doc, indent, char_count(text.substr(line_start, b - line_start)));
+  // At the indentation and the column of the line the statement starts on.
+  const uint32_t line_start = line_begin(text, b);
+  Printer printer(options.line_width, eol_of(original));
+  std::string out = printer.print(doc, indentation(text, b), char_count(text.substr(line_start, b - line_start)));
+  if (out == original) return std::nullopt;
 
   // The same tokens and comments, and still a statement that parses.
   if (without_blanks(out) != without_blanks(original)) return std::nullopt;
@@ -821,10 +796,10 @@ std::optional<std::string> format_statement(std::string_view text, uint32_t st_b
   check += out;
   check += text.substr(e, st_end - e);
   if (!parses(parser, check)) return std::nullopt;
-  *begin = b;
-  *end = e;
-  return out;
+  return Text_edit{b, e, std::move(out)};
 }
+
+}  // namespace
 
 std::vector<Text_edit> format_sql(std::string_view text, const Statement_index &index, uint32_t begin,
                                   uint32_t end, Parser_cache &cache, const Format_options &options) {
@@ -835,11 +810,21 @@ std::vector<Text_edit> format_sql(std::string_view text, const Statement_index &
     if (st.begin >= end && !(begin == end && st.begin == end)) break;
     if (st.body_end < begin || st.kind != Statement_kind::sql) continue;
     mdbp_parser *parser = cache.get(index.modes()[st.mode].mode, options.version_id, true);
-    uint32_t b = 0, e = 0;
-    const auto out = format_statement(text, st.begin, st.body_end, parser, options, &b, &e);
-    if (out && *out != text.substr(b, e - b)) edits.push_back({b, e, *out});
+    if (auto edit = format_statement(text, st.begin, st.body_end, parser, options)) edits.push_back(std::move(*edit));
   }
   return edits;
+}
+
+std::string apply_edits(std::string_view text, const std::vector<Text_edit> &edits) {
+  std::string out;
+  size_t at = 0;
+  for (const auto &e : edits) {
+    out.append(text, at, e.begin - at);
+    out += e.text;
+    at = e.end;
+  }
+  out.append(text, at);
+  return out;
 }
 
 }  // namespace mdbls

@@ -963,15 +963,8 @@ int main(int argc, char **argv) {
       mdbls::Parser_cache cache;
       mdbls::Format_options fo = o->format;
       fo.version_id = o->index.version_id;
-      auto edits = mdbls::format_sql(text, index, 0, static_cast<uint32_t>(text.size()), cache, fo);
-      std::string out;
-      size_t at = 0;
-      for (const auto &e : edits) {
-        out.append(text, at, e.begin - at);
-        out += e.text;
-        at = e.end;
-      }
-      out.append(text, at);
+      const std::string out = mdbls::apply_edits(
+          text, mdbls::format_sql(text, index, 0, static_cast<uint32_t>(text.size()), cache, fo));
       // In the file's own character set.
       std::cout << (charset == "latin1" ? mdbls::utf8_to_latin1(out) : out);
     } else if (o->command == "outline") {
