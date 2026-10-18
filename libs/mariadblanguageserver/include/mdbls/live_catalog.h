@@ -71,7 +71,19 @@ std::optional<Live_snapshot> fetch_live_catalog(const Connection_uri &uri, std::
                                                 std::string *error,
                                                 const Session_options &options = {});
 
+// Reads a connection's catalog some other way than through a direct
+// connection: the language server's --mcp mode asks its client, which has
+// MariaDB Shell's MCP server (see mcp_catalog.h).  nullopt with `error` set
+// on failure; `permanent` when another attempt would fail the same way.
+// `cancelled` is to be asked between steps.
+using Catalog_fetcher = std::function<std::optional<Live_snapshot>(
+    const std::string &uri, std::string *error, bool *permanent,
+    const std::function<bool()> &cancelled)>;
+
 struct Live_catalog_options {
+  // Set, the catalog is read through this and the secret store and the
+  // client library are not used.
+  Catalog_fetcher fetch;
   Secret_store_options secrets;
   Session_options session;
   // Read the catalog again this often; 0: only when refresh() asks.

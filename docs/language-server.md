@@ -5,7 +5,7 @@
 and UTF-16 columns.
 
 ```bash
-mariadb-lsp lsp [--stdio] [--threads N] [--log FILE] [--shell-bin-dir DIR]
+mariadb-lsp lsp [--stdio] [--mcp] [--threads N] [--log FILE] [--shell-bin-dir DIR]
                 [--sql-mode M] [--delimiter D] [--version-id N]
 ```
 
@@ -15,7 +15,8 @@ the VS Code extension probes it to tell a usable binary from anything else of th
 with timestamps. `--sql-mode`, `--delimiter` and `--version-id` set the defaults for
 documents; the client can override them, see below. `--shell-bin-dir` is MariaDB
 Shell's binary directory, where the secret store helpers of live connections are
-(default: the directory of `mariadb-shell` on `PATH`).
+(default: the directory of `mariadb-shell` on `PATH`). `--mcp` reads the catalogs of live
+connections through the client instead of connecting itself, see [MCP mode](#mcp-mode).
 
 ## Capabilities
 
@@ -77,6 +78,7 @@ completions snippets (`CONCAT($0)`).
 | `mariadb/outline` | client to server, request | `{textDocument: {uri}}`; the result is the outline JSON of [outline-format.md](outline-format.md), with `file` set to the URI |
 | `mariadb/refreshCatalog` | client to server, request | `{textDocument?: {uri}}`: reads the workspace catalog again, and the catalog of the document's connection (of every connection without `textDocument`), in the background; the result is `null` at once |
 | `mariadb/parseProgress` | server to client, notification | `{uri, version, checked, total, done}` while a large document is checked |
+| `mariadb/dbCall` | server to client, request | `--mcp` only: `{connection, tool, arguments}`, a call of one `db.*` tool of MariaDB Shell's MCP server on the connection URI; the result is the tool's result as the client decoded it, or an error whose `data.permanent` says another call would fail alike (a connection that is not configured). See [MCP mode](#mcp-mode) |
 | `window/showMessage` | server to client | a connection that cannot be used ("connection not configured", a failed login, an SSH URI), once per connection and message; a `connection` that is not a URI, which is refused (and never shown as given, since it may hold a password) |
 
 When the client announces `window.workDoneProgress`, a large document's check is also
@@ -146,6 +148,29 @@ its queries. A missing password or an SSH URI
 (`mariadb+ssh://`, not supported) is not retried. No request waits for a connection:
 requests use the last catalog read. The password is held only until the connect call
 returns, and never logged.
+
+## MCP mode
+
+With `--mcp`, the server does not connect to any database itself: it asks its client,
+which has MariaDB Shell's MCP server (the VS Code extension starts one for its own
+work), to call the `db.*` tools for it, one `mariadb/dbCall` request per call. The
+client resolves the connection URI to the connection it has open on the MCP server, or
+opens one, so the credentials stay with the client and no second MCP server runs. The
+secret store, `--shell-bin-dir`, `shellBinary`, `shellBinDir` and `credentialStoreHelper`
+are not used.
+
+A reading makes these calls: `db.execute_sql` (`SELECT @@sql_mode, VERSION(),
+DATABASE()`), `db.list_schemas`, then per schema `db.list_objects` for tables and views,
+and for the user schemas (`schema_type` "User Schema") also procedures, functions,
+triggers, events and sequences, with `db.get_object_details` for every table (columns,
+primary and unique keys from `constraints`, the table's own foreign keys from the `n:1`
+`references`), view (columns), routine (parameters, `RETURNS`) and trigger (table, timing,
+event). System schemas are listed with their tables and views, without details: a call
+per object would cost more than they are used. `performance_schema` is left out, as it
+is in direct mode. A call the client does not answer within 120 s fails the reading;
+the retry schedule and `mariadb/refreshCatalog` are as in direct mode, and an error
+marked `permanent` is not retried. Shutting down releases a reading waiting on the
+client.
 
 ## How it works
 

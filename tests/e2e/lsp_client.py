@@ -30,6 +30,15 @@ class Lsp_error(Exception):
         self.code = error.get("code")
 
 
+class Request_error(Exception):
+    """What a request handler raises to answer a server request with an error."""
+
+    def __init__(self, message, code=-32000, data=None):
+        super().__init__(message)
+        self.code = code
+        self.data = data
+
+
 class Client:
     def __init__(self, binary=None, args=(), log=None):
         binary = binary or os.environ["MARIADB_LSP"]
@@ -44,6 +53,10 @@ class Client:
         self.responses = {}
         self.notifications = []  # (sequence number, message), in arrival order
         self.server_requests = []
+        # Answers the server's requests when set: called with the message,
+        # it returns the result, or raises Request_error.  Else they are
+        # answered with null.
+        self.request_handler = None
         self.cond = threading.Condition()
         self.reader = threading.Thread(target=self._read, daemon=True)
         self.reader.start()
@@ -71,12 +84,30 @@ class Client:
                 seq = self.received
                 if "method" in msg and "id" in msg:
                     self.server_requests.append(msg)
-                    self._send({"jsonrpc": "2.0", "id": msg["id"], "result": None})
+                    self._answer(msg)
                 elif "method" in msg:
                     self.notifications.append((seq, msg))
                 else:
                     self.responses[msg["id"]] = (seq, msg)
                 self.cond.notify_all()
+
+    # What a request handler returns to leave a request unanswered.
+    NO_ANSWER = object()
+
+    def _answer(self, msg):
+        reply = {"jsonrpc": "2.0", "id": msg["id"]}
+        if self.request_handler is None:
+            reply["result"] = None
+        else:
+            try:
+                result = self.request_handler(msg)
+            except Request_error as e:
+                reply["error"] = {"code": e.code, "message": str(e), "data": e.data}
+            else:
+                if result is Client.NO_ANSWER:
+                    return
+                reply["result"] = result
+        self._send(reply)
 
     def _send(self, msg):
         body = json.dumps(msg).encode()

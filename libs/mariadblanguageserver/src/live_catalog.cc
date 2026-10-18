@@ -25,6 +25,7 @@
 #include <unordered_map>
 
 #include "mdbls/lsp/server.h"
+#include "catalog_builder.h"
 #include "text_util.h"
 
 #if MDBLS_WITH_CLIENT
@@ -98,32 +99,6 @@ class Session {
 using Row = std::vector<std::optional<std::string>>;
 
 std::string str(const Row &r, size_t i) { return i < r.size() && r[i] ? *r[i] : std::string(); }
-
-// The schemas being built, with name lookups.
-struct Builder {
-  std::vector<Schema> schemas;
-  std::unordered_map<std::string, size_t> schema_index;
-  std::map<std::pair<std::string, std::string>, std::pair<size_t, size_t>> table_index;
-  std::map<std::pair<std::string, std::string>, std::pair<size_t, size_t>> view_index;
-
-  Schema &schema(const std::string &name) {
-    const auto it = schema_index.find(name);
-    if (it != schema_index.end()) return schemas[it->second];
-    schema_index.emplace(name, schemas.size());
-    schemas.push_back(Schema{});
-    schemas.back().name = name;
-    schemas.back().declared = true;
-    return schemas.back();
-  }
-  Table *table(const std::string &s, const std::string &t) {
-    const auto it = table_index.find({s, t});
-    return it == table_index.end() ? nullptr : &schemas[it->second.first].tables[it->second.second];
-  }
-  View *view(const std::string &s, const std::string &v) {
-    const auto it = view_index.find({s, v});
-    return it == view_index.end() ? nullptr : &schemas[it->second.first].views[it->second.second];
-  }
-};
 
 constexpr const char *k_not_performance = " <> 'performance_schema'";
 
@@ -201,7 +176,7 @@ std::optional<Live_snapshot> fetch_live_catalog(const Connection_uri &uri, std::
   }
   snap.server.version_id = lsp::parse_server_version(snap.server.version);
 
-  Builder b;
+  Catalog_builder b;
   auto run = [&](const std::string &sql, auto &&row) {
     if (options.cancelled && options.cancelled()) throw std::runtime_error("cancelled");
     if (!s.query(sql.c_str(), row)) throw std::runtime_error(s.error());
@@ -468,6 +443,12 @@ void Live_catalog::run() {
     } else if (is_ssh_scheme(parsed->scheme)) {
       error = "SSH tunnels (" + parsed->scheme + "://) are not supported";
       permanent = true;
+    } else if (m_options.fetch) {
+      if (m_options.log) m_options.log("live catalog " + m_normalized + ": reading through the client");
+      snap = m_options.fetch(m_uri, &error, &permanent, [this] {
+        std::lock_guard lock(m_mutex);
+        return m_stop;
+      });
     } else if (!live_connections_supported()) {
       error = "this build has no MariaDB client library";
       permanent = true;

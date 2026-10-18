@@ -69,7 +69,7 @@ constexpr int k_exit_usage = 2;
 
 const char *const k_usage =
     "usage: mariadb-lsp <command> [options] FILE|-...\n"
-    "       mariadb-lsp lsp [--stdio] [--threads N] [--log FILE] [--shell-bin-dir DIR]\n"
+    "       mariadb-lsp lsp [--stdio] [--mcp] [--threads N] [--log FILE] [--shell-bin-dir DIR]\n"
     "\n"
     "commands:\n"
     "  lsp      run the language server: LSP over stdin and stdout\n"
@@ -109,6 +109,9 @@ const char *const k_usage =
     "  --max-errors N     check: stop listing errors after N per file (default 100)\n"
     "  --log FILE         lsp: write a log to FILE\n"
     "  --stdio            lsp: talk on stdin and stdout (the only transport)\n"
+    "  --mcp              lsp: read connections' catalogs through the client, which\n"
+    "                     has MariaDB Shell's MCP server (mariadb/dbCall requests),\n"
+    "                     instead of connecting itself\n"
     "  --stats            print sizes and timings to stderr\n"
     "  --version          print \"mariadb-lsp <version>\" and exit\n"
     "  --help             this text\n"
@@ -133,6 +136,7 @@ struct Options {
   std::optional<mdbls::Position> at;  // 0-based
   std::string connection;
   std::string shell_bin_dir;
+  bool mcp = false;
   bool sql_mode_given = false;
   bool version_given = false;
 };
@@ -734,6 +738,8 @@ std::optional<Options> parse_args(int argc, char **argv) {
       o.at = mdbls::Position{line - 1, col - 1};
     } else if (arg == "--stdio") {
       // The default and only transport.
+    } else if (arg == "--mcp") {
+      o.mcp = true;
     } else if (arg == "--text") {
       o.text = true;
     } else if (arg == "--stats") {
@@ -784,6 +790,7 @@ int run_lsp(const Options &o) {
   so.defaults = o.index;
   so.defaults.sql_mode = mdbls::normalize_sql_mode(o.index.sql_mode);
   so.shell_bin_dir = o.shell_bin_dir;
+  so.mcp = o.mcp;
   if (!o.log.empty()) {
     log.open(o.log, std::ios::app);
     if (!log) {

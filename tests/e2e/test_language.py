@@ -27,7 +27,7 @@ import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
-from lsp_client import Client, Lsp_error  # noqa: E402
+from lsp_client import Client, Lsp_error, Request_error  # noqa: E402
 import sandbox  # noqa: E402
 from test_lsp import BINARY, URI, Lsp_test  # noqa: E402
 
@@ -301,6 +301,213 @@ class Performance(Language_test):
         print("\ncompletion at %d bytes: median %.2f ms, p95 %.2f ms, max %.2f ms (bound %g)" %
               (len(text), times[len(times) // 2], p95, times[-1], bound), file=sys.stderr)
         self.assertLess(p95, bound)
+
+
+# What the MCP plugin's db.* tools answer for a server with one schema,
+# `store`, as the extension hands them on through mariadb/dbCall.
+MCP_ANSWERS = {
+    ("db.execute_sql",): {"result_sets": [{"columns": ["sql_mode", "version", "schema_name"],
+                                           "rows": [{"sql_mode": "ANSI_QUOTES",
+                                                     "version": "11.8.3-MariaDB",
+                                                     "schema_name": None}]}]},
+    ("db.list_schemas",): [{"schema_name": "store", "schema_type": "User Schema",
+                            "schema_comment": ""}],
+    ("db.list_objects", "store", "table"): [{"name": "item", "comment": ""},
+                                            {"name": "sale", "comment": ""}],
+    ("db.list_objects", "store", "view"): [{"name": "cheap", "comment": "VIEW"}],
+    ("db.list_objects", "store", "procedure"): [{"name": "restock"}],
+    ("db.list_objects", "store", "function"): [],
+    ("db.list_objects", "store", "trigger"): [],
+    ("db.list_objects", "store", "event"): [],
+    ("db.list_objects", "store", "sequence"): [],
+    ("db.get_object_details", "store", "item", "table"): {
+        "basic": {"schema": "store", "name": "item", "type": "table", "comment": ""},
+        "columns": [
+            {"name": "id", "datatype": "int(11)", "not_null": 1, "is_primary": 1, "is_unique": 0,
+             "is_generated": 0, "id_generation": "auto_inc", "comment": "", "column_default": None},
+            {"name": "label", "datatype": "varchar(40)", "not_null": 1, "is_primary": 0,
+             "is_unique": 0, "is_generated": 0, "id_generation": None,
+             "comment": "shown to buyers", "column_default": None},
+            {"name": "price", "datatype": "decimal(10,2)", "not_null": 0, "is_primary": 0,
+             "is_unique": 0, "is_generated": 0, "id_generation": None, "comment": "",
+             "column_default": None}],
+        "constraints": [{"constraint_name": "PRIMARY", "constraint_type": "PRIMARY KEY",
+                         "column_name": "id"}],
+        "references": []},
+    ("db.get_object_details", "store", "sale", "table"): {
+        "basic": {"schema": "store", "name": "sale", "type": "table", "comment": ""},
+        "columns": [
+            {"name": "id", "datatype": "int(11)", "not_null": 1, "is_primary": 1, "is_unique": 0,
+             "is_generated": 0, "id_generation": None, "comment": "", "column_default": None},
+            {"name": "item_id", "datatype": "int(11)", "not_null": 0, "is_primary": 0,
+             "is_unique": 0, "is_generated": 0, "id_generation": None, "comment": "",
+             "column_default": None}],
+        "constraints": [{"constraint_name": "PRIMARY", "constraint_type": "PRIMARY KEY",
+                         "column_name": "id"},
+                        {"constraint_name": "sale_ibfk_1", "constraint_type": "FOREIGN KEY",
+                         "column_name": "item_id"}],
+        "references": [{"position": 102, "name": "item", "ref_column_names": "item_id",
+                        "reference_mapping": {"kind": "n:1", "constraint": "store.sale_ibfk_1",
+                                              "to_many": False, "referenced_schema": "store",
+                                              "referenced_table": "item",
+                                              "column_mapping": [{"base": "item_id",
+                                                                  "ref": "id"}]},
+                        "table_schema": "store", "table_name": "sale"}]},
+    ("db.get_object_details", "store", "cheap", "view"): {
+        "basic": {"schema": "store", "name": "cheap", "type": "view"},
+        "columns": [{"name": "id", "datatype": "int(11)"},
+                    {"name": "label", "datatype": "varchar(40)"}]},
+    ("db.get_object_details", "store", "restock", "procedure"): {
+        "basic": {"schema": "store", "name": "restock", "type": "procedure"},
+        "parameters": [{"name": "n", "mode": "IN", "datatype": "int(11)",
+                        "parameter_default": None},
+                       {"name": "done", "mode": "OUT", "datatype": "int(11)",
+                        "parameter_default": None}],
+        "returns": None},
+}
+
+
+def mcp_call_key(params):
+    args = params["arguments"]
+    return (params["tool"],) + tuple(args[k] for k in ("schema_name", "object_name",
+                                                        "object_type") if k in args)
+
+
+class Mcp_mode(unittest.TestCase):
+    """`mariadb-lsp lsp --mcp`: the catalog of a document's connection is
+    read through the client, which answers mariadb/dbCall requests from
+    MariaDB Shell's MCP server; here, from MCP_ANSWERS.  No server and no
+    secret store are needed."""
+
+    CONNECTION = "mariadb://app@db.example.com:3306"
+
+    def setUp(self):
+        self.client = Client(BINARY, args=["--mcp"])
+        self.calls = []
+
+        def answer(msg):
+            self.assertEqual(msg["method"], "mariadb/dbCall")
+            params = msg["params"]
+            self.assertEqual(params["connection"], self.CONNECTION)
+            self.calls.append(mcp_call_key(params))
+            return MCP_ANSWERS[mcp_call_key(params)]
+
+        self.client.request_handler = answer
+        self.client.initialize()
+
+    def tearDown(self):
+        self.assertEqual(self.client.close(), 0)
+
+    def connect(self, text, schema="store"):
+        c = self.client
+        c.open(URI, text)
+        mark = c.mark()
+        c.notify("mariadb/documentContext", {"textDocument": {"uri": URI},
+                                             "connection": self.CONNECTION,
+                                             "currentSchema": schema})
+        return mark
+
+    def labels(self, pos):
+        r = self.client.request("textDocument/completion",
+                                {"textDocument": {"uri": URI}, "position": pos})
+        return sorted(i["label"] for i in r["items"])
+
+    def test_the_catalog_comes_through_the_client(self):
+        c = self.client
+        text, pos = split_cursor('CREATE TABLE "t2" (x INT);\nSELECT i.|id FROM item i;\n')
+        mark = self.connect(text)
+        # The sql_mode arrived with the catalog: "t2" is an identifier now.
+        c.wait_notification("textDocument/publishDiagnostics",
+                            lambda p: p["uri"] == URI and p["diagnostics"] == [], 30, mark)
+        self.assertEqual(self.labels(pos), ["id", "label", "price"])
+        h = c.request("textDocument/hover", {"textDocument": {"uri": URI},
+                                             "position": position_of(text, "item i")})
+        self.assertIn("**table** `store`.`item`", h["contents"]["value"])
+        self.assertIn("From the connected server.", h["contents"]["value"])
+        # Every object of the user schema was asked about, once.
+        self.assertEqual(self.calls[0], ("db.execute_sql",))
+        self.assertEqual(self.calls[1], ("db.list_schemas",))
+        self.assertEqual(sorted(self.calls), sorted(MCP_ANSWERS))
+        sig = c.request("textDocument/signatureHelp", {
+            "textDocument": {"uri": URI}, "position": pos})
+        self.assertIsNone(sig)
+
+    def test_refresh_asks_again(self):
+        c = self.client
+        text, pos = split_cursor("SELECT * FROM |")
+        self.connect(text)
+        deadline = time.monotonic() + 30
+        while "item" not in self.labels(pos) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertIn("cheap", self.labels(pos))
+        before = len(self.calls)
+        MCP_ANSWERS[("db.list_objects", "store", "table")].append({"name": "fresh", "comment": ""})
+        MCP_ANSWERS[("db.get_object_details", "store", "fresh", "table")] = {
+            "basic": {"schema": "store", "name": "fresh", "type": "table"},
+            "columns": [], "constraints": [], "references": []}
+        try:
+            c.request("mariadb/refreshCatalog", {"textDocument": {"uri": URI}})
+            deadline = time.monotonic() + 30
+            while "fresh" not in self.labels(pos) and time.monotonic() < deadline:
+                time.sleep(0.1)
+            self.assertIn("fresh", self.labels(pos))
+            self.assertGreater(len(self.calls), before)
+        finally:
+            MCP_ANSWERS[("db.list_objects", "store", "table")].pop()
+            del MCP_ANSWERS[("db.get_object_details", "store", "fresh", "table")]
+
+    def test_a_permanent_failure_is_reported_once_and_not_retried(self):
+        c = self.client
+
+        def refuse(msg):
+            self.calls.append(mcp_call_key(msg["params"]))
+            raise Request_error("mariadb://app@db.example.com:3306 is not a configured "
+                                "connection", data={"permanent": True})
+
+        c.request_handler = refuse
+        self.connect("SELECT 1;")
+        msg, _ = c.wait_notification("window/showMessage",
+                                     lambda p: "not a configured connection" in p["message"], 30)
+        self.assertEqual(msg["type"], 2)
+        time.sleep(0.5)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_a_failure_that_may_pass_is_retried(self):
+        c = self.client
+        attempts = []
+
+        def flaky(msg):
+            attempts.append(msg["params"]["tool"])
+            if len(attempts) == 1:
+                raise Request_error("the MCP server is starting")
+            return MCP_ANSWERS[mcp_call_key(msg["params"])]
+
+        c.request_handler = flaky
+        text, pos = split_cursor("SELECT * FROM |")
+        self.connect(text)
+        # The first retry comes after 5 s.
+        deadline = time.monotonic() + 30
+        while "item" not in self.labels(pos) and time.monotonic() < deadline:
+            time.sleep(0.2)
+        self.assertIn("item", self.labels(pos))
+        self.assertEqual(attempts[:2], ["db.execute_sql", "db.execute_sql"])
+
+    def test_shutdown_while_the_client_has_not_answered(self):
+        c = self.client
+        asked = []
+
+        def hold(msg):
+            asked.append(msg["params"]["tool"])
+            return Client.NO_ANSWER
+
+        c.request_handler = hold
+        self.connect("SELECT 1;")
+        deadline = time.monotonic() + 10
+        while not asked and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(asked, ["db.execute_sql"])
+        # tearDown closes: the catalog thread waiting on the answer is let
+        # go, and the server exits with 0.
 
 
 @unittest.skipUnless(sandbox.mariadbd() and sandbox.shell_bin_dir(),

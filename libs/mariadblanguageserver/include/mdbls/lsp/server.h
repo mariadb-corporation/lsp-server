@@ -43,6 +43,11 @@ struct Server_options {
   // MariaDB Shell's binary directory, for its secret store helpers (live
   // connections); initializationOptions.shellBinary or shellBinDir override.
   std::string shell_bin_dir;
+  // Read connections' catalogs through the client, which has MariaDB
+  // Shell's MCP server: the server sends mariadb/dbCall requests
+  // ({connection, tool, arguments}) and the client answers with the
+  // tool's result.  The secret store and the client library are not used.
+  bool mcp = false;
   std::ostream *log = nullptr;
 };
 

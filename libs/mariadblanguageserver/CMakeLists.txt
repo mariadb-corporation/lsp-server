@@ -30,6 +30,7 @@ add_library(mariadblanguageserver STATIC
   src/lsp/language_features.cc
   src/lsp/server.cc
   src/lsp/transport.cc
+  src/mcp_catalog.cc
   src/navigation.cc
   src/outline.cc
   src/secret_store.cc

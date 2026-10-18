@@ -27,6 +27,7 @@
 #include <condition_variable>
 #include <deque>
 #include <filesystem>
+#include <future>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -46,6 +47,7 @@
 #include "mdbls/document.h"
 #include "mdbls/keywords.h"
 #include "mdbls/live_catalog.h"
+#include "mdbls/mcp_catalog.h"
 #include "mdbls/workspace_catalog.h"
 #include "mdbls/lsp/transport.h"
 #include "mdbls/outline.h"
@@ -213,6 +215,10 @@ struct Outline_cache {
 // a completion does not wait for it.
 constexpr size_t k_sync_outline_limit = 4u << 20;
 
+// How long a mariadb/dbCall may take the client (--mcp): a tool call can
+// wait on a session the editor is running a script on.
+constexpr std::chrono::seconds k_db_call_timeout{120};
+
 struct Open_document {
   std::string uri;
   Document doc;
@@ -317,6 +323,20 @@ struct Server::Impl {
   std::unique_ptr<Parser_pool> request_pool;
   // Each has a thread that posts to the inbox; joined before the pools go.
   std::map<std::string, std::shared_ptr<Live_catalog>> live;
+
+  // What the client answered a request of the server's.
+  struct Client_reply {
+    bool ok = false;
+    std::string result;   // the result, raw JSON
+    std::string message;  // the error's message
+    bool permanent = false;  // error.data.permanent: another ask would fail alike
+  };
+  // The requests sent to the client and not answered yet, by raw id.  Live
+  // catalog threads add and wait; the loop thread answers.
+  std::mutex pending_mutex;
+  std::map<std::string, std::shared_ptr<std::promise<Client_reply>>> pending;
+  uint64_t next_client_request = 1;
+  bool pending_closed = false;
 
   // ---- output, from any thread
 
@@ -497,6 +517,8 @@ struct Server::Impl {
       inbox->events.clear();
     }
     for (auto &[uri, d] : documents) cancel_passes(*d);
+    // A catalog thread waiting on the client is let go before it is joined.
+    close_pending();
     for (auto &[uri, d] : documents) d->live.reset();
     live.clear();
     request_pool.reset();
@@ -530,7 +552,7 @@ struct Server::Impl {
     const std::string id = id_value != nullptr ? raw_json(*id_value) : "";
     const auto method = string_at(msg, {"method"});
     if (!method) {
-      if (id_value != nullptr) on_response(id);
+      if (id_value != nullptr) on_response(msg, id);
       return;
     }
     static const Json k_empty(rapidjson::kObjectType);
@@ -748,7 +770,63 @@ struct Server::Impl {
     if (const auto v = string_at(o, {"keywordCase"})) upper_keywords = *v != "lower";
   }
 
-  void on_response(const std::string &id) {
+  // Sends a request to the client; its answer comes through the future.
+  std::future<Client_reply> client_request(const char *method, const std::string &params_json) {
+    auto promise = std::make_shared<std::promise<Client_reply>>();
+    auto future = promise->get_future();
+    std::string id;
+    {
+      std::lock_guard lock(pending_mutex);
+      if (pending_closed) {
+        promise->set_value({false, "", "the server is shutting down", true});
+        return future;
+      }
+      id = "\"mdbls-" + std::to_string(next_client_request++) + "\"";
+      pending.emplace(id, promise);
+    }
+    send([&](Json_writer &w) {
+      w.Key("id");
+      w.RawValue(id.c_str(), id.size(), rapidjson::kStringType);
+      w.Key("method");
+      w.String(method);
+      w.Key("params");
+      w.RawValue(params_json.c_str(), params_json.size(), rapidjson::kObjectType);
+    });
+    return future;
+  }
+
+  // Answers every request still waiting: the server is going down.
+  void close_pending() {
+    std::lock_guard lock(pending_mutex);
+    pending_closed = true;
+    for (auto &[id, promise] : pending) {
+      promise->set_value({false, "", "the server is shutting down", true});
+    }
+    pending.clear();
+  }
+
+  void on_response(const Json &msg, const std::string &id) {
+    std::shared_ptr<std::promise<Client_reply>> promise;
+    {
+      std::lock_guard lock(pending_mutex);
+      if (const auto it = pending.find(id); it != pending.end()) {
+        promise = it->second;
+        pending.erase(it);
+      }
+    }
+    if (promise) {
+      Client_reply r;
+      if (const Json *err = member(msg, "error"); err != nullptr && !err->IsNull()) {
+        r.message = string_at(*err, {"message"}).value_or("error");
+        if (const Json *p = path(*err, {"data", "permanent"})) r.permanent = p->IsTrue();
+      } else {
+        r.ok = true;
+        const Json *result = member(msg, "result");
+        r.result = result == nullptr ? "null" : raw_json(*result);
+      }
+      promise->set_value(std::move(r));
+      return;
+    }
     // The client accepted a workDoneProgress token: begin reporting.
     for (auto &[uri, d] : documents) {
       if (d->progress == Open_document::Progress::none && id == d->progress_token) {
@@ -894,6 +972,7 @@ struct Server::Impl {
     if (const auto it = live.find(key); it != live.end()) return it->second;
     Live_catalog_options o;
     o.secrets = secrets;
+    if (options.mcp) o.fetch = mcp_fetcher();
     o.refresh_interval = live_interval;
     o.log = [this](const std::string &line) { log(line); };
     auto box = inbox;
@@ -902,6 +981,48 @@ struct Server::Impl {
     });
     live.emplace(key, lc);
     return lc;
+  }
+
+  // Reads a catalog through the client's MCP server: each db.* tool call is
+  // a mariadb/dbCall request, answered by the client.  Runs on the live
+  // catalog's thread; the loop thread hands the answers over.
+  Catalog_fetcher mcp_fetcher() {
+    return [this](const std::string &uri, std::string *error, bool *permanent,
+                  const std::function<bool()> &cancelled) {
+      const Tool_caller call = [this, &uri, &cancelled](std::string_view tool,
+                                                        const std::string &arguments,
+                                                        rapidjson::Document *out)
+          -> std::optional<Tool_failure> {
+        rapidjson::StringBuffer buf;
+        Json_writer w(buf);
+        w.StartObject();
+        w.Key("connection");
+        w.String(uri.c_str());
+        w.Key("tool");
+        w.String(tool.data(), static_cast<rapidjson::SizeType>(tool.size()));
+        w.Key("arguments");
+        w.RawValue(arguments.c_str(), arguments.size(), rapidjson::kObjectType);
+        w.EndObject();
+        auto future = client_request("mariadb/dbCall", std::string(buf.GetString(), buf.GetSize()));
+        const auto deadline = Clock::now() + k_db_call_timeout;
+        while (future.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) {
+          if (cancelled()) return Tool_failure{"cancelled", false};
+          if (Clock::now() > deadline) {
+            return Tool_failure{"the client did not answer within " +
+                                    std::to_string(k_db_call_timeout.count()) + " s",
+                                false};
+          }
+        }
+        const Client_reply reply = future.get();
+        if (!reply.ok) return Tool_failure{reply.message, reply.permanent};
+        out->Parse(reply.result.c_str(), reply.result.size());
+        if (out->HasParseError()) return Tool_failure{"the client's answer is not JSON", false};
+        return std::nullopt;
+      };
+      Mcp_catalog_options mo;
+      mo.cancelled = cancelled;
+      return fetch_mcp_catalog(call, error, permanent, mo);
+    };
   }
 
   void on_live_update(const std::string &key) {
