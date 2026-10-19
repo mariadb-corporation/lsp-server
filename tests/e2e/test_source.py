@@ -162,6 +162,15 @@ class Source_includes(unittest.TestCase):
         self.diagnostics_until(
             lambda d: not any(x.get("severity") == 1 and x.get("code") == "source" for x in d), mark)
 
+        # Deleting the directive's line, an edit that removes statements and
+        # adds none, takes its warning away too.
+        line = position_of(self.text, "SOURCE './sections/180")["line"]
+        mark = self.client.mark()
+        self.client.change(self.uri, 4, [{"range": {"start": {"line": line, "character": 0},
+                                                    "end": {"line": line + 1, "character": 0}},
+                                          "text": ""}])
+        self.diagnostics_until(lambda d: not any(x.get("code") == "source" for x in d), mark)
+
     def test_navigation_into_an_include(self):
         self.client.open(self.uri, self.text)
         at = {"textDocument": {"uri": self.uri},

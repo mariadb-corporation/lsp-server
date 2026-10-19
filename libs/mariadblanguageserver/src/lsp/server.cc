@@ -1464,7 +1464,12 @@ struct Server::Impl {
   void start_checks(Open_document &d) {
     auto todo = d.doc.take_unchecked();
     if (todo.empty()) {
-      if (d.passes.empty()) publish(d);
+      if (d.passes.empty()) {
+        publish(d);
+        // An edit that only removed statements (a SOURCE line deleted)
+        // starts no pass, so no on_checked rescans the directives.
+        schedule_include_scan(d);
+      }
       return;
     }
     auto pass = std::make_shared<Check_pass>();
@@ -1936,14 +1941,32 @@ struct Server::Impl {
   // Whether it has any comes from the statements' checks, kept across
   // edits: no scan of the text, and no snapshot held for a document
   // without directives (which would make the next edit copy its text).
+  // Comment statements are never checked, yet msm expands a directive in a
+  // /* */ block too: those few are scanned here.  While a SQL statement has
+  // no verdict yet, "none" is not known: the pass that checks it calls
+  // this again when it ends.
   void schedule_include_scan(Open_document &d) {
     const auto &checks = d.doc.checks();
-    const bool has = std::any_of(checks.begin(), checks.end(), [](const Statement_check &c) {
-      return c.has_source_directives;
-    });
+    const auto &stmts = d.doc.index().statements();
+    const std::string &text = d.doc.text();
+    bool has = false, unchecked = false;
+    for (size_t i = 0; i < stmts.size() && !has; ++i) {
+      if (stmts[i].kind == Statement_kind::comment) {
+        has = !find_source_directives(text, stmts[i].begin, stmts[i].end).empty();
+      } else if (checks[i].status == Check_status::unchecked) {
+        unchecked = true;
+      } else {
+        has = checks[i].has_source_directives;
+      }
+    }
     if (!has) {
-      if (!d.includes.empty() || !d.source_problems.empty() || !d.include_contexts.empty()) {
-        on_outline_includes(d.uri, d.doc.snapshot()->generation, {}, {}, {});
+      if (!unchecked &&
+          (!d.includes.empty() || !d.source_problems.empty() || !d.include_contexts.empty())) {
+        // Posted, not called: this runs inside loops over the documents
+        // (sync_include_texts, apply_include_contexts) that it would reenter.
+        inbox->post([this, uri = d.uri, generation = d.doc.snapshot()->generation] {
+          on_outline_includes(uri, generation, {}, {}, {});
+        });
       }
       return;
     }
