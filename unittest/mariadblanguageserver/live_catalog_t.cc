@@ -22,6 +22,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <future>
+#include <memory>
 #include <thread>
 
 #include "mdbls/live_catalog.h"
@@ -141,6 +143,24 @@ TEST(Live_catalog_details, slow_details_arrive_after_the_wait) {
     std::this_thread::sleep_for(10ms);
   }
   EXPECT_FALSE(table(lc.snapshot(), "orders")->stub);
+}
+
+TEST(Live_catalog_details, a_request_is_called_back_when_they_are_in) {
+  Live_catalog_options o;
+  o.fetch = stub_reading;
+  o.fetch_details = [&](const std::string &, const std::vector<Object_key> &objects, std::string *,
+                        const std::function<bool()> &) -> std::optional<Catalog_details> {
+    std::this_thread::sleep_for(50ms);
+    return table_details(objects);
+  };
+  Live_catalog lc("mariadb://u@h:1", o);
+  ASSERT_TRUE(first_snapshot(lc));
+  auto done = std::make_shared<std::promise<void>>();
+  ASSERT_TRUE(lc.request_details({{"shop", "orders", "table"}}, [done] { done->set_value(); }));
+  ASSERT_EQ(done->get_future().wait_for(5s), std::future_status::ready);
+  EXPECT_FALSE(table(lc.snapshot(), "orders")->stub);
+  // Nothing to ask for: refused, never called back.
+  EXPECT_FALSE(lc.request_details({}, [] { ADD_FAILURE(); }));
 }
 
 TEST(Live_catalog_details, nothing_to_wait_for_without_a_fetcher) {

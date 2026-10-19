@@ -158,22 +158,15 @@ void write_text_edits(Json_writer &w, const Snapshot &s, const std::vector<Text_
   w.EndArray();
 }
 
-}  // namespace
-
-// How long a request waits for the details of stubs it met.
-constexpr std::chrono::milliseconds k_details_wait{3000};
-
-// When `view` met stubs of the live catalog (Table::stub), has their
-// details read and returns the sources with the snapshot that has them;
-// nullopt when there were none, there is no one to read them, or they did
-// not come in time - the request then answers with what it has.
-std::optional<Catalog_sources> with_details(const Catalog_sources &c, const Catalog_view &view) {
-  if (view.stubs_met().empty() || !c.live_source) return std::nullopt;
-  if (!c.live_source->details(view.stubs_met(), k_details_wait)) return std::nullopt;
-  Catalog_sources next = c;
-  next.live = c.live_source->snapshot();
-  return next;
+// True when `view` met stubs a later pass can have read: they go into
+// `pass.wanted` and the request writes nothing this time.
+bool wants_details(const Catalog_sources &c, const Catalog_view &view, Details_pass &pass) {
+  if (pass.final || view.stubs_met().empty() || !c.live_source) return false;
+  pass.wanted = view.stubs_met();
+  return true;
 }
+
+}  // namespace
 
 Catalog_view catalog_view(const Snapshot &s, const Catalog_sources &c, uint32_t offset) {
   Catalog_view v;
@@ -195,18 +188,13 @@ Catalog_view catalog_view(const Snapshot &s, const Catalog_sources &c, uint32_t 
 }
 
 void completion(Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
-                Parser_cache &cache, const Completion_options &options) {
+                Parser_cache &cache, const Completion_options &options, Details_pass &pass) {
   const uint32_t offset = s.lines->offset(*s.text, pos);
   const Catalog_view view = catalog_view(s, c, offset);
   auto list = complete(*s.text, *s.index, offset, view, cache, options);
-  if (!view.stubs_met().empty()) {
-    if (const auto read = with_details(c, view)) {
-      list = complete(*s.text, *s.index, offset, catalog_view(s, *read, offset), cache, options);
-    } else {
-      // Asked again as the user types: the details may be there by then.
-      list.incomplete = true;
-    }
-  }
+  if (wants_details(c, view, pass)) return;
+  // Asked again as the user types: the details may be there by then.
+  if (!view.stubs_met().empty() && !pass.read) list.incomplete = true;
   w.StartObject();
   w.Key("isIncomplete");
   w.Bool(list.incomplete);
@@ -258,11 +246,9 @@ void completion(Json_writer &w, const Snapshot &s, Position pos, const Catalog_s
 }
 
 void hover(Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
-           Parser_cache &cache) {
-  auto at = resolve_at(s, pos, c, cache);
-  if (at) {
-    if (const auto read = with_details(c, at->view)) at = resolve_at(s, pos, *read, cache);
-  }
+           Parser_cache &cache, Details_pass &pass) {
+  const auto at = resolve_at(s, pos, c, cache);
+  if (at && wants_details(c, at->view, pass)) return;
   const std::string text = at ? hover_markdown(at->resolution) : std::string();
   if (text.empty()) {
     w.Null();
@@ -402,14 +388,11 @@ bool rename(Json_writer &w, const Snapshot &s, const std::string &uri, Position 
 }
 
 void signature_help(Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
-                    Parser_cache &cache) {
+                    Parser_cache &cache, Details_pass &pass) {
   const uint32_t offset = s.lines->offset(*s.text, pos);
   const Catalog_view view = catalog_view(s, c, offset);
-  auto help = mdbls::signature_help(*s.text, *s.index, offset, view, cache, s.version_id);
-  if (const auto read = with_details(c, view)) {
-    help = mdbls::signature_help(*s.text, *s.index, offset, catalog_view(s, *read, offset), cache,
-                                 s.version_id);
-  }
+  const auto help = mdbls::signature_help(*s.text, *s.index, offset, view, cache, s.version_id);
+  if (wants_details(c, view, pass)) return;
   if (!help || help->signatures.empty()) {
     w.Null();
     return;

@@ -18,7 +18,9 @@
 #ifndef MDBLS_LSP_LANGUAGE_FEATURES_H_
 #define MDBLS_LSP_LANGUAGE_FEATURES_H_
 
+#include <chrono>
 #include <memory>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -51,11 +53,25 @@ struct Catalog_sources {
 // The catalogs as one view, the current schema the one in use at `offset`.
 Catalog_view catalog_view(const Snapshot &s, const Catalog_sources &c, uint32_t offset);
 
+// How long a request waits for the details of stubs it met.
+constexpr std::chrono::milliseconds k_details_wait{3000};
+
+// Completion, hover and signature help run in passes when they meet stubs
+// of the live catalog (Table::stub).  The first pass names them in
+// `wanted` and writes nothing; the server has them read without holding a
+// thread, then runs the request again, `final`, on the snapshot that has
+// them, or without them after k_details_wait (`read` false).
+struct Details_pass {
+  bool final = false;
+  bool read = false;  // the details came in time
+  std::set<Object_key> wanted;
+};
+
 void completion(Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
-                Parser_cache &cache, const Completion_options &options);
+                Parser_cache &cache, const Completion_options &options, Details_pass &pass);
 
 void hover(Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
-           Parser_cache &cache);
+           Parser_cache &cache, Details_pass &pass);
 
 // Location[] (or null) of what the name at `pos` refers to.
 void definition(Json_writer &w, const Snapshot &s, const std::string &uri, Position pos,
@@ -82,7 +98,7 @@ bool rename(Json_writer &w, const Snapshot &s, const std::string &uri, Position 
             Parser_cache &cache, int priority, std::string *error);
 
 void signature_help(Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
-                    Parser_cache &cache);
+                    Parser_cache &cache, Details_pass &pass);
 
 // TextEdit[] laying out the queries of the statements that overlap
 // [from, to), or of the whole document when `range` is false.

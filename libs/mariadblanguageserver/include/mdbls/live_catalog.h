@@ -21,7 +21,6 @@
 #include <chrono>
 #include <condition_variable>
 #include <functional>
-#include <future>
 #include <memory>
 #include <set>
 #include <tuple>
@@ -141,10 +140,14 @@ class Live_catalog {
   void refresh();
 
   // Has the details of `objects` (stubs of the snapshot) read on the
-  // catalog's thread, and waits up to `wait` for them.  True when they were
-  // read in time - snapshot() then has them; false when there is no detail
-  // fetcher, or they come later or not at all.  Objects that failed are
-  // not asked for again until the catalog is read again.
+  // catalog's thread and calls `done` there once they are in snapshot(),
+  // failed or were not needed, or the catalog is going away.  False, and
+  // `done` is never called, when there is no detail fetcher or nothing to
+  // ask.  Objects that failed are not asked for again until the catalog is
+  // read again.
+  bool request_details(const std::set<Object_key> &objects, std::function<void()> done);
+  // request_details(), waiting up to `wait`: true when the details came in
+  // time, false when they come later, not at all, or cannot be asked for.
   bool details(const std::set<Object_key> &objects, std::chrono::milliseconds wait);
   // Reads again this often from now on (0: only on refresh()), counted
   // from the last successful read.
@@ -161,7 +164,7 @@ class Live_catalog {
   void run();
   struct Detail_request {
     std::vector<Object_key> objects;
-    std::shared_ptr<std::promise<void>> done;
+    std::function<void()> done;
   };
   void read_details(std::vector<Detail_request> requests);
 

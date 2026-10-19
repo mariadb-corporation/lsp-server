@@ -38,6 +38,7 @@
 #include <string>
 #include <thread>
 #include <tuple>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -415,8 +416,11 @@ struct Server::Impl {
   }
 
   // Runs `compute` on the request pool and replies with what it writes.
-  void run_request(const std::string &id, std::function<void(Json_writer &, Parser_cache &)> compute) {
-    request_pool->submit(k_priority_request, [this, id, compute = std::move(compute)](Parser_cache &cache) {
+  // A `compute` returning bool may return false: it handed the request on
+  // (detail_request) and there is no reply yet.
+  template <typename F>
+  void run_request(const std::string &id, F compute) {
+    request_pool->submit(k_priority_request, [this, id, compute = std::move(compute)](Parser_cache &cache) mutable {
       if (is_cancelled(id)) {
         reply_error(id, k_request_cancelled, "request cancelled");
         return;
@@ -424,7 +428,11 @@ struct Server::Impl {
       try {
         rapidjson::StringBuffer buf;
         Json_writer w(buf);
-        compute(w, cache);
+        if constexpr (std::is_same_v<std::invoke_result_t<F &, Json_writer &, Parser_cache &>, bool>) {
+          if (!compute(w, cache)) return;
+        } else {
+          compute(w, cache);
+        }
         if (is_cancelled(id)) {
           reply_error(id, k_request_cancelled, "request cancelled");
           return;
@@ -516,14 +524,20 @@ struct Server::Impl {
       }
     }
 
+    // Dropped outside the lock and after close_pending(): an event, or a
+    // request waiting for details in `timers`, may hold the last reference
+    // to a live catalog, whose thread is joined then.
+    std::deque<std::function<void()>> dropped;
     {
       std::lock_guard lock(inbox->mutex);
       inbox->closed = true;
-      inbox->events.clear();
+      dropped.swap(inbox->events);
     }
     for (auto &[uri, d] : documents) cancel_passes(*d);
     // A catalog thread waiting on the client is let go before it is joined.
     close_pending();
+    dropped.clear();
+    timers.clear();
     for (auto &[uri, d] : documents) d->live.reset();
     live.clear();
     request_pool.reset();
@@ -1242,6 +1256,60 @@ struct Server::Impl {
     });
   }
 
+  // A position request whose answer may need the details of live stubs:
+  // `f(w, snapshot, pos, sources, cache, pass)` runs as Details_pass says.
+  // Between the passes no thread waits: the request is parked until the
+  // live catalog has read the details or k_details_wait has passed.
+  template <typename F>
+  void detail_request(const std::string &id, Open_document *d, const Json &params, F f) {
+    const auto pos = position_of(member(params, "position"));
+    if (d == nullptr || !pos) return reply_error(id, k_invalid_params, "position expected");
+    detail_pass(id, sources(*d), *pos, std::move(f), Details_pass{});
+  }
+
+  template <typename F>
+  void detail_pass(const std::string &id, Request_sources src, Position pos, F f, Details_pass pass) {
+    run_request(id, [this, id, src = std::move(src), pos, f = std::move(f), pass = std::move(pass)](
+                        Json_writer &w, Parser_cache &cache) mutable {
+      src.catalogs.document = document_outline(src.snapshot, src.outline, false);
+      f(w, *src.snapshot, pos, src.catalogs, cache, pass);
+      if (pass.wanted.empty()) return true;
+      // Parked by the loop thread, which owns the timers and submits the
+      // final pass: a job never submits to its own pool.
+      inbox->post([this, id, src = std::move(src), pos, f = std::move(f),
+                   wanted = std::move(pass.wanted)]() mutable {
+        const auto catalog = src.catalogs.live_source;
+        // The final pass, run once: by the details or by the timer,
+        // whichever comes first.  Loop thread only.
+        auto resume = std::make_shared<std::function<void(bool)>>(
+            [this, id, src = std::move(src), pos, f = std::move(f)](bool read) mutable {
+              src.catalogs.live = src.catalogs.live_source->snapshot();
+              Details_pass last;
+              last.final = true;
+              last.read = read;
+              detail_pass(id, std::move(src), pos, std::move(f), std::move(last));
+            });
+        const auto finish = [](const std::shared_ptr<std::function<void(bool)>> &r, bool read) {
+          if (!*r) return;
+          auto run = std::move(*r);
+          *r = nullptr;
+          run(read);
+        };
+        // The catalog's thread holds it weakly: it never drops the last
+        // reference, which may own the catalog itself.
+        const bool asked = catalog->request_details(
+            wanted, [inbox = inbox, finish, weak = std::weak_ptr(resume)] {
+              inbox->post([finish, weak] {
+                if (const auto r = weak.lock()) finish(r, true);
+              });
+            });
+        if (!asked) return finish(resume, false);
+        after(k_details_wait, [finish, resume] { finish(resume, false); });
+      });
+      return false;
+    });
+  }
+
   void on_viewport(const Json &params) {
     Open_document *d = document(params);
     const auto a = position_of(path(params, {"range", "start"}));
@@ -1649,19 +1717,19 @@ struct Server::Impl {
     o.upper_case_keywords = upper_keywords;
     o.snippets = snippets;
     o.line_width = line_width;
-    position_request(id, d, params, false,
-                     [o](Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
-                         Parser_cache &cache) {
-                       Completion_options co = o;
-                       co.version_id = s.version_id;
-                       completion(w, s, pos, c, cache, co);
-                     });
+    detail_request(id, d, params,
+                   [o](Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
+                       Parser_cache &cache, Details_pass &pass) {
+                     Completion_options co = o;
+                     co.version_id = s.version_id;
+                     completion(w, s, pos, c, cache, co, pass);
+                   });
   }
 
   void on_hover(const std::string &id, Open_document *d, const Json &params) {
-    position_request(id, d, params, false,
-                     [](Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
-                        Parser_cache &cache) { hover(w, s, pos, c, cache); });
+    detail_request(id, d, params,
+                   [](Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
+                      Parser_cache &cache, Details_pass &pass) { hover(w, s, pos, c, cache, pass); });
   }
 
   void on_definition(const std::string &id, Open_document *d, const Json &params) {
@@ -1743,9 +1811,9 @@ struct Server::Impl {
   }
 
   void on_signature_help(const std::string &id, Open_document *d, const Json &params) {
-    position_request(id, d, params, false,
-                     [](Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
-                        Parser_cache &cache) { signature_help(w, s, pos, c, cache); });
+    detail_request(id, d, params,
+                   [](Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
+                      Parser_cache &cache, Details_pass &pass) { signature_help(w, s, pos, c, cache, pass); });
   }
 
   void on_workspace_symbol(const std::string &id, const Json &params) {

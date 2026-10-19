@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <future>
 #include <map>
 #include <stdexcept>
 #include <tuple>
@@ -412,19 +413,24 @@ Live_catalog::~Live_catalog() {
   m_cv.notify_all();
   m_thread.join();
   // Whoever still waits for details is let go.
-  for (auto &r : m_detail_requests) r.done->set_value();
+  for (auto &r : m_detail_requests) r.done();
 }
 
-bool Live_catalog::details(const std::set<Object_key> &objects, std::chrono::milliseconds wait) {
+bool Live_catalog::request_details(const std::set<Object_key> &objects, std::function<void()> done) {
   if (!m_options.fetch_details || objects.empty()) return false;
-  auto done = std::make_shared<std::promise<void>>();
-  auto future = done->get_future();
   {
     std::lock_guard lock(m_mutex);
     if (m_stop) return false;
-    m_detail_requests.push_back({std::vector<Object_key>(objects.begin(), objects.end()), done});
+    m_detail_requests.push_back({std::vector<Object_key>(objects.begin(), objects.end()), std::move(done)});
   }
   m_cv.notify_all();
+  return true;
+}
+
+bool Live_catalog::details(const std::set<Object_key> &objects, std::chrono::milliseconds wait) {
+  auto done = std::make_shared<std::promise<void>>();
+  auto future = done->get_future();
+  if (!request_details(objects, [done] { done->set_value(); })) return false;
   return future.wait_for(wait) == std::future_status::ready;
 }
 
@@ -480,7 +486,7 @@ void Live_catalog::read_details(std::vector<Detail_request> requests) {
       m_details_failed.insert(wanted.begin(), wanted.end());
     }
   }
-  for (auto &r : requests) r.done->set_value();
+  for (auto &r : requests) r.done();
 }
 
 void Live_catalog::refresh() {

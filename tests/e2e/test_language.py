@@ -554,6 +554,43 @@ class Mcp_mode(unittest.TestCase):
             MCP_ANSWERS[("db.list_objects", "store", "table")].pop()
             del MCP_ANSWERS[("db.get_object_details", "store", "fresh", "table")]
 
+    def test_requests_waiting_for_details_hold_no_thread(self):
+        c = self.client
+        held = []
+        answer = c.request_handler
+
+        def hold(msg):
+            if msg["params"]["tool"] == "db.get_object_details":
+                held.append(msg)
+                return Client.NO_ANSWER
+            return answer(msg)
+
+        c.request_handler = hold
+        text = "SELECT label FROM item;\n"
+        self.connect(text)
+        hover = {"textDocument": {"uri": URI}, "position": position_of(text, "item")}
+        # Hovers until one meets the stub, once the catalog's names are read.
+        rids = []
+        deadline = time.monotonic() + 30
+        while not held and time.monotonic() < deadline:
+            rids.append(c.request_async("textDocument/hover", hover))
+            time.sleep(0.05)
+        self.assertTrue(held)
+        # More than the request pool has threads wait for the same details,
+        # and other requests are still answered at once.
+        rids += [c.request_async("textDocument/hover", hover) for _ in range(8)]
+        t0 = time.monotonic()
+        c.request("textDocument/foldingRange", {"textDocument": {"uri": URI}})
+        self.assertLess(time.monotonic() - t0, 1.0)
+        with c.cond:
+            for msg in held:
+                c._send({"jsonrpc": "2.0", "id": msg["id"],
+                         "result": MCP_ANSWERS[mcp_call_key(msg["params"])]})
+        last = None
+        for rid in rids:
+            last = c.wait_response(rid, timeout=10)
+        self.assertIn("label", last["contents"]["value"])
+
     def test_a_permanent_failure_is_reported_once_and_not_retried(self):
         c = self.client
 

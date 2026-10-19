@@ -261,8 +261,9 @@ the user schemas are stubs. `performance_schema` is left out, as it is in direct
 **Details on demand.** A completion, hover or signature help that meets a stub (the
 columns of a table in scope or after `schema.table.`, a routine's parameters) has the
 live catalog read its details, one `db.get_object_details` each, on the catalog's own
-thread, waits up to 3 s, and answers again with them; a completion answered without them
-is marked incomplete, so the client asks again. A table's details give its columns,
+thread, and answers again with them once they are in, or after 3 s without them; no
+thread waits meanwhile, so other requests are answered as usual. A completion answered
+without them is marked incomplete, so the client asks again. A table's details give its columns,
 primary and unique keys (`constraints`), its own foreign keys (the `n:1` `references`), and
 the foreign keys of other tables pointing at it (`1:1` and `1:n`), which are kept on those
 tables while they are stubs: a table related to one in use ranks as related before it is
