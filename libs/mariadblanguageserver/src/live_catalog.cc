@@ -80,7 +80,7 @@ class Session {
   // Runs `sql`; `row` gets each row (its fields, nullptr for NULL).
   template <typename F>
   bool query(const char *sql, F &&row) {
-    if (mysql_real_query(m_, sql, std::strlen(sql)) != 0) return false;
+    if (mysql_real_query(m_, sql, static_cast<unsigned long>(std::strlen(sql))) != 0) return false;
     MYSQL_RES *res = mysql_use_result(m_);
     if (res == nullptr) return mysql_field_count(m_) == 0;
     const unsigned n = mysql_num_fields(res);

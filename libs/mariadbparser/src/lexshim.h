@@ -40,6 +40,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+/* As MariaDB's my_compiler.h: GCC attributes (the extracted lexer has
+   __attribute__((unused))) vanish on other compilers. */
+#if !defined(__GNUC__) && !defined(__clang__)
+#define __attribute__(A)
+#endif
+
 /* --- primitives ---------------------------------------------------------- */
 /* Scaffolding, not ledger rows: MariaDB's spellings for the C types its own
  * sources use.  Named here so a diagnostic about them is never mistaken for a

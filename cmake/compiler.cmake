@@ -46,6 +46,9 @@ elseif(MSVC)
   endif()
   message(STATUS "Using Visual Studio version: ${MSVC_VERSION} (${MSVC_TOOLSET_VERSION})")
   set(MDBLS_WARNING_FLAGS /W4 /WX)
+  # getenv, strerror, sscanf and the like are standard C; their _s
+  # replacements are not portable (the MariaDB server's build does the same).
+  add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:preprocessor>
                       $<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus> /utf-8)
   if(ENABLE_GCOV)
