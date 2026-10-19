@@ -187,6 +187,17 @@ every segment maps 1:1.
 
 ## Status
 
+**Checked before review (2026-10-19, at `c38ded5`):**
+
+- **Debian 13 (GCC 14.2, aarch64) and Windows 11 (MSVC, ARM64):** the build passes (no new warnings), 810 unit tests pass (one skip: no MariaDB Shell there), and the e2e suite passes (66 tests, the 10 live-connection ones skipped).
+- **Windows bug:** these runs found that `path_to_file_uri` wrote `file:///C%3A/...` where VS Code writes `file:///c%3A/...`; fixed.
+- **256 MB dump, optimized build, against `c2954dc` (before P9):**
+  - edit to diagnostics, median: 3.2–3.3 ms both;
+  - full check after `didOpen`: 1.6 s both;
+  - `mariadb-lsp check`: 0.53 s both;
+  - `mariadb-lsp outline`: 3.5 → 8 ms, the expansion's directive scan.
+- **Slowdown found and fixed:** a first version scanned the whole text after every check pass, nearly doubling edit-to-diagnostics latency. The checks now record whether a statement holds a directive.
+
 **The four open items of §5 are done (2026-10-19):**
 
 - **Hover** names the file and line of an object a file the document includes defines.
