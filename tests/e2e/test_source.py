@@ -18,7 +18,9 @@ navigation and links take in the files a script includes."""
 
 import os
 import pathlib
+import json
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -352,6 +354,67 @@ class Source_includes(unittest.TestCase):
                            {"changes": [{"uri": extra.as_uri(), "type": 2}]})
         self.assertIsNotNone(find_symbol(self.symbols_until("audit"), "audit"))
 
+
+class Source_dir_cli(unittest.TestCase):
+    """mariadb-lsp check, outline and format with --source-dir: the folder
+    relative SOURCE paths are taken from, for stdin above all."""
+
+    DEV = FIXTURES / "msm" / "development"
+    SCRIPT = DEV / "shop_next.sql"
+    TEXT = SCRIPT.read_text()
+
+    def run_cli(self, *args, stdin=None):
+        return subprocess.run([BINARY, *args], input=stdin, capture_output=True, text=True,
+                              timeout=60)
+
+    def test_check_from_stdin(self):
+        # Without it, stdin has no folder: every relative path is refused.
+        r = self.run_cli("check", "-", stdin=self.TEXT)
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stdout.count("the path is relative, and the document is not in a folder"), 4)
+        # With it, the includes are read: the nested directive's warning names
+        # the file and line, as for a file.
+        r = self.run_cli("check", "--source-dir", str(self.DEV), "-", stdin=self.TEXT)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.splitlines(),
+                         ["-:16:1: warning: ./sections/180_extra.sql line 2 has SOURCE "
+                          "'./deeper.sql', which msm does not expand: it expands one level only"])
+        # --no-source still wins: the directives are SQL, and errors.
+        r = self.run_cli("check", "--no-source", "--source-dir", str(self.DEV), "-", stdin=self.TEXT)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("syntax error near 'SOURCE'", r.stdout)
+
+    def test_outline_from_stdin(self):
+        # The same outline as the file's (includes, sources, notes with
+        # file:line), but for the input's name.
+        r = self.run_cli("outline", "--source-dir", str(self.DEV), "-", stdin=self.TEXT)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        stdin = json.loads(r.stdout)
+        self.assertEqual([pathlib.Path(i["file"]).name for i in stdin["includes"]],
+                         ["140_tables.sql", "150_routines.sql", "170_roles.sql", "180_extra.sql"])
+        file = json.loads(self.run_cli("outline", str(self.SCRIPT)).stdout)
+        del stdin["file"], file["file"]
+        self.assertEqual(stdin, file)
+
+    def test_it_replaces_a_files_folder(self):
+        r = self.run_cli("check", "--source-dir", str(FIXTURES), str(self.SCRIPT))
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stdout.count("cannot read"), 4)
+
+    def test_format_takes_it_and_reads_nothing(self):
+        r = self.run_cli("format", "--source-dir", str(self.DEV), "-", stdin="select 1;\n")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "SELECT 1;\n")
+
+    def test_usage_errors(self):
+        r = self.run_cli("check", "--source-dir", str(self.DEV / "no-such-folder"), "-", stdin="")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("not a folder", r.stderr)
+        r = self.run_cli("check", "--source-dir", str(self.SCRIPT), "-", stdin="")
+        self.assertEqual(r.returncode, 2)
+        r = self.run_cli("split", "--source-dir", str(self.DEV), "-", stdin="")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("goes with check, outline and format", r.stderr)
 
 if __name__ == "__main__":
     unittest.main()

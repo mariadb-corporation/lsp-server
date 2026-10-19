@@ -286,6 +286,11 @@ context: a section without a `USE` gets the script's schema.
 - `mariadb/outline` lists the includes and gives objects from them a `source` and
   positions in their file ([outline-format.md](outline-format.md)). `mariadb-lsp check` and
   `outline` expand directives too; `--no-source` reads them as SQL.
+- `--source-dir DIR` (`check`, `outline`, `format`) is the folder relative SOURCE paths are
+  taken from, in place of the file's own; stdin (`-`) has none otherwise, so MariaDB Shell's
+  MCP `sql` tools pass their script's folder this way. A DIR that is not a folder, or the
+  option with another command, is a usage error (exit 2); `format` only checks it, and
+  `--no-source` still wins.
 
 ## Live connections
 
