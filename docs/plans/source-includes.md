@@ -187,6 +187,8 @@ every segment maps 1:1.
 
 ## Status
 
+**Done (2026-10-19): steps 1 to 7.** Step 6's fixture and tests came with steps 2 and 4. Step 7 documents SOURCE in `docs/language-server.md` (a "SOURCE includes" section, the capability rows, the `source` diagnostic code), `docs/outline-format.md` (`includes`, `source`) and the README. Open items are in §5, plus checking the vscode-extension against the `source` field once it reads `mariadb/outline`, and `db.execute_sql_script` in the MCP plugin, which should expand SOURCE too (a prompt for that work was handed over; nothing is implemented yet).
+
 Step 1 is done (2026-10-19). `source_include.{h,cc}` provides
 `find_source_directives`, `slice_source`, `expand_sources` and `Source_expansion::map`,
 with 8 unit tests (`source_include_t.cc`). On the REST project's development script,

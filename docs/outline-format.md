@@ -25,6 +25,15 @@ the table. A statement that parses but changes nothing (`CREATE`/`DROP USER`, `R
 `SERVER`, `CREATE PACKAGE`, an `ALTER` of anything but a database, view or table, a `RENAME` of
 a table the file does not create, `USE REST SERVICE`) is not applied and gets no note.
 
+MSM `SOURCE '<path>'[<start>:<end>];` directives are expanded first, as msm_plugin's
+`prepare_release` does ([language-server.md](language-server.md#source-includes)): the
+included text is folded where its directive stands, in the script's context. A note on an
+included statement is at its directive and starts with the file and line
+(`140_tables.sql:13: ALTER TABLE missing: ...`); a file that cannot be read gets "not read:
+cannot read PATH", and a directive in an included text, which msm does not expand, "FILE:LINE:
+SOURCE 'x' not expanded: msm expands one level only". `mariadb-lsp outline --no-source`
+does not expand them.
+
 Names are as written, without quotes (`` `order` `` becomes `order`), and compare without
 regard to case. Keywords (`timing`, `events`, `mode`, `on_delete`, `on_update`) are
 upper-cased; `kind`, `charset` and `collation` values are lower-cased; everything else is as
@@ -39,6 +48,7 @@ written, with runs of blanks collapsed to one space. Positions are LSP positions
 | `file` | string | the input file as given on the command line (`-` for stdin); for `mariadb/outline`, the document URI |
 | `schemas` | array of schema | in order of first mention (a statement naming a schema, such as `ALTER TABLE s.t`, `CREATE INDEX ... ON s.t` or `CREATE TABLE ... LIKE s.t`, makes its entry); an undeclared schema holding no objects is left out, whatever its options |
 | `rest` | object | MariaDB REST Service objects |
+| `includes` | array | only when the file has SOURCE directives: one `{file, range, slice, error?}` per directive, in order; `file` is the path as resolved (absolute, `/` separators), `range` the directive, `slice` its `[...]` as written or null, `error` why nothing was included |
 | `statements` | object | `ddl`: statements that may change the schema; `applied`: those the fold took (a `USE`, or a `DROP` of an object the file never created, counts; a `CREATE USER` or `USE REST SERVICE` does not) |
 | `notes` | array | `{start: {line, character}, message}` for statements that were not read, or that refer to a table the file does not create (see above), sorted by `start` |
 
@@ -54,6 +64,10 @@ a REST schema the file never declared (`CREATE REST VIEW ... ON SCHEMA /x` witho
 REST SCHEMA /x`) has the statement that first named it as both. Without both: an undeclared
 schema, routine `parameters` entries, a foreign key's `references`, and `notes` entries
 (`start` only).
+
+An object defined in an included file has `source`, its index in `includes`, and its
+`range` and `selection_range` are positions in that file. Objects of the file itself have
+no `source`. An object's members (columns, keys) carry their own `source`.
 
 ## Schema
 

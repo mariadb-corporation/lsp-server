@@ -23,27 +23,29 @@ connections through the client instead of connecting itself, see [MCP mode](#mcp
 | Request or notification | What the server does |
 | --- | --- |
 | `textDocument/didOpen`, `didChange`, `didClose` | incremental sync; the statements an edit touches are split again and checked, the rest keep their results |
-| `textDocument/publishDiagnostics` | syntax errors with the expected tokens, statements that could not be checked (unsupported `sql_mode`, invalid UTF-8, an internal parser error), a string, quoted identifier or comment left open at the end |
-| `textDocument/documentSymbol` | schemas, tables with columns, indexes, foreign keys and checks, views, routines, triggers, events, sequences and REST objects, from the outline |
+| `textDocument/publishDiagnostics` | syntax errors with the expected tokens, statements that could not be checked (unsupported `sql_mode`, invalid UTF-8, an internal parser error), a string, quoted identifier or comment left open at the end, and what is wrong with [SOURCE directives](#source-includes) |
+| `textDocument/documentSymbol` | schemas, tables with columns, indexes, foreign keys and checks, views, routines, triggers, events, sequences and REST objects, from the outline; an object from a file a SOURCE directive includes sits on that directive, its `detail` ending in `· file:line` |
+| `textDocument/documentLink` | the path of every SOURCE directive, linked to its file |
 | `textDocument/foldingRange` | statements over several lines, runs of comment lines, `BEGIN ... END` and the other compound blocks of routines |
 | `textDocument/selectionRange` | the syntax nodes around a position, then its statement, then the document |
 | `textDocument/semanticTokens/full`, `full/delta`, `range` | keywords, strings, numbers, comments, variables, operators, functions, parameters; `full` and `full/delta` answer `null` for documents above the limit below, and the client then asks for the visible range |
 | `textDocument/completion` | the keywords the parser can take at the cursor, and the names that fit there (see [Completion](#completion)); trigger characters `.` and `` ` `` |
 | `textDocument/hover` | Markdown for tables and views (columns, keys), columns (type, default, comment), routines (signature), built-in functions (call forms and summary from the server's help tables), aliases, CTEs, variables, schemas |
-| `textDocument/definition` | where a table, view, column, routine or schema is created: in the document, or in a workspace catalog file; an alias, CTE or variable where its statement defines it; `null` for objects only the connected server knows |
+| `textDocument/definition` | where a table, view, column, routine or schema is created: in the document, in a file it includes, or in a workspace catalog file; an alias, CTE or variable where its statement defines it; `null` for objects only the connected server knows |
 | `textDocument/references` | every name in the document that refers to the same object, resolved statement by statement with the schema in use there; aliases, CTEs and variables within their statement |
 | `textDocument/documentHighlight` | the references within the statement at the cursor; the defining one is a write |
-| `textDocument/prepareRename`, `rename` | aliases, CTEs, variables, and tables, views, columns and routines the document itself defines; the edits cover the document, and the new name is quoted when it has to be |
+| `textDocument/prepareRename`, `rename` | aliases, CTEs, variables, and tables, views, columns and routines the document itself defines (not those of a file it includes: the error names that file); the edits cover the document, and the new name is quoted when it has to be |
 | `textDocument/signatureHelp` | the call forms of a built-in function, or a stored function's or procedure's parameters, with the active parameter; trigger characters `(` and `,` |
 | `textDocument/formatting`, `rangeFormatting` | lays out queries (see [Formatting](#formatting)): the whole document, or the statements the range touches; one edit per statement that changes |
-| `workspace/symbol` | tables, views, routines, triggers, events, sequences and schemas of the open documents and the workspace catalog whose name contains the query; columns too when the query is not empty |
+| `workspace/symbol` | tables, views, routines, triggers, events, sequences and schemas of the open documents (with the files they include) and the workspace catalog whose name contains the query; columns too when the query is not empty |
 | `workspace/didChangeConfiguration` | `settings.mariadb` takes the same keys as the initialization options; the workspace catalog is read again when `catalogFiles` changed, the documents that did not set a `connection` of their own through `mariadb/documentContext` move to the new `connection`, and a changed `sqlMode` or `serverVersion` applies to the open documents that did not set their own; a changed `catalogRefreshSeconds` applies to the connections already read, counted from their last read |
 | `textDocument/didSave` | saving one of the workspace catalog's files reads the catalog again |
+| `workspace/didChangeWatchedFiles` | a changed file that open documents include is read again for their outlines; a changed workspace catalog file reads the catalog again. When the client allows dynamic registration (`workspace.didChangeWatchedFiles.dynamicRegistration`), the server registers a watcher for `**/*.sql` after `initialized` |
 
 Diagnostics carry `source: "mariadb"` and a `code`: `syntax-error`, `not-checked`,
-`unterminated` or `splitter`. Syntax errors and an unterminated string, identifier or
+`unterminated`, `splitter` or `source`. Syntax errors and an unterminated string, identifier or
 comment are errors (severity 1); statements not checked and splitter messages are
-warnings (2). An unsupported `sql_mode` is reported once, as information (3), at the
+warnings (2). For `source`, see [SOURCE includes](#source-includes). An unsupported `sql_mode` is reported once, as information (3), at the
 first statement of each run in that mode.
 
 ## Initialization options
@@ -236,6 +238,39 @@ clauses apart, which is also what makes completion's inserted FROM and JOIN agre
 the formatter (JOIN one level under FROM, `ON` on its line). Completion's inserts take two
 spaces (a tab when the statement's indentation has tabs) as the level; formatting takes
 the editor's `tabSize`.
+
+## SOURCE includes
+
+MariaDB Schema Management (MSM) scripts break their sections out into files and include
+them with `SOURCE '<path>'[<start>:<end>];`, which msm_plugin's `prepare_release` replaces
+by the file's text before it cuts a release. The server reads them the same way, so the
+outline of such a script holds its own objects and those of the files it includes, in its
+context: a section without a `USE` gets the script's schema.
+
+- A directive is a line `SOURCE` (upper case), a path in `'` or `"`, an optional slice and
+  `;`; the rest of the line goes with it. It is matched as text, so also inside a routine
+  body or a comment. A relative path is relative to the document's folder (an untitled
+  document resolves absolute paths only).
+- The slice selects part of the file: none or `[:]` is the whole file; a bound is a
+  character offset as in a Python slice (code points, `\r\n` counting as one, negative from
+  the end) or a line number `lnN` (1-based, the end line included, `ln-1` the last line).
+  `[ln4:]` drops a three-line header.
+- One level only, as msm: a directive inside an included text stays as it is.
+- An included file is read from the editor when it is open there (unsaved edits count),
+  else from disk. Editing it, closing it, or a `workspace/didChangeWatchedFiles` for it
+  folds the outlines of the documents that include it again, in the background.
+- A statement that is a directive is not parsed. A statement with directive lines in it
+  (a procedure whose body includes a file) is parsed with those lines blanked. The
+  statements of an included file are checked where that file is open, not in the
+  documents that include it.
+- Diagnostics with code `source`, on the directive: a file that cannot be read (error, on
+  the path), a malformed slice such as `ln0` (error, on the slice), a slice that selects
+  nothing or an empty file (warning), a directive in the included text that msm does not
+  expand (warning). They come from the document's outline, folded in the background after
+  each check; after an edit their positions may be off by it until the next one.
+- `mariadb/outline` lists the includes and gives objects from them a `source` and
+  positions in their file ([outline-format.md](outline-format.md)). `mariadb-lsp check` and
+  `outline` expand directives too; `--no-source` reads them as SQL.
 
 ## Live connections
 
