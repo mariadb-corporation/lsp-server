@@ -27,6 +27,7 @@ checkout ../vscode-extension, else downloaded from GitHub at
 $VSCODE_EXTENSION_REF (default main). The comparison is skipped when none of
 them has an ALLOWED_SQL."""
 
+import functools
 import os
 import pathlib
 import re
@@ -59,18 +60,21 @@ CPP_TOKEN = re.compile(r'''
   | (?P<char>'(?:[^'\\\n]|\\.)*')
 ''', re.S | re.X)
 
-CPP_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\0", "\\": "\\", '"': '"', "'": "'",
-               "?": "?", "a": "\a", "b": "\b", "f": "\f", "v": "\v"}
+# The simple escapes of C++ and TypeScript string literals; any other
+# escaped character stands for itself.
+ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\0", "a": "\a", "b": "\b", "f": "\f",
+           "v": "\v"}
+BLANKS = re.compile(r"\s*")
 
 
-def unescape_cpp(body):
-    return re.sub(r"\\(.)", lambda m: CPP_ESCAPES.get(m.group(1), m.group(1)), body)
+def unescape(body):
+    return re.sub(r"\\(.)", lambda m: ESCAPES.get(m.group(1), m.group(1)), body)
 
 
 def cpp_tokens(code):
     """The C++ text with comments blanked out, and its string literals as
-    (start, end, value), in order."""
-    out, literals, pos = [], [], 0
+    {start: (end, value)}, in order."""
+    out, literals, pos = [], {}, 0
     for m in CPP_TOKEN.finditer(code):
         out.append(code[pos:m.start()])
         if m.group("line_comment") or m.group("block_comment"):
@@ -79,9 +83,9 @@ def cpp_tokens(code):
         else:
             out.append(m.group(0))
             if m.group("raw") is not None:
-                literals.append((m.start(), m.end(), m.group("raw_body")))
+                literals[m.start()] = (m.end(), m.group("raw_body"))
             elif m.group("string") is not None:
-                literals.append((m.start(), m.end(), unescape_cpp(m.group("body"))))
+                literals[m.start()] = (m.end(), unescape(m.group("body")))
         pos = m.end()
     out.append(code[pos:])
     return "".join(out), literals
@@ -90,30 +94,22 @@ def cpp_tokens(code):
 def literal_run(code, literals, at):
     """The value of the adjacent string literals starting at `at` (blanks
     between them only), and where they end; None when none starts there."""
-    starting = {start: (end, value) for start, end, value in literals}
-    pos = at
-    while pos < len(code) and code[pos].isspace():
-        pos += 1
-    if pos not in starting:
-        return None
     parts = []
-    while pos in starting:
-        end, value = starting[pos]
+    pos = BLANKS.match(code, at).end()
+    while pos in literals:
+        end, value = literals[pos]
         parts.append(value)
-        pos = end
-        while pos < len(code) and code[pos].isspace():
-            pos += 1
-    return "".join(parts), pos
+        pos = BLANKS.match(code, end).end()
+    return ("".join(parts), pos) if parts else None
 
 
 def statement_end(code, literals, at):
     """Where the statement holding offset `at` ends: its ';' at nesting depth
     0, string literals skipped."""
-    inside = {start: end for start, end, _ in literals}
     depth, pos = 0, at
     while pos < len(code):
-        if pos in inside:
-            pos = inside[pos]
+        if pos in literals:
+            pos = literals[pos][0]
             continue
         c = code[pos]
         if c in "([{":
@@ -130,11 +126,11 @@ def constant_definition(name, files):
     """The string an identifier is defined as (`... name = "a" "b";` or
     `name{"..."}`), searched in `files` ({path: (code, literals)}); None."""
     pattern = re.compile(r"\b" + re.escape(name) + r"\s*(?:=|\{|\()")
-    for path, (code, literals) in files.items():
+    for code, literals in files.values():
         for m in pattern.finditer(code):
             run = literal_run(code, literals, m.end())
             if run is not None:
-                return run[0], path
+                return run[0]
     return None
 
 
@@ -144,19 +140,17 @@ def execute_sql_calls(files):
     parsed = {path: cpp_tokens(text) for path, text in files.items()}
     calls = []
     for path, (code, literals) in parsed.items():
-        for start, end, value in literals:
+        for start, (end, value) in literals.items():
             if value != "db.execute_sql":
                 continue
             line = code.count("\n", 0, start) + 1
             stop = statement_end(code, literals, end)
             # The "sql" argument: {"sql", <expr>}.
-            key = next((e for s, e, v in literals if end <= s < stop and v == "sql"), None)
-            if key is None:
-                calls.append((path, line, None, "no \"sql\" argument found in the call"))
-                continue
-            comma = code.find(",", key, stop)
+            key = next((e for s, (e, v) in literals.items() if end <= s < stop and v == "sql"),
+                       None)
+            comma = -1 if key is None else code.find(",", key, stop)
             if comma < 0:
-                calls.append((path, line, None, "no value after \"sql\""))
+                calls.append((path, line, None, "no {\"sql\", ...} argument found in the call"))
                 continue
             run = literal_run(code, literals, comma + 1)
             if run is not None and code[run[1]] in "})":
@@ -166,11 +160,17 @@ def execute_sql_calls(files):
             if ident is not None:
                 found = constant_definition(ident.group(1), parsed)
                 if found is not None:
-                    calls.append((path, line, found[0], f"the constant {ident.group(1)}"))
+                    calls.append((path, line, found, f"the constant {ident.group(1)}"))
                     continue
             expr = " ".join(code[comma + 1:stop].split())[:80]
             calls.append((path, line, None, f"the SQL is not a string constant: {expr}"))
     return calls
+
+
+@functools.cache
+def server_calls():
+    """execute_sql_calls() of the server's sources, read once a run."""
+    return execute_sql_calls(server_sources())
 
 
 def server_sources():
@@ -193,10 +193,6 @@ TS_TOKEN = re.compile(r'''
   | (?P<other>\S)
 ''', re.S | re.X)
 
-TS_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\0", "\\": "\\", '"': '"', "'": "'",
-              "`": "`", "b": "\b", "f": "\f", "v": "\v"}
-
-
 def allowed_sql(ts):
     """The statements of ALLOWED_SQL in dbCall.ts: each entry one string
     literal, or literals joined with '+'. None when there is no list."""
@@ -211,8 +207,7 @@ def allowed_sql(ts):
             body = m.group("string")[1:-1]
             if m.group("string")[0] == "`" and "${" in body:
                 raise ValueError(f"ALLOWED_SQL has a template with a substitution: {body!r}")
-            current.append(re.sub(r"\\(.)", lambda e: TS_ESCAPES.get(e.group(1), e.group(1)),
-                                  body))
+            current.append(unescape(body))
         elif m.group("punct") == "+":
             continue
         elif m.group("punct") in (",", "]"):
@@ -241,7 +236,7 @@ def extension_dbcall():
     url = RAW_URL.format(ref=os.environ.get("VSCODE_EXTENSION_REF", "main"))
     tried.append(url)
     try:
-        with urllib.request.urlopen(url, timeout=15) as r:
+        with urllib.request.urlopen(url, timeout=5) as r:
             return r.read().decode("utf-8"), url, tried
     except (urllib.error.URLError, OSError) as e:
         tried[-1] += f" ({e})"
@@ -250,7 +245,7 @@ def extension_dbcall():
 
 class Allowed_sql(unittest.TestCase):
     def test_every_db_execute_sql_runs_a_constant(self):
-        calls = execute_sql_calls(server_sources())
+        calls = server_calls()
         self.assertTrue(calls, "no db.execute_sql call found in libs/ or src/: if the server "
                                "still runs SQL through the client, this test no longer finds it")
         for path, line, sql, how in calls:
@@ -259,7 +254,7 @@ class Allowed_sql(unittest.TestCase):
                                       "constant")
 
     def test_server_sql_is_on_the_extensions_allow_list(self):
-        calls = [c for c in execute_sql_calls(server_sources()) if c[2] is not None]
+        calls = [c for c in server_calls() if c[2] is not None]
         ts, source, tried = extension_dbcall()
         if ts is None:
             self.skipTest("vscode-extension's src/lsp/dbCall.ts not found; tried "
