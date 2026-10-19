@@ -60,15 +60,17 @@ CPP_TOKEN = re.compile(r'''
   | (?P<char>'(?:[^'\\\n]|\\.)*')
 ''', re.S | re.X)
 
-# The simple escapes of C++ and TypeScript string literals; any other
-# escaped character stands for itself.
-ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\0", "a": "\a", "b": "\b", "f": "\f",
-           "v": "\v"}
+# The simple escapes of TypeScript string literals, a backslash-newline a
+# line continuation; any other escaped character stands for itself. C++ adds
+# \a (in TypeScript "\a" is "a").
+ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\0", "b": "\b", "f": "\f", "v": "\v",
+           "\n": ""}
+CPP_ESCAPES = {**ESCAPES, "a": "\a"}
 BLANKS = re.compile(r"\s*")
 
 
-def unescape(body):
-    return re.sub(r"\\(.)", lambda m: ESCAPES.get(m.group(1), m.group(1)), body)
+def unescape(body, escapes=ESCAPES):
+    return re.sub(r"\\(.)", lambda m: escapes.get(m.group(1), m.group(1)), body, flags=re.S)
 
 
 def cpp_tokens(code):
@@ -77,15 +79,16 @@ def cpp_tokens(code):
     out, literals, pos = [], {}, 0
     for m in CPP_TOKEN.finditer(code):
         out.append(code[pos:m.start()])
-        if m.group("line_comment") or m.group("block_comment"):
-            # Blanks keep offsets; line breaks keep line numbers.
+        if m.group("line_comment") or m.group("block_comment") or m.group("char"):
+            # Blanks keep offsets; line breaks keep line numbers. A blanked
+            # char literal ('(' or ';') cannot end or nest a statement.
             out.append(re.sub(r"[^\n]", " ", m.group(0)))
         else:
             out.append(m.group(0))
             if m.group("raw") is not None:
                 literals[m.start()] = (m.end(), m.group("raw_body"))
             elif m.group("string") is not None:
-                literals[m.start()] = (m.end(), unescape(m.group("body")))
+                literals[m.start()] = (m.end(), unescape(m.group("body"), CPP_ESCAPES))
         pos = m.end()
     out.append(code[pos:])
     return "".join(out), literals
@@ -122,11 +125,12 @@ def statement_end(code, literals, at):
     return len(code)
 
 
-def constant_definition(name, files):
+def constant_definition(name, files, first):
     """The string an identifier is defined as (`... name = "a" "b";` or
-    `name{"..."}`), searched in `files` ({path: (code, literals)}); None."""
-    pattern = re.compile(r"\b" + re.escape(name) + r"\s*(?:=|\{|\()")
-    for code, literals in files.values():
+    `name{"..."}`), searched in `files` ({path: (code, literals)}), the file
+    `first` before the others; None."""
+    pattern = re.compile(r"\b" + re.escape(name) + r"\s*(?:=(?!=)|\{|\()")
+    for code, literals in [files[first]] + [v for k, v in files.items() if k != first]:
         for m in pattern.finditer(code):
             run = literal_run(code, literals, m.end())
             if run is not None:
@@ -153,12 +157,12 @@ def execute_sql_calls(files):
                 calls.append((path, line, None, "no {\"sql\", ...} argument found in the call"))
                 continue
             run = literal_run(code, literals, comma + 1)
-            if run is not None and code[run[1]] in "})":
+            if run is not None and code[run[1]:run[1] + 1] in ("}", ")"):
                 calls.append((path, line, run[0], "a literal"))
                 continue
             ident = re.match(r"\s*([A-Za-z_]\w*)\s*[})]", code[comma + 1:stop])
             if ident is not None:
-                found = constant_definition(ident.group(1), parsed)
+                found = constant_definition(ident.group(1), parsed, path)
                 if found is not None:
                     calls.append((path, line, found, f"the constant {ident.group(1)}"))
                     continue
@@ -192,6 +196,7 @@ TS_TOKEN = re.compile(r'''
   | (?P<punct>[+,\])])
   | (?P<other>\S)
 ''', re.S | re.X)
+
 
 def allowed_sql(ts):
     """The statements of ALLOWED_SQL in dbCall.ts: each entry one string
