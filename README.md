@@ -17,6 +17,16 @@ ctest --test-dir bld
 - `-DWITH_VCPKG_TRIPLET=<triplet>` (for example `arm64-osx`, `x64-linux-dynamic`) fetches vcpkg into `../vcpkg`, or uses `VCPKG_ROOT`, and installs the dependencies in `vcpkg.json`. `-DWITH_TESTS=0` leaves GoogleTest out.
 - The MariaDB client library is built from a MariaDB server tree, as in MariaDB Shell. Without options the configure step fetches the server at the commit `libs/mariadbparser` is pinned to into `../mariadb-server-lsp` and builds only the client targets there. To use an existing server build instead, pass `-DMARIADB_SOURCE_DIR=<src> -DMARIADB_BUILD_DIR=<bld>`, with `mariadbclient mysys mysys_ssl caching_sha2_password GenError` built in it. `-DWITH_MARIADB_CLIENT=OFF` builds without the client library.
 
+## Packaging
+
+`cmake --build bld --target package` (or `cpack` in the build directory) makes a zip of
+`bin/mariadb-lsp`, `LICENSE`, `README.md` and `docs/`, named as MariaDB Shell's packages are:
+`mariadb-lsp-<version>-<platform>.zip`. The platform is, for example, `macos26-arm-64bit`,
+`linux-glibc2.41-arm-64bit` or `windows-x86-64bit`, and `-DMDBLS_PLATFORM=` overrides it.
+A Debug build's zip ends in `-debug`. The binary links only system libraries, so it runs
+wherever it is copied, for example to `~/.local/bin`, where the VS Code extension looks.
+`cmake --install bld --prefix <dir>` installs the same files.
+
 ## Command line
 
 ```bash
