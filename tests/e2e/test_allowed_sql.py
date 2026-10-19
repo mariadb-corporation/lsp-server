@@ -241,7 +241,7 @@ def extension_dbcall():
     url = RAW_URL.format(ref=os.environ.get("VSCODE_EXTENSION_REF", "main"))
     tried.append(url)
     try:
-        with urllib.request.urlopen(url, timeout=5) as r:
+        with urllib.request.urlopen(url, timeout=15) as r:
             return r.read().decode("utf-8"), url, tried
     except (urllib.error.URLError, OSError) as e:
         tried[-1] += f" ({e})"
