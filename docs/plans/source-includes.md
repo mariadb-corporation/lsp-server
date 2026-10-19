@@ -14,7 +14,8 @@ MSM is the shell's `msm_plugin` (mariadb-shell-plugins). Its `prepare_release` e
 command:
 
 - A directive is a line `^[ \t]*SOURCE\s+'<path>'[<start>:<end>];<rest of line>`. `SOURCE` is
-  uppercase, the quotes are `'` or `"` and must match, and the rest of the line (a comment)
+  uppercase, the quotes are `'` or `"` and must match on the directive's line, white space is
+  ASCII (`\s` under `re.ASCII`), and the rest of the line (a comment)
   and its line break are replaced along with the directive. The scan does not know SQL: it
   also matches inside a routine body or a block comment, and it does not skip a directive
   in a `--` comment because the line must start with `SOURCE`.
@@ -188,10 +189,10 @@ Step 1 is done (2026-10-19). `source_include.{h,cc}` provides
 `find_source_directives`, `slice_source`, `expand_sources` and `Source_expansion::map`,
 with 8 unit tests (`source_include_t.cc`). On the REST project's development script,
 `expand_sources` gives the same 292,661 bytes as msm's own expansion (without msm's
-indentation). Two deviations from msm's regular expression are deliberate:
+indentation).
 
-- the path ends at a matching quote on the directive's line, which keeps the scan linear;
-- `\s` is ASCII white space.
+The scan keeps the path on the directive's line (which keeps it linear) and takes `\s` as
+ASCII white space. msm's regular expression was changed to match it, in the same PR.
 
 The msm fix and the line numbers are mariadb-shell-plugins PR #60 (`wip/msm-source-lines`),
 with a unit test; `test_prepare_release` and `test_msm_sections` still pass, and the REST

@@ -44,8 +44,8 @@ struct Source_directive {
   std::string start, end;        // the slice bounds as written; "" when empty
 };
 
-// Every directive of `text`, in order.  As msm's regular expression, except
-// that the path ends at a matching quote on the directive's line and `\s`
+// Every directive of `text`, in order, as msm's regular expression matches
+// them: the path ends at a matching quote on the directive's line, and `\s`
 // is ASCII white space.
 std::vector<Source_directive> find_source_directives(std::string_view text);
 
