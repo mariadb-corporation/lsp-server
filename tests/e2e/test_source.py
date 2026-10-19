@@ -16,9 +16,9 @@
 """End-to-end tests of MSM SOURCE directives: the outline, diagnostics,
 navigation and links take in the files a script includes."""
 
+import json
 import os
 import pathlib
-import json
 import shutil
 import subprocess
 import sys
@@ -415,6 +415,7 @@ class Source_dir_cli(unittest.TestCase):
         r = self.run_cli("split", "--source-dir", str(self.DEV), "-", stdin="")
         self.assertEqual(r.returncode, 2)
         self.assertIn("goes with check, outline and format", r.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

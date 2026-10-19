@@ -26,7 +26,7 @@ mariadb-lsp check --format json FILE...
 mariadb-lsp outline FILE          # the schema objects the file defines, as JSON
                                   # (check and outline expand MSM SOURCE directives;
                                   # --no-source reads them as SQL; --source-dir DIR
-                                  # takes relative paths from DIR, as for stdin)
+                                  # takes relative paths from DIR, e.g. for stdin)
 mariadb-lsp format FILE           # the file with its queries laid out, to stdout
 mariadb-lsp format --line-width 100 --keyword-case lower FILE
 mariadb-lsp split FILE            # the statements: position, kind, delimiter, sql_mode
