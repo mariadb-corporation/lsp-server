@@ -21,6 +21,7 @@
 #include <cerrno>
 #include <charconv>
 #include <cstring>
+#include <exception>
 
 #ifdef _WIN32
 #include <fcntl.h>
@@ -124,12 +125,20 @@ bool Message_reader::next(std::string *body) {
   const size_t buffered = std::min(length, m_buf.size() - m_pos);
   body->assign(m_buf, m_pos, buffered);
   m_pos += buffered;
-  body->resize(length);
+  // The body grows with what arrives, so a length that no data follows
+  // costs no memory; one no buffer can hold ends the input, as a malformed
+  // header does.
+  constexpr size_t k_step = size_t{64} << 20;
   size_t have = buffered;
-  while (have < length) {
-    const size_t n = m_in.read(body->data() + have, length - have);
-    if (n == 0) return false;
-    have += n;
+  try {
+    while (have < length) {
+      if (body->size() == have) body->resize(have + std::min(length - have, std::max(k_step, have)));
+      const size_t n = m_in.read(body->data() + have, body->size() - have);
+      if (n == 0) return false;
+      have += n;
+    }
+  } catch (const std::exception &) {
+    return false;
   }
   return true;
 }

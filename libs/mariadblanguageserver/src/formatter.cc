@@ -428,6 +428,9 @@ class Builder {
       parts.push_back(text(std::string(c.text)));
       parts.push_back(c.line_after ? line_break() : text(c.space_after ? " " : ""));
     }
+    // A soft break keeps its place after the comments: `( /* c */` and
+    // `x /* c */` still break before the query and before `)`.
+    if (kind == Sep::soft && !g.comments.back().line_after) parts.push_back(softline());
     return concat(std::move(parts));
   }
 
@@ -642,8 +645,9 @@ class Builder {
       if (tail.empty()) continue;
       if (has_on) {
         Piece on = build(kids[k]);
+        // A comment ending the ON line breaks it at the ON's level.
         joined.push_back(group(concat({nest(o_.indent, separator(on.first, Sep::line)), std::move(on.doc),
-                                       separator(tail.first, Sep::space), std::move(tail.doc)})));
+                                       nest(o_.indent, separator(tail.first, Sep::space)), std::move(tail.doc)})));
       } else {
         joined.push_back(separator(tail.first, Sep::space));
         joined.push_back(std::move(tail.doc));
@@ -786,8 +790,10 @@ std::optional<Text_edit> format_statement(std::string_view text, uint32_t st_beg
   const Doc doc = builder.statement(select, original.find('\n') != std::string_view::npos);
 
   // At the indentation and the column of the line the statement starts on.
+  // A statement that spans lines keeps its own line break; one on a single
+  // line takes the document's (`eol`).
   const uint32_t line_start = line_begin(text, b);
-  Printer printer(options.line_width, eol);
+  Printer printer(options.line_width, original.find('\n') != std::string_view::npos ? eol_of(original) : eol);
   std::string out = printer.print(doc, indentation(text, b), char_count(text.substr(line_start, b - line_start)));
   if (out == original) return std::nullopt;
 
@@ -805,7 +811,8 @@ std::optional<Text_edit> format_statement(std::string_view text, uint32_t st_beg
 std::vector<Text_edit> format_sql(std::string_view text, const Statement_index &index, uint32_t begin,
                                   uint32_t end, Parser_cache &cache, const Format_options &options) {
   std::vector<Text_edit> edits;
-  // The document's line break: a statement on one line has none of its own.
+  // The document's line break, for a statement on one line, which has none
+  // of its own.
   const std::string_view eol = eol_of(text);
   const auto &stmts = index.statements();
   for (size_t i = index.find(begin); i < stmts.size(); ++i) {

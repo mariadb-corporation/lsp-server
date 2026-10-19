@@ -208,8 +208,8 @@ std::string place_clauses(std::string_view text, uint32_t begin, uint32_t body_e
   // The statement's line break; a statement on one line takes the one
   // ending that line, or the document's when nothing ends it.
   const size_t nl = text.find('\n', body_end);
-  const std::string_view eol =
-      nl == std::string_view::npos ? eol_of(text) : eol_of(text.substr(begin, nl + 1 - begin));
+  const std::string_view lines = text.substr(begin, (nl == std::string_view::npos ? text.size() : nl + 1) - begin);
+  const std::string_view eol = lines.find('\n') != std::string_view::npos ? eol_of(lines) : eol_of(text);
   const std::string_view unit = indent_unit(indent);
   std::string out;
   for (const auto &c : clauses) {
@@ -531,7 +531,7 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
         if (std::string_view(kind) == "function" && !quoted) {
           const std::string name = quote_identifier(h.routine->name);
           b.add(h.routine->name, Completion_kind::routine, rank, detail, {},
-                options.snippets ? name + "($0)" : name, options.snippets);
+                options.snippets ? snippet_escape(name) + "($0)" : name, options.snippets);
         } else {
           b.add(h.routine->name, Completion_kind::routine, rank, detail);
         }
@@ -741,8 +741,9 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
           // ON the first foreign key between it and a table in scope, in
           // the order the tables are listed.
           std::string on;
-          for (const auto &t : tables()) {
-            const auto other = resolve(t);
+          for (size_t k = 0; k < tables().size(); ++k) {
+            const Table_ref &t = tables()[k];
+            const auto &other = resolved()[k];
             if (other.table == nullptr) continue;
             const std::string them = quote_identifier(t.visible_name());
             if (h.table != nullptr) {
@@ -767,11 +768,14 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
           // n:m: a table with a foreign key to the new one and one to a
           // table in scope links them; it is joined first, then the new
           // table on it.  Looked for among the tables of either schema.
-          for (const auto &t : tables()) {
-            const auto other = resolve(t);
+          for (size_t k = 0; k < tables().size(); ++k) {
+            const Table_ref &t = tables()[k];
+            const auto &other = resolved()[k];
             if (other.table == nullptr || h.table == nullptr) continue;
             std::vector<Added_clause> link;
-            for (const std::string &where : {schema, schema_of(other)}) {
+            std::vector<std::string> wheres{schema};
+            if (!iequals(schema_of(other), schema)) wheres.push_back(schema_of(other));
+            for (const std::string &where : wheres) {
               catalogs.for_each_table(where, [&](const Catalog_view::Table_hit &l) {
                 if (!link.empty() || l.table == nullptr || l.table == h.table || l.table == other.table) {
                   return;
@@ -953,8 +957,7 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
         // with a foreign key to or from a table in scope first.
         if (can_add_table && query.has_from) {
           std::string schema = catalogs.current_schema();
-          for (const auto &t : tables()) {
-            const auto h = resolve(t);
+          for (const auto &h : resolved()) {
             if (h.table != nullptr || h.view != nullptr) {
               schema = schema_of(h);
               break;

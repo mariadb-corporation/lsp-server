@@ -160,6 +160,40 @@ class Diagnostics(Lsp_test):
         c.notify("textDocument/didClose", {"textDocument": {"uri": URI}})
         self.assertEqual(c.diagnostics(URI, after=mark), [])
 
+    def test_a_new_delimiter_reaches_open_documents(self):
+        c = self.client
+        c.initialize()
+        own = "file:///own.sql"
+        c.open(URI, "SELECT 1$$\nSELECT 2$$\n")
+        self.assertNotEqual(c.diagnostics(URI, 1), [])
+        # A document whose delimiter the client set keeps it.
+        c.open(own, "SELECT 1;\n")
+        c.notify("mariadb/documentContext", {"textDocument": {"uri": own}, "delimiter": ";"})
+        c.diagnostics(own, 1)
+        mark = c.mark()
+        c.notify("workspace/didChangeConfiguration", {"settings": {"mariadb": {"delimiter": "$$"}}})
+        c.wait_notification("textDocument/publishDiagnostics",
+                            lambda p: p["uri"] == URI and p["diagnostics"] == [], 30, mark)
+        mark = c.mark()
+        c.change(own, 2, [{"text": "SELECT 1;\nSELECT 2;\n"}])
+        self.assertEqual(c.diagnostics(own, 2, after=mark), [])
+
+    def test_reopening_a_document_ends_its_progress(self):
+        c = self.client
+        c.initialize({"progressThreshold": 1}, capabilities={"window": {"workDoneProgress": True}})
+        text = SAKILA * 100
+        c.open(URI, text)
+        c.wait_notification("$/progress", lambda p: p["value"]["kind"] == "begin")
+        c.open(URI, text, version=2)
+        c.wait_notification("mariadb/parseProgress", lambda p: p["version"] == 2 and p["done"], 120)
+        with c.cond:
+            begun = [m["params"]["token"] for _, m in c.notifications
+                     if m["method"] == "$/progress" and m["params"]["value"]["kind"] == "begin"]
+        self.assertEqual(len(begun), 2)
+        for token in begun:
+            c.wait_notification("$/progress",
+                                lambda p, t=token: p["token"] == t and p["value"]["kind"] == "end")
+
     def test_many_quick_edits(self):
         c = self.client
         c.initialize({"debounceMs": 20})

@@ -635,6 +635,26 @@ TEST(Completion, added_lines_end_as_the_statement_s_do) {
             "  LEFT OUTER JOIN test_schema.t2 AS t2 ON t2.t1_id = t.id;");
 }
 
+TEST(Completion, added_lines_end_as_the_statement_s_do_in_a_document_with_other_endings) {
+  // A CRLF line elsewhere, an LF statement at the end with nothing after it.
+  const auto r = complete_at(
+      "-- crlf\r\n" + std::string(k_fk_schema) + "SELECT t.id,\n  test_schema.t2.|\nFROM test_schema.t1 AS t;",
+      false);
+  EXPECT_EQ(pick(r, "t1_id"),
+            "SELECT t.id,\n  t2.t1_id\nFROM test_schema.t1 AS t\n"
+            "  LEFT OUTER JOIN test_schema.t2 AS t2 ON t2.t1_id = t.id;");
+}
+
+TEST(Completion, a_function_name_is_escaped_in_its_snippet) {
+  const auto r = complete_at(
+      "CREATE FUNCTION shop.calc$total(a INT) RETURNS INT RETURN 1;\nUSE shop;\nSELECT calc|;", false, 2000,
+      true);
+  const auto *it = r.item("calc$total");
+  ASSERT_NE(it, nullptr);
+  EXPECT_EQ(it->insert_text, "calc\\$total($0)");
+  EXPECT_TRUE(it->snippet);
+}
+
 TEST(Completion, added_keywords_follow_the_keyword_case) {
   const auto f = complete_at(std::string(k_fk_schema) + "SELECT test_schema.t1.|;", false, 2000, false, 80, false);
   EXPECT_EQ(pick(f, "id"), "SELECT t.id from test_schema.t1 as t;");

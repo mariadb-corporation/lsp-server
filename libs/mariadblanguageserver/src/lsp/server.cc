@@ -241,6 +241,7 @@ struct Open_document {
   bool explicit_connection = false;
   bool explicit_mode = false;
   bool explicit_version = false;
+  bool explicit_delimiter = false;
 
   Open_document(std::string u, std::string text, int64_t version, Index_options o)
       : uri(std::move(u)), doc(std::move(text), version, std::move(o)) {}
@@ -782,7 +783,9 @@ struct Server::Impl {
   }
 
   // Sends a request to the client; its answer comes through the future.
-  std::future<Client_reply> client_request(const char *method, const std::string &params_json) {
+  // `id_out`, when given, gets the request's raw id, for forget_request().
+  std::future<Client_reply> client_request(const char *method, const std::string &params_json,
+                                           std::string *id_out = nullptr) {
     auto promise = std::make_shared<std::promise<Client_reply>>();
     auto future = promise->get_future();
     std::string id;
@@ -795,6 +798,7 @@ struct Server::Impl {
       id = "\"mdbls-" + std::to_string(next_client_request++) + "\"";
       pending.emplace(id, promise);
     }
+    if (id_out != nullptr) *id_out = id;
     send([&](Json_writer &w) {
       w.Key("id");
       w.RawValue(id.c_str(), id.size(), rapidjson::kStringType);
@@ -804,6 +808,13 @@ struct Server::Impl {
       w.RawValue(params_json.c_str(), params_json.size(), rapidjson::kObjectType);
     });
     return future;
+  }
+
+  // Stops waiting for the answer to request `id`: one that comes later is
+  // dropped.
+  void forget_request(const std::string &id) {
+    std::lock_guard lock(pending_mutex);
+    pending.erase(id);
   }
 
   // Answers every request still waiting: the server is going down.
@@ -854,7 +865,10 @@ struct Server::Impl {
     auto text = string_at(params, {"textDocument", "text"});
     const Json *version = path(params, {"textDocument", "version"});
     if (!uri || !text) return;
-    if (auto it = documents.find(*uri); it != documents.end()) cancel_passes(*it->second);
+    if (auto it = documents.find(*uri); it != documents.end()) {
+      cancel_passes(*it->second);
+      end_progress(*it->second);
+    }
     log("didOpen " + *uri + ": indexing");
     const size_t bytes = text->size();
     auto d = std::make_unique<Open_document>(*uri, std::move(*text),
@@ -922,6 +936,7 @@ struct Server::Impl {
     if (d == nullptr) return;
     if (string_at(params, {"sqlMode"})) d->explicit_mode = true;
     if (string_at(params, {"serverVersion"})) d->explicit_version = true;
+    if (const auto v = string_at(params, {"delimiter"}); v && !v->empty()) d->explicit_delimiter = true;
     if (const Json *c = member(params, "connection")) {
       d->explicit_connection = true;
       if (c->IsString() && c->GetStringLength() > 0) {
@@ -1015,11 +1030,16 @@ struct Server::Impl {
       w.Key("arguments");
       w.RawValue(arguments.c_str(), arguments.size(), rapidjson::kObjectType);
       w.EndObject();
-      auto future = client_request("mariadb/dbCall", std::string(buf.GetString(), buf.GetSize()));
+      std::string id;
+      auto future = client_request("mariadb/dbCall", std::string(buf.GetString(), buf.GetSize()), &id);
       const auto deadline = Clock::now() + k_db_call_timeout;
       while (future.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) {
-        if (cancelled()) return Tool_failure{"cancelled", false};
+        if (cancelled()) {
+          forget_request(id);
+          return Tool_failure{"cancelled", false};
+        }
         if (Clock::now() > deadline) {
+          forget_request(id);
           return Tool_failure{"the client did not answer within " +
                                   std::to_string(k_db_call_timeout.count()) + " s",
                               false};
@@ -1132,6 +1152,7 @@ struct Server::Impl {
     for (auto &[uri, d] : documents) {
       if (moved && !d->explicit_connection) d->live = now;
       Index_options o = d->doc.options();
+      if (!d->explicit_delimiter) o.delimiter = options.defaults.delimiter;
       apply_server_options(*d, o);
       set_options(*d, o, true);
     }

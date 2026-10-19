@@ -154,6 +154,16 @@ TEST(Formatter, comments_stay_before_the_token_after_them) {
   EXPECT_EQ(layout("SELECT a +\n  -- note\n  b\nFROM t;"), "SELECT a +\n         -- note\n         b\nFROM t;");
   EXPECT_EQ(layout("SELECT * FROM t WHERE x IN ( -- why\nSELECT 1);"),
             "SELECT *\nFROM t\nWHERE x IN ( -- why\n  SELECT 1\n);");
+  // A block comment next to a parenthesis keeps the breaks around the query.
+  EXPECT_EQ(layout("SELECT * FROM t WHERE x IN (/* c */ SELECT aaaa FROM bbbb WHERE ccccc = dddd AND "
+                   "eeeeeeeeeeeee = fffffffffff AND ggggggggggggg = hhhhh /* d */);"),
+            "SELECT *\nFROM t\nWHERE x IN ( /* c */\n  SELECT aaaa\n  FROM bbbb\n  WHERE ccccc = dddd\n"
+            "    AND eeeeeeeeeeeee = fffffffffff\n    AND ggggggggggggg = hhhhh /* d */\n);");
+  EXPECT_EQ(layout("SELECT * FROM t WHERE x IN (/* c */ SELECT 1 /* d */);"),
+            "SELECT * FROM t WHERE x IN ( /* c */ SELECT 1 /* d */);");
+  // A comment ending the ON line: the condition stays at the ON's level.
+  EXPECT_EQ(layout("SELECT a FROM t JOIN u ON -- c\nt.a = u.a;"),
+            "SELECT a\nFROM t\n  JOIN u\n    ON -- c\n    t.a = u.a;");
   // Any blank after "--" makes a comment, before the query too.
   EXPECT_EQ(layout("--\tlead\nselect a,b from t;"), "--\tlead\nSELECT a, b FROM t;");
 }
@@ -177,6 +187,8 @@ TEST(Formatter, the_indentation_and_line_endings_of_the_statement_are_kept) {
   // A statement on one line breaks the way the document's lines end.
   EXPECT_EQ(layout("SELECT a FROM t WHERE b = 1;\r\nSELECT 1;\r\n", 20),
             "SELECT a\r\nFROM t\r\nWHERE b = 1;\r\nSELECT 1;\r\n");
+  // A statement on several lines keeps its own, whatever the document's.
+  EXPECT_EQ(layout("-- crlf\r\nSELECT a FROM t\nWHERE b = 1;"), "-- crlf\r\nSELECT a\nFROM t\nWHERE b = 1;");
   EXPECT_EQ(layout("SELECT *\nFROM a\nJOIN b ON a.id = b.id;", 80, true, "\t"),
             "SELECT *\nFROM a\n\tJOIN b ON a.id = b.id;");
 }
