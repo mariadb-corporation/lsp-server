@@ -326,6 +326,7 @@ TEST(Workspace_catalog, file_uris) {
   EXPECT_EQ(file_uri_to_path("untitled:Untitled-1"), "");
   EXPECT_EQ(path_to_file_uri("/home/a/b c.sql"), "file:///home/a/b%20c.sql");
   EXPECT_EQ(path_to_file_uri("c:\\x\\y.sql"), "file:///c%3A/x/y.sql");
+  EXPECT_EQ(path_to_file_uri("C:/x/y.sql"), "file:///c%3A/x/y.sql");
 }
 
 TEST(Catalog_view, layers_hide_later_ones) {

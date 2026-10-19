@@ -32,7 +32,8 @@ namespace mdbls {
 // "file:///home/a/b%20c.sql" -> "/home/a/b c.sql"; "file:///c%3A/x" ->
 // "c:/x".  "" for a URI that is not a file URI.
 std::string file_uri_to_path(std::string_view uri);
-// The file URI of an absolute path, percent-encoded as VS Code writes it.
+// The file URI of an absolute path, percent-encoded as VS Code writes it,
+// a drive letter in lower case.
 std::string path_to_file_uri(std::string_view path);
 
 // A path as catalogs and includes compare them: links resolved as far as

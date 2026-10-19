@@ -70,6 +70,10 @@ std::string file_uri_to_path(std::string_view uri) {
 std::string path_to_file_uri(std::string_view path) {
   std::string p(path);
   std::replace(p.begin(), p.end(), '\\', '/');
+  // A drive letter in lower case, as VS Code writes it: "C:/x" is file:///c%3A/x.
+  if (p.size() >= 2 && p[1] == ':' && std::isalpha(static_cast<unsigned char>(p[0]))) {
+    p[0] = static_cast<char>(std::tolower(static_cast<unsigned char>(p[0])));
+  }
   std::string out = "file://";
   if (p.empty() || p[0] != '/') out.push_back('/');
   out += percent_encode(p, "/");

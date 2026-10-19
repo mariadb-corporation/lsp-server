@@ -23,6 +23,7 @@ import sys
 import tempfile
 import time
 import unittest
+import urllib.parse
 
 sys.path.insert(0, os.path.dirname(__file__))
 from lsp_client import Client  # noqa: E402
@@ -36,6 +37,21 @@ def position_of(text, needle, offset=0):
     at = text.index(needle) + offset
     before = text[:at]
     return {"line": before.count("\n"), "character": len(before) - (before.rfind("\n") + 1)}
+
+
+def uri_path(uri):
+    """A file URI's path, decoded, a drive letter in lower case: what two
+    spellings of one file's URI share (the server writes `file:///c%3A/x`
+    as VS Code does, Python's as_uri() `file:///C:/x`)."""
+    path = urllib.parse.unquote(urllib.parse.urlparse(uri).path)
+    if len(path) > 2 and path[0] == "/" and path[2] == ":":
+        path = "/" + path[1].lower() + path[2:]
+    return path
+
+
+def by_path(edits):
+    """A WorkspaceEdit's changes keyed by uri_path()."""
+    return {uri_path(uri): e for uri, e in edits.items()}
 
 
 def find_symbol(symbols, name):
@@ -152,7 +168,8 @@ class Source_includes(unittest.TestCase):
               "position": position_of(self.text, "customer;", 2)}
         locs = self.client.request("textDocument/definition", at)
         self.assertEqual(len(locs), 1)
-        self.assertEqual(locs[0]["uri"], (self.dev / "sections" / "140_tables.sql").as_uri())
+        self.assertEqual(uri_path(locs[0]["uri"]),
+                         uri_path((self.dev / "sections" / "140_tables.sql").as_uri()))
         self.assertEqual(locs[0]["range"]["start"], {"line": 2, "character": 13})
         # The hover says which file defines it.
         hover = self.client.request("textDocument/hover", at)
@@ -170,16 +187,17 @@ class Source_includes(unittest.TestCase):
                                  "170_roles.sql": [0], "shop_next.sql": [16]})
         self.client.request("textDocument/prepareRename", at)
         edits = self.client.request("textDocument/rename", {**at, "newName": "client"})["changes"]
-        tables = edits[(self.dev / "sections" / "140_tables.sql").as_uri()]
+        edits = by_path(edits)
+        tables = edits[uri_path((self.dev / "sections" / "140_tables.sql").as_uri())]
         self.assertEqual([e["range"]["start"] for e in tables],
                          [{"line": 2, "character": 13}, {"line": 6, "character": 12},
                           {"line": 10, "character": 39}])
         self.assertEqual({e["newText"] for e in tables}, {"client"})
-        self.assertEqual(len(edits[self.uri]), 1)
+        self.assertEqual(len(edits[uri_path(self.uri)]), 1)
         # Workspace symbols point into the included file too.
         found = self.client.request("workspace/symbol", {"query": "customer_orders"})
-        self.assertEqual([s["location"]["uri"] for s in found],
-                         [(self.dev / "sections" / "150_routines.sql").as_uri()])
+        self.assertEqual([uri_path(s["location"]["uri"]) for s in found],
+                         [uri_path((self.dev / "sections" / "150_routines.sql").as_uri())])
 
     def test_path_completion(self):
         def complete(text, trigger=None):
@@ -286,9 +304,12 @@ class Source_includes(unittest.TestCase):
         prepared = self.client.request("textDocument/prepareRename", at)
         self.assertEqual(prepared["range"]["start"], {"line": 2, "character": 13})
         edits = self.client.request("textDocument/rename", {**at, "newName": "client"})["changes"]
+        # The requesting file under the URI its client gave, as is.
         self.assertEqual(len(edits[tables_uri]), 3)
-        self.assertEqual(len(edits[self.uri]), 1)
-        self.assertEqual(len(edits[(self.dev / "sections" / "150_routines.sql").as_uri()]), 1)
+        edits = by_path(edits)
+        self.assertEqual(len(edits[uri_path(self.uri)]), 1)
+        self.assertEqual(
+            len(edits[uri_path((self.dev / "sections" / "150_routines.sql").as_uri())]), 1)
 
     def test_document_links(self):
         self.client.open(self.uri, self.text)
