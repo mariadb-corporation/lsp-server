@@ -1933,18 +1933,22 @@ struct Server::Impl {
 
   // Folds the outline in the background when the document has SOURCE
   // directives, for their diagnostics; clears those when it has none now.
+  // Whether it has any comes from the statements' checks, kept across
+  // edits: no scan of the text, and no snapshot held for a document
+  // without directives (which would make the next edit copy its text).
   void schedule_include_scan(Open_document &d) {
-    const bool had = !d.includes.empty() || !d.source_problems.empty();
-    request_pool->submit(k_priority_cold, [this, snap = d.doc.snapshot(), cache = d.outline,
-                                           had](Parser_cache &) {
-      if (!find_source_directives(*snap->text).empty()) {
-        (void)outline_of(*snap, *cache);
-      } else if (had) {
-        inbox->post([this, uri = cache->uri, generation = snap->generation] {
-          on_outline_includes(uri, generation, {}, {}, {});
-        });
-      }
+    const auto &checks = d.doc.checks();
+    const bool has = std::any_of(checks.begin(), checks.end(), [](const Statement_check &c) {
+      return c.has_source_directives;
     });
+    if (!has) {
+      if (!d.includes.empty() || !d.source_problems.empty() || !d.include_contexts.empty()) {
+        on_outline_includes(d.uri, d.doc.snapshot()->generation, {}, {}, {});
+      }
+      return;
+    }
+    request_pool->submit(k_priority_cold, [this, snap = d.doc.snapshot(), cache = d.outline](
+                                              Parser_cache &) { (void)outline_of(*snap, *cache); });
   }
 
   void on_initialized() {

@@ -31,6 +31,14 @@ namespace {
 void check_one(std::string_view text, const Statement_index &index, const Statement &s,
                Parser_cache &cache, unsigned long version_id, bool source_directives,
                Statement_check *out) {
+  const auto directives = source_directives ? find_source_directives(text, s.begin, s.end)
+                                             : std::vector<Source_directive>{};
+  out->has_source_directives = !directives.empty();
+  if (!directives.empty() && directives.front().statement.begin == s.begin &&
+      directives.front().statement.end >= s.body_end) {
+    out->status = Check_status::source_directive;
+    return;
+  }
   mdbp_parser *p = cache.get(index.modes()[s.mode].mode, version_id);
   if (p == nullptr) {
     out->status = Check_status::unsupported_mode;
@@ -38,14 +46,7 @@ void check_one(std::string_view text, const Statement_index &index, const Statem
   }
   std::string_view sql = index.text_of(text, s);
   std::string blanked;
-  if (const auto directives = source_directives ? find_source_directives(text, s.begin, s.end)
-                                                : std::vector<Source_directive>{};
-      !directives.empty()) {
-    const auto &d = directives.front();
-    if (d.statement.begin == s.begin && d.statement.end >= s.body_end) {
-      out->status = Check_status::source_directive;
-      return;
-    }
+  if (!directives.empty()) {
     // Blanks, not removed: the offsets stay those of the text.
     blanked = sql;
     for (const auto &dir : directives) {

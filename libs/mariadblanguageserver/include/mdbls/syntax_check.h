@@ -48,6 +48,10 @@ struct Statement_check {
   uint32_t error_length = 0;
   std::string error_token;
   std::vector<std::string> expected;
+  // The statement is, or holds, an MSM SOURCE directive (source_include.h):
+  // kept with the verdict, so whether a document has any is known without
+  // scanning it.
+  bool has_source_directives = false;
 };
 
 struct Check_options {
