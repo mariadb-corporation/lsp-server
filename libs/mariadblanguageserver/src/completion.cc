@@ -696,20 +696,20 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
                                                                             : quote_identifier(schema) + ".") +
               quote_identifier(name);
           std::vector<Text_edit> edits{{qual_begin, word_begin, alias + "."}};
-          // The edit adding `clauses` at `at`, laid out.  What the item
+          // The edit adding `clauses` at `where`, laid out.  What the item
           // writes on that line besides counts towards its width: the
           // alias for the qualifiers and the column (its longest name).
-          auto add = [&](uint32_t at, std::string_view indent, const std::vector<Added_clause> &clauses) {
+          auto add = [&](uint32_t where, std::string_view indent, const std::vector<Added_clause> &clauses) {
             int64_t extra = 0;
-            if (line_begin(text, at) == line_begin(text, word_begin)) {
+            if (line_begin(text, where) == line_begin(text, word_begin)) {
               size_t longest = 0;
               for (const auto &c : cols) longest = std::max(longest, char_count(quote_identifier(c.name)));
               extra = static_cast<int64_t>(char_count(alias) + 1 + longest) -
                       static_cast<int64_t>(char_count(text.substr(qual_begin, out.replace_end - qual_begin)));
             }
-            edits.push_back(
-                {at, at, place_clauses(text, begin, body_end, at, indent, clauses, extra, options.line_width,
-                                          indent_unit(indent, options.indent))});
+            edits.push_back({where, where,
+                             place_clauses(text, begin, body_end, where, indent, clauses, extra,
+                                           options.line_width, indent_unit(indent, options.indent))});
             return edits;
           };
           auto joined = [&](const std::string &table, const std::string &as, const std::string &on) {

@@ -178,8 +178,9 @@ TEST_P(Lex_fixture, tokens_match) {
 
 INSTANTIATE_TEST_SUITE_P(
     Fixtures, Lex_fixture, ::testing::ValuesIn(load_cases()),
-    [](const ::testing::TestParamInfo<Lex_case> &info) {
-      std::string name = info.param.id;
+    // Not `info`: the macro's own parameter has that name (GCC's -Wshadow).
+    [](const ::testing::TestParamInfo<Lex_case> &param_info) {
+      std::string name = param_info.param.id;
       for (auto &ch : name) {
         if (!std::isalnum(static_cast<unsigned char>(ch))) ch = '_';
       }

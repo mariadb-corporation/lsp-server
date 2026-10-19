@@ -27,6 +27,9 @@ All are marked `lsp-server:` in the source.
 - `utils_lexing.h`: reduced to the three lookup tables in `namespace internal` that the
   splitter uses; the shell's span helpers and its `utils_string.h` include are gone.
 - `utils_mysql_parsing.cc`:
+  - `<cstring>` is included: the file calls `memchr`, `memmove` and `strlen`, which
+    GCC 14 does not reach through the other includes (the shell's build gets it from
+    `utils_string.h`);
   - the includes of `scoped_contexts.h` and `utils_string.h` are removed; a local
     `namespace shcore` provides the two helpers the file calls, `str_ibeginswith()` and
     `str_format()`;

@@ -35,6 +35,7 @@
 
 #include <cctype>
 #include <cstdarg>
+#include <cstring>  // lsp-server: memchr, memmove, strlen (GCC needs it)
 #include <cstdio>
 #include <stdexcept>
 #include <string>
