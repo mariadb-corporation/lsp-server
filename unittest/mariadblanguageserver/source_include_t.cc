@@ -21,7 +21,12 @@
 #include <string>
 #include <string_view>
 
+#include "mdbls/outline.h"
+#include "mdbls/parser_pool.h"
 #include "mdbls/source_include.h"
+#include "mdbls/statement_index.h"
+#include "mdbls/workspace_catalog.h"
+#include "test_util.h"
 
 namespace mdbls {
 
@@ -44,6 +49,18 @@ Source_reader files(std::map<std::string, std::string> f) {
     *text = it->second;
     return true;
   };
+}
+
+const std::string k_msm_dir = std::string(MDBLS_SQL_FIXTURE_DIR) + "/msm/development";
+
+Parser_pool &pool() {
+  static Parser_pool p(2);
+  return p;
+}
+
+// The line (1-based) an origin starts on, in the text it points into.
+uint32_t line_of(std::string_view text, const Origin &o) {
+  return Line_map(text).position(text, o.statement.begin).line + 1;
 }
 
 }  // namespace
@@ -243,6 +260,101 @@ TEST(Source_include, expansion_errors) {
   EXPECT_TRUE(none.empty());
   EXPECT_TRUE(none.text.empty());
   EXPECT_EQ(5u, none.map(5).offset);
+}
+
+TEST(Source_include, outline_of_an_msm_script) {
+  const std::string text = test::read_fixture("msm/development/shop_next.sql");
+  ASSERT_FALSE(text.empty());
+  const auto outline = build_outline(expand_sources(text, k_msm_dir), pool(), Index_options{});
+  ASSERT_EQ(4u, outline.includes.size());
+  EXPECT_EQ(k_msm_dir + "/sections/140_tables.sql", outline.includes[0].path);
+
+  // The sections have no USE: their objects are in the script's schema.
+  const Schema *shop = outline.catalog.find("shop");
+  ASSERT_NE(nullptr, shop);
+  ASSERT_EQ(3u, shop->tables.size());
+  const Table *customer = shop->table("customer");
+  ASSERT_NE(nullptr, customer);
+  ASSERT_EQ(3u, customer->columns.size());  // the ALTER TABLE's email too
+
+  // Origins point into the file each object is defined in.
+  const auto &tables = outline.includes[0];
+  EXPECT_EQ(1u, customer->origin.source);
+  EXPECT_EQ(3u, line_of(tables.text, customer->origin));
+  EXPECT_EQ("customer", cut(tables.text, customer->origin.name));
+  EXPECT_EQ(1u, customer->columns[2].origin.source);
+  EXPECT_EQ(7u, line_of(tables.text, customer->columns[2].origin));
+  const Table *note = shop->table("note");
+  ASSERT_NE(nullptr, note);
+  EXPECT_EQ(4u, note->origin.source);
+
+  // A function in DELIMITER %% of an include, a view after it.
+  const Routine *count = shop->routine("order_count");
+  ASSERT_NE(nullptr, count);
+  EXPECT_EQ(2u, count->origin.source);
+  EXPECT_EQ("order_count", cut(outline.includes[1].text, count->origin.name));
+  const View *view = shop->view("customer_orders");
+  ASSERT_NE(nullptr, view);
+  EXPECT_EQ(2u, view->origin.source);
+
+  // The procedure whose body has a directive is the script's, its range
+  // spanning that directive.
+  const Routine *restore = shop->routine("restore_roles");
+  ASSERT_NE(nullptr, restore);
+  EXPECT_EQ(0u, restore->origin.source);
+  const auto proc = cut(text, restore->origin.statement);
+  EXPECT_EQ(0u, proc.find("CREATE PROCEDURE restore_roles()"));
+  EXPECT_NE(std::string_view::npos, proc.find("SOURCE './sections/170_roles.sql';\nEND"));
+
+  // Notes: an ALTER of an unknown table in an include sits on its directive
+  // and names the file and line; so does a directive msm does not expand.
+  ASSERT_EQ(2u, outline.notes.size());
+  const auto at_directive = [&](size_t k) { return outline.includes[k].directive.statement.begin; };
+  EXPECT_EQ(at_directive(0), outline.notes[0].first);
+  EXPECT_EQ(0u, outline.notes[0].second.find("140_tables.sql:13: ")) << outline.notes[0].second;
+  EXPECT_EQ(at_directive(3), outline.notes[1].first);
+  EXPECT_EQ("180_extra.sql:2: SOURCE './deeper.sql' not expanded: msm expands one level only",
+            outline.notes[1].second);
+}
+
+TEST(Source_include, outline_notes_unreadable_include) {
+  const std::string text = "USE s;\nSOURCE 'missing.sql';\nCREATE TABLE t (a INT);\n";
+  const auto outline = build_outline(expand_sources(text, "/nowhere"), pool(), Index_options{});
+  ASSERT_EQ(1u, outline.notes.size());
+  EXPECT_EQ(text.find("SOURCE"), outline.notes[0].first);
+  EXPECT_EQ("not read: cannot read /nowhere/missing.sql", outline.notes[0].second);
+  const Schema *s = outline.catalog.find("s");
+  ASSERT_NE(nullptr, s);
+  ASSERT_EQ(1u, s->tables.size());
+  EXPECT_EQ("t", cut(text, s->tables[0].origin.name));
+}
+
+TEST(Source_include, workspace_folds_an_included_file_once) {
+  // The script and its sections folder listed: the sections come in only
+  // through the script's directives, so in its schema and only once.
+  std::vector<std::string> errors;
+  const auto paths = expand_catalog_paths({"shop_next.sql", "sections"}, k_msm_dir, &errors);
+  ASSERT_TRUE(errors.empty());
+  ASSERT_EQ(5u, paths.size());
+  const auto ws = build_workspace_catalog(paths, pool(), Index_options{});
+  const Schema *shop = ws.outline.catalog.find("shop");
+  ASSERT_NE(nullptr, shop);
+  EXPECT_EQ(3u, shop->tables.size());
+  EXPECT_EQ(nullptr, ws.outline.catalog.find(""));
+  const Table *customer = shop->table("customer");
+  ASSERT_NE(nullptr, customer);
+  const auto &file = ws.files.at(customer->origin.source);
+  EXPECT_NE(std::string::npos, file.path.find("/sections/140_tables.sql")) << file.path;
+  EXPECT_EQ("customer", cut(file.text, customer->origin.name));
+  // No file entry was added: every include is listed.
+  EXPECT_EQ(5u, ws.files.size());
+
+  // The script alone: the included files are added as sources.
+  const auto alone = build_workspace_catalog({paths[0]}, pool(), Index_options{});
+  ASSERT_EQ(5u, alone.files.size());
+  const Table *c = alone.outline.catalog.find("shop")->table("customer");
+  ASSERT_NE(nullptr, c);
+  EXPECT_EQ("customer", cut(alone.files.at(c->origin.source).text, c->origin.name));
 }
 
 }  // namespace mdbls

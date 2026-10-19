@@ -145,12 +145,48 @@ Workspace_catalog build_workspace_catalog(const std::vector<std::string> &paths,
     f.lines = Line_map(f.text);
     out.files.push_back(std::move(f));
   }
+  // SOURCE directives are expanded.  A listed file that another listed file
+  // includes is folded only through that include, so its objects are there
+  // once, in the context of the script that includes it.
+  const size_t listed = out.files.size();
+  std::vector<Source_expansion> expansions(listed);
+  std::set<std::string> included;
+  for (size_t k = 0; k < listed; ++k) {
+    const auto &f = out.files[k];
+    expansions[k] = expand_sources(f.text, fs::path(f.path).parent_path().generic_string());
+    for (const auto &inc : expansions[k].includes) {
+      const std::string path = catalog_path(inc.path);
+      if (inc.error.empty() && path != f.path) included.insert(path);
+    }
+  }
+  // An included file is a source too: the file entry of its path, added
+  // after the listed ones when it is not listed.
+  auto source_of = [&out](const Source_include &inc) {
+    const std::string path = catalog_path(inc.path);
+    for (size_t k = 0; k < out.files.size(); ++k)
+      if (out.files[k].path == path) return static_cast<uint32_t>(k);
+    Workspace_file f;
+    f.path = path;
+    f.uri = path_to_file_uri(path);
+    f.text = inc.text;
+    f.lines = inc.lines;
+    out.files.push_back(std::move(f));
+    return static_cast<uint32_t>(out.files.size() - 1);
+  };
   // Each file is split and folded in order; the files' texts stay put, so
   // the origins point into them.
-  for (size_t k = 0; k < out.files.size(); ++k) {
-    const auto &f = out.files[k];
-    const auto index = Statement_index::build_parallel(f.text, options, 0);
-    fold_outline(out.outline, f.text, index, pool, oo, static_cast<uint32_t>(k));
+  for (size_t k = 0; k < listed; ++k) {
+    if (included.contains(out.files[k].path)) continue;
+    const auto &e = expansions[k];
+    if (e.empty()) {
+      const auto &f = out.files[k];
+      const auto index = Statement_index::build_parallel(f.text, options, 0);
+      fold_outline(out.outline, f.text, index, pool, oo, static_cast<uint32_t>(k));
+      continue;
+    }
+    std::vector<uint32_t> sources;
+    for (const auto &inc : e.includes) sources.push_back(inc.error.empty() ? source_of(inc) : 0);
+    fold_outline(out.outline, e, pool, options, oo, static_cast<uint32_t>(k), sources);
   }
   return out;
 }

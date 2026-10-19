@@ -95,6 +95,64 @@ void fold_outline(Outline &out, std::string_view text, const Statement_index &in
             [](const auto &a, const auto &b) { return a.first < b.first; });
 }
 
+void fold_outline(Outline &out, const Source_expansion &e, Parser_pool &pool,
+                  const Index_options &index_options, const Outline_options &options,
+                  uint32_t source, const std::vector<uint32_t> &include_sources) {
+  // Origins of this fold are marked, then mapped back.
+  constexpr uint32_t k_pending = UINT32_MAX;
+  const size_t first_note = out.notes.size();
+  const auto index = Statement_index::build_parallel(e.text, index_options, 0);
+  fold_outline(out, e.text, index, pool, options, k_pending);
+
+  auto to_source = [&](uint32_t s) { return s == 0 ? source : include_sources[s - 1]; };
+  out.catalog.for_each_origin([&](Origin &o) {
+    if (o.source != k_pending) return;
+    const auto statement = e.map(o.statement);
+    const auto name = e.map(o.name);
+    o.statement = statement.range;
+    o.name = name.source == statement.source ? name.range : statement.range;
+    o.source = to_source(statement.source);
+  });
+
+  // "140_tables.sql:12" for an offset in include k.
+  auto where = [&](const Source_include &inc, uint32_t offset) {
+    const auto slash = inc.path.find_last_of('/');
+    return inc.path.substr(slash == std::string::npos ? 0 : slash + 1) + ":" +
+           std::to_string(inc.lines.position(inc.text, offset).line + 1);
+  };
+  for (size_t k = first_note; k < out.notes.size(); ++k) {
+    auto &[at, message] = out.notes[k];
+    const auto loc = e.map(at);
+    if (loc.source == 0) {
+      at = loc.offset;
+    } else {
+      const auto &inc = e.includes[loc.source - 1];
+      at = inc.directive.statement.begin;
+      message = where(inc, loc.offset) + ": " + message;
+    }
+  }
+  for (const auto &inc : e.includes) {
+    const uint32_t at = inc.directive.statement.begin;
+    if (!inc.error.empty()) out.notes.push_back({at, "not read: " + inc.error});
+    for (const auto &n : inc.nested) {
+      out.notes.push_back({at, where(inc, n.statement.begin) + ": SOURCE '" + n.file +
+                                   "' not expanded: msm expands one level only"});
+    }
+  }
+  std::stable_sort(out.notes.begin() + static_cast<std::ptrdiff_t>(first_note), out.notes.end(),
+                   [](const auto &a, const auto &b) { return a.first < b.first; });
+}
+
+Outline build_outline(Source_expansion expansion, Parser_pool &pool,
+                      const Index_options &index_options, const Outline_options &options) {
+  Outline out;
+  std::vector<uint32_t> sources(expansion.includes.size());
+  for (size_t k = 0; k < sources.size(); ++k) sources[k] = static_cast<uint32_t>(k + 1);
+  fold_outline(out, expansion, pool, index_options, options, 0, sources);
+  out.includes = std::move(expansion.includes);
+  return out;
+}
+
 namespace {
 
 using Writer = rapidjson::Writer<rapidjson::StringBuffer>;

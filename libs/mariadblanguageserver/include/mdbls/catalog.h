@@ -20,6 +20,7 @@
 
 #include <compare>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -212,6 +213,9 @@ class Catalog {
 
   // The source index new origins get (see Origin); 0 by default.
   void set_source(uint32_t source) { m_source = source; }
+  // Calls `f` on every origin in the catalog, for moving the offsets of an
+  // expanded text back to their files.
+  void for_each_origin(const std::function<void(Origin &)> &f);
 
   // A catalog made of `schemas` as they are, for one read from a server.
   static Catalog from_schemas(std::vector<Schema> schemas);

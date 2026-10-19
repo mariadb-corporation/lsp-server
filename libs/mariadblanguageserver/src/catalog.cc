@@ -148,6 +148,34 @@ const Schema *Catalog::find(std::string_view n) const {
   return it == m_schemas.end() ? nullptr : &*it;
 }
 
+void Catalog::for_each_origin(const std::function<void(Origin &)> &f) {
+  for (auto &s : m_schemas) {
+    f(s.origin);
+    for (auto &t : s.tables) {
+      f(t.origin);
+      for (auto &c : t.columns) f(c.origin);
+      for (auto &i : t.indexes) f(i.origin);
+      for (auto &k : t.foreign_keys) f(k.origin);
+      for (auto &c : t.checks) f(c.origin);
+    }
+    for (auto &v : s.views) f(v.origin);
+    for (auto &r : s.routines) f(r.origin);
+    for (auto &t : s.triggers) f(t.origin);
+    for (auto &e : s.events) f(e.origin);
+    for (auto &q : s.sequences) f(q.origin);
+  }
+  for (auto &svc : m_services) {
+    f(svc.origin);
+    for (auto &rs : svc.schemas) {
+      f(rs.origin);
+      for (auto &o : rs.objects) f(o.origin);
+    }
+    for (auto &c : svc.content_sets) f(c.origin);
+  }
+  for (auto *list : {&m_auth_apps, &m_roles, &m_users})
+    for (auto &o : *list) f(o.origin);
+}
+
 Catalog Catalog::from_schemas(std::vector<Schema> schemas) {
   Catalog c;
   c.m_schemas = std::move(schemas);

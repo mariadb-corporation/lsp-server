@@ -27,6 +27,7 @@
 #include "mdbls/catalog.h"
 #include "mdbls/line_map.h"
 #include "mdbls/parser_pool.h"
+#include "mdbls/source_include.h"
 #include "mdbls/statement_index.h"
 
 namespace mdbls {
@@ -37,6 +38,9 @@ struct Outline {
   size_t applied = 0;         // of those, the ones that did
   // (statement offset, message): DDL that could not be applied
   std::vector<std::pair<uint32_t, std::string>> notes;
+  // The SOURCE directives of a document's outline: an origin with source k
+  // points into the text of includes[k - 1].
+  std::vector<Source_include> includes;
 };
 
 struct Outline_options {
@@ -55,6 +59,23 @@ Outline build_outline(std::string_view text, const Statement_index &index, Parse
 // record (Origin::source).
 void fold_outline(Outline &outline, std::string_view text, const Statement_index &index,
                   Parser_pool &pool, const Outline_options &options = {}, uint32_t source = 0);
+
+// build_outline for a text with SOURCE directives: `expansion` is
+// expand_sources() of it, `index_options` the options its index was built
+// with.  The expanded text is indexed and folded, every origin and note is
+// mapped back to where it came from, and the includes go to
+// Outline::includes.
+Outline build_outline(Source_expansion expansion, Parser_pool &pool,
+                      const Index_options &index_options, const Outline_options &options = {});
+
+// fold_outline for an expanded text: origins in the including text get
+// `source`, those in include k get include_sources[k - 1].  A note on an
+// included statement moves to its directive and names the file and line;
+// an include that could not be read, and a directive msm does not expand
+// because it is in an included text, get a note at their directive too.
+void fold_outline(Outline &outline, const Source_expansion &expansion, Parser_pool &pool,
+                  const Index_options &index_options, const Outline_options &options,
+                  uint32_t source, const std::vector<uint32_t> &include_sources);
 
 // The outline as JSON, format 1; positions are LSP positions (0-based line,
 // UTF-16 column).  docs/outline-format.md describes it.

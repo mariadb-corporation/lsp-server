@@ -49,6 +49,9 @@ struct Workspace_file {
 // The schema objects a set of SQL files define, folded file by file in the
 // order given, as one script: a later file's ALTER changes an earlier
 // file's table.  An Origin's `source` is the index of its file in `files`.
+// SOURCE directives are expanded: the files they include follow the listed
+// ones in `files`, and a listed file that another listed file includes is
+// folded only through that include.
 struct Workspace_catalog {
   std::vector<Workspace_file> files;
   Outline outline;

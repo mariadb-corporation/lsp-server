@@ -191,6 +191,14 @@ with 8 unit tests (`source_include_t.cc`). On the REST project's development scr
 `expand_sources` gives the same 292,661 bytes as msm's own expansion (without msm's
 indentation).
 
+Step 2 is done (2026-10-19). Three pieces:
+
+- `build_outline(Source_expansion, ...)` and the expansion overload of `fold_outline` fold the expanded text with a placeholder source, then map the origins carrying it back through `Catalog::for_each_origin`.
+- Notes in an included text move to their directive and name the file and line (`140_tables.sql:13: ...`). An unreadable include and a nested directive get a note at their directive.
+- The workspace catalog expands its files, adds included files to `files`, and folds a listed file that another listed file includes only through that include.
+
+Fixture: `tests/fixtures/sql/msm/` (a script, four sections, a body-level and a nested directive); 3 more unit tests. On the REST project the library gives the numbers in §1, each object in its section file, in about 29 ms (debug build).
+
 The scan keeps the path on the directive's line (which keeps it linear) and takes `\s` as
 ASCII white space. msm's regular expression was changed to match it, in the same PR.
 
