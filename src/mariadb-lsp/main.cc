@@ -136,8 +136,9 @@ const char *const k_usage =
     "                     (default: mariadb-shell on PATH)\n"
     "  --threads N        check: parser threads (default: one per CPU core)\n"
     "  --max-errors N     check: stop listing errors after N per file (default 100)\n"
-    "  --no-source        check: take MSM SOURCE directives for SQL: do not read\n"
-    "                     the files they include, and report them as errors\n"
+    "  --no-source        check, outline: take MSM SOURCE directives for SQL: do\n"
+    "                     not read the files they include (check: report them as\n"
+    "                     errors)\n"
     "  --log FILE         lsp: write a log to FILE\n"
     "  --stdio            lsp: talk on stdin and stdout (the only transport)\n"
     "  --mcp              lsp: read connections' catalogs through the client, which\n"
@@ -1154,7 +1155,11 @@ int main(int argc, char **argv) {
     } else if (o->command == "outline") {
       mdbls::Outline_options oo;
       oo.version_id = o->index.version_id;
-      const auto outline = mdbls::build_outline(text, index, *pool, oo);
+      auto expansion = o->source ? mdbls::expand_sources(text, source_dir(file))
+                                 : mdbls::Source_expansion{};
+      const auto outline = expansion.empty()
+                               ? mdbls::build_outline(text, index, *pool, oo)
+                               : mdbls::build_outline(std::move(expansion), *pool, o->index, oo);
       std::cout << mdbls::outline_json(outline, text, lines, file) << '\n';
     } else {
       std::string out;

@@ -153,8 +153,9 @@ using Writer = rapidjson::Writer<rapidjson::StringBuffer>;
 
 class Json_outline {
  public:
-  Json_outline(Writer &w, std::string_view text, const Line_map &lines)
-      : w_(w), text_(text), lines_(lines) {}
+  Json_outline(Writer &w, std::string_view text, const Line_map &lines,
+               const std::vector<Source_include> &includes)
+      : w_(w), text_(text), lines_(lines), includes_(includes) {}
 
   void str(const char *key, const std::string &v) {
     w_.Key(key);
@@ -187,7 +188,19 @@ class Json_outline {
     w_.Key(key);
     lsp::write_range(w_, text_, lines_, r.begin, r.end);
   }
+  // An object from an included file: `source` is its index in `includes`,
+  // its ranges are positions in that file.
   void origin(const Origin &o) {
+    if (o.source > 0 && o.source <= includes_.size()) {
+      const auto &inc = includes_[o.source - 1];
+      w_.Key("source");
+      w_.Uint(o.source - 1);
+      w_.Key("range");
+      lsp::write_range(w_, inc.text, inc.lines, o.statement.begin, o.statement.end);
+      w_.Key("selection_range");
+      lsp::write_range(w_, inc.text, inc.lines, o.name.begin, o.name.end);
+      return;
+    }
     range("range", o.statement);
     range("selection_range", o.name);
   }
@@ -380,6 +393,7 @@ class Json_outline {
   Writer &w_;
   std::string_view text_;
   const Line_map &lines_;
+  const std::vector<Source_include> &includes_;
 };
 
 }  // namespace
@@ -388,7 +402,7 @@ std::string outline_json(const Outline &outline, std::string_view text, const Li
                          std::string_view file) {
   rapidjson::StringBuffer buf;
   Writer w(buf);
-  Json_outline j(w, text, lines);
+  Json_outline j(w, text, lines, outline.includes);
   w.StartObject();
   w.Key("format");
   w.Uint(1);
@@ -401,6 +415,23 @@ std::string outline_json(const Outline &outline, std::string_view text, const Li
   }
   w.EndArray();
   j.rest(outline.catalog);
+  if (!outline.includes.empty()) {
+    // The files SOURCE directives include, in order.
+    w.Key("includes");
+    w.StartArray();
+    for (const auto &inc : outline.includes) {
+      const auto &d = inc.directive;
+      w.StartObject();
+      j.str_or_null("file", inc.path);
+      j.range("range", d.statement);
+      j.str_or_null("slice", d.slice.end > d.slice.begin
+                                 ? std::string(text.substr(d.slice.begin, d.slice.end - d.slice.begin))
+                                 : std::string());
+      if (!inc.error.empty()) j.str("error", inc.error);
+      w.EndObject();
+    }
+    w.EndArray();
+  }
   w.Key("statements");
   w.StartObject();
   w.Key("ddl");

@@ -105,6 +105,22 @@ class Source_includes(unittest.TestCase):
         self.assertEqual(restore["range"]["start"], position_of(self.text, "CREATE PROCEDURE"))
         self.assertNotIn("·", restore.get("detail", ""))
 
+    def test_outline_json(self):
+        self.client.open(self.uri, self.text)
+        o = self.client.request("mariadb/outline", {"textDocument": {"uri": self.uri}})
+        self.assertEqual([pathlib.Path(i["file"]).name for i in o["includes"]],
+                         ["140_tables.sql", "150_routines.sql", "170_roles.sql", "180_extra.sql"])
+        self.assertEqual(o["includes"][0]["slice"], "[ln3:ln-2]")
+        self.assertEqual(o["includes"][0]["range"]["start"],
+                         position_of(self.text, "SOURCE './sections/140"))
+        tables = {t["name"]: t for t in o["schemas"][0]["tables"]}
+        # Positions in the included file, which `source` names.
+        self.assertEqual(tables["customer"]["source"], 0)
+        self.assertEqual(tables["customer"]["selection_range"]["start"], {"line": 2, "character": 13})
+        self.assertEqual(tables["note"]["source"], 3)
+        procs = {r["name"]: r for r in o["schemas"][0]["routines"]}
+        self.assertNotIn("source", procs["restore_roles"])
+
     def test_diagnostics(self):
         self.client.open(self.uri, self.text)
         diags = self.diagnostics_until(lambda d: any(x.get("code") == "source" for x in d))

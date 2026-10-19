@@ -193,6 +193,13 @@ with 8 unit tests (`source_include_t.cc`). On the REST project's development scr
 `expand_sources` gives the same 292,661 bytes as msm's own expansion (without msm's
 indentation).
 
+Step 5 is done together with step 4 (2026-10-19), because the server's expanded outlines need it in `mariadb/outline`. Outline JSON format 1 gains:
+
+- `includes`: `file`, `range` (the directive), `slice` (as written, or null) and `error`;
+- `source` on an object from an include, its index in `includes`, with `range` and `selection_range` in that file.
+
+`mariadb-lsp outline` expands directives, and `--no-source` turns that off. On the REST project script, the CLI gives the numbers in §1 with 11 includes. One more e2e test (`test_outline_json`). Still to check: whether the vscode-extension's reader of `mariadb/outline` handles `source`.
+
 Step 4 is done (2026-10-19). The server:
 
 - **Outline:** `outline_of` expands the document's directives, relative to its folder. An included file is read from the editor's text when it is open, else from disk (`Include_texts`, kept by the loop thread to the open documents that some document includes).
@@ -204,7 +211,7 @@ Step 4 is done (2026-10-19). The server:
   - Rename refuses an included object, naming its file and line.
   - New: `textDocument/documentLink` on every directive's path.
 
-6 e2e tests (`tests/e2e/test_source.py`) cover these. On the REST project script the server lists 168 objects under `mariadb_rest_service` (35 ms for the first `documentSymbol`), publishes no diagnostics, and gives 11 links.
+e2e tests (`tests/e2e/test_source.py`) cover these. On the REST project script the server lists 168 objects under `mariadb_rest_service` (35 ms for the first `documentSymbol`), publishes no diagnostics, and gives 11 links.
 
 Step 3 is done (2026-10-19), for the library and the CLI:
 
