@@ -115,12 +115,14 @@ every segment maps 1:1.
   - a warning when the slice selects nothing.
 - A nested directive in an included file gets a warning at the including directive: msm
   will not expand it.
-- A statement that contains directive lines (the procedure) is checked in its expanded
-  form. Errors inside included text are reported at the directive's line, with the file and
-  line where they really are. An unreadable include gets the same error as at the top
-  level, and the statement is not checked.
+- A statement that contains directive lines (the procedure) is parsed with those lines
+  blanked to spaces, so its offsets stay those of the document. (The first draft checked it
+  expanded. Blanking keeps the check a pure function of the document's text, as the
+  incremental checks on the parser threads need, and follows the rule below.)
 - The included files' own statements get no diagnostics in the including document. They
   get them when the file itself is opened.
+- `Check_options::source_directives` (CLI `--no-source`) turns all of this off: directives
+  are then checked as SQL.
 
 ### 3.5 Server
 
@@ -190,6 +192,14 @@ Step 1 is done (2026-10-19). `source_include.{h,cc}` provides
 with 8 unit tests (`source_include_t.cc`). On the REST project's development script,
 `expand_sources` gives the same 292,661 bytes as msm's own expansion (without msm's
 indentation).
+
+Step 3 is done (2026-10-19), for the library and the CLI:
+
+- `Check_status::source_directive`: a statement that is a directive is not parsed. A statement with directive lines in it is parsed with them blanked. `find_source_directives(text, from, to)` limits the search to one statement, so checking a dump stays linear.
+- `source_problems(expansion)` lists the errors (unreadable file on the path, malformed slice on the slice) and the warnings (nothing selected, a nested directive).
+- `mariadb-lsp check` reports these problems: errors in `errors`, warnings in `warnings` and as `warning:` lines. `--no-source` checks directives as SQL.
+- The server already gets the new check status. Its `publishDiagnostics` adds the problems in step 4, which brings the server's expansion and reader.
+- 3 more unit tests. The REST project's development script checks without a diagnostic (exit 0).
 
 Step 2 is done (2026-10-19). Three pieces:
 

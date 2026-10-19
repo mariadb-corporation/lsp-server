@@ -25,6 +25,7 @@
 #include "mdbls/parser_pool.h"
 #include "mdbls/source_include.h"
 #include "mdbls/statement_index.h"
+#include "mdbls/syntax_check.h"
 #include "mdbls/workspace_catalog.h"
 #include "test_util.h"
 
@@ -355,6 +356,93 @@ TEST(Source_include, workspace_folds_an_included_file_once) {
   const Table *c = alone.outline.catalog.find("shop")->table("customer");
   ASSERT_NE(nullptr, c);
   EXPECT_EQ("customer", cut(alone.files.at(c->origin.source).text, c->origin.name));
+}
+
+TEST(Source_include, directives_in_one_statement) {
+  const std::string text = "SELECT 1;\n  SOURCE 'a.sql';\nSELECT 2;\nSOURCE 'b.sql';";
+  // Only those starting in the range, the text around deciding line starts.
+  const auto in_middle = find_source_directives(text, text.find("SOURCE"), text.find("SELECT 2"));
+  ASSERT_EQ(1u, in_middle.size());
+  EXPECT_EQ("a.sql", in_middle[0].file);
+  EXPECT_EQ(text.find("  SOURCE"), in_middle[0].line.begin);
+  EXPECT_TRUE(find_source_directives(text, 0, text.find("SOURCE")).empty());
+  const auto last = find_source_directives(text, text.find("SELECT 2"), text.size());
+  ASSERT_EQ(1u, last.size());
+  EXPECT_EQ("b.sql", last[0].file);
+}
+
+TEST(Source_include, syntax_check) {
+  const std::string text =
+      "USE s;\n"
+      "SOURCE './a.sql'[ln2:]; -- tables\n"
+      "DELIMITER %%\n"
+      "CREATE PROCEDURE p()\n"
+      "BEGIN\n"
+      "  SOURCE './roles.sql'; -- in the body\n"
+      "END%%\n"
+      "CREATE PROCEDURE q()\n"
+      "BEGIN\n"
+      "  SOURCE './roles.sql';\n"
+      "  SELECT FROM;\n"
+      "END%%\n"
+      "DELIMITER ;\n";
+  const auto index = Statement_index::build(text);
+  const auto checks = check_statements(text, index, pool());
+  std::vector<std::pair<std::string, Check_status>> sql;
+  for (size_t i = 0; i < checks.size(); ++i) {
+    const auto &st = index.statements()[i];
+    if (st.kind != Statement_kind::sql) continue;
+    sql.push_back({std::string(text.substr(st.begin, 8)), checks[i].status});
+  }
+  ASSERT_EQ(4u, sql.size());
+  EXPECT_EQ(Check_status::ok, sql[0].second);
+  // The directive is not parsed; the procedure is, without its directive.
+  EXPECT_EQ(Check_status::source_directive, sql[1].second);
+  EXPECT_EQ(Check_status::ok, sql[2].second);
+  // An error after a directive is found where it is.
+  ASSERT_EQ(Check_status::syntax_error, sql[3].second);
+  size_t q = 0;
+  while (index.statements()[q].begin != text.find("CREATE PROCEDURE q")) ++q;
+  EXPECT_EQ(text.find("FROM;"), checks[q].error_offset);
+
+  // As plain SQL, the directives are errors.
+  Check_options plain;
+  plain.source_directives = false;
+  const auto as_sql = check_statements(text, index, pool(), plain);
+  size_t errors = 0;
+  for (const auto &c : as_sql) errors += c.status == Check_status::syntax_error ? 1 : 0;
+  EXPECT_EQ(3u, errors);
+}
+
+TEST(Source_include, problems) {
+  const std::string text =
+      "SOURCE 'missing.sql'; -- gone\n"
+      "SOURCE 'a.sql'[ln0:];\n"
+      "SOURCE 'a.sql'[5:];\n"
+      "SOURCE 'empty.sql';\n"
+      "SOURCE 'nests.sql'[:];\n"
+      "SOURCE 'a.sql';\n";
+  const auto e = expand_sources(text, "/d", files({{"/d/a.sql", "x;\n"},
+                                                   {"/d/empty.sql", ""},
+                                                   {"/d/nests.sql", "y;\nSOURCE 'z.sql';\n"}}));
+  const auto problems = source_problems(e);
+  ASSERT_EQ(5u, problems.size());
+  EXPECT_TRUE(problems[0].error);
+  EXPECT_EQ("missing.sql", cut(text, problems[0].range));
+  EXPECT_EQ("cannot read /d/missing.sql", problems[0].message);
+  EXPECT_TRUE(problems[1].error);
+  EXPECT_EQ("[ln0:]", cut(text, problems[1].range));
+  EXPECT_FALSE(problems[2].error);
+  EXPECT_EQ("[5:]", cut(text, problems[2].range));
+  EXPECT_EQ("the slice selects nothing of a.sql", problems[2].message);
+  EXPECT_FALSE(problems[3].error);
+  EXPECT_EQ("SOURCE 'empty.sql';", cut(text, problems[3].range));
+  EXPECT_EQ("empty.sql is empty", problems[3].message);
+  EXPECT_FALSE(problems[4].error);
+  EXPECT_EQ("SOURCE 'nests.sql'[:];", cut(text, problems[4].range));
+  EXPECT_EQ("nests.sql line 2 has SOURCE 'z.sql', which msm does not expand: it expands one "
+            "level only",
+            problems[4].message);
 }
 
 }  // namespace mdbls

@@ -35,6 +35,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -57,6 +58,7 @@
 #include "mdbls/lsp/transport.h"
 #include "mdbls/outline.h"
 #include "mdbls/parser_pool.h"
+#include "mdbls/source_include.h"
 #include "mdbls/sql_mode.h"
 #include "mdbls/statement_index.h"
 #include "mdbls/syntax_check.h"
@@ -134,6 +136,8 @@ const char *const k_usage =
     "                     (default: mariadb-shell on PATH)\n"
     "  --threads N        check: parser threads (default: one per CPU core)\n"
     "  --max-errors N     check: stop listing errors after N per file (default 100)\n"
+    "  --no-source        check: take MSM SOURCE directives for SQL: do not read\n"
+    "                     the files they include, and report them as errors\n"
     "  --log FILE         lsp: write a log to FILE\n"
     "  --stdio            lsp: talk on stdin and stdout (the only transport)\n"
     "  --mcp              lsp: read connections' catalogs through the client, which\n"
@@ -169,6 +173,7 @@ struct Options {
   bool version_given = false;
   mdbls::Format_options format;
   std::string indent;  // --indent; "": not given
+  bool source = true;  // expand MSM SOURCE directives (--no-source: not)
 };
 
 // The --connection server's catalog, read once.
@@ -374,6 +379,14 @@ struct Check_summary {
   size_t errors = 0;
 };
 
+// The folder relative SOURCE paths of `file` are relative to; "" for stdin.
+std::string source_dir(const std::string &file) {
+  if (file == "-") return {};
+  std::error_code ec;
+  const auto abs = std::filesystem::absolute(file, ec);
+  return (ec ? std::filesystem::path(file) : abs).parent_path().generic_string();
+}
+
 // Checks one file; writes text lines to `out` or one object to `w`.
 Check_summary run_check(const Options &o, const std::string &file, const std::string &text,
                         const mdbls::Line_map &lines, const mdbls::Statement_index &index,
@@ -381,6 +394,7 @@ Check_summary run_check(const Options &o, const std::string &file, const std::st
                         rapidjson::Writer<rapidjson::StringBuffer> *w) {
   mdbls::Check_options copts;
   copts.version_id = o.index.version_id;
+  copts.source_directives = o.source;
   const auto results = mdbls::check_statements(text, index, pool, copts);
 
   Check_summary sum;
@@ -401,8 +415,22 @@ Check_summary run_check(const Options &o, const std::string &file, const std::st
   if (index.open_at_end() != mdbls::Open_context::none) ++sum.errors;
   for (const auto &e : index.errors()) notes.push_back({0, e});
 
+  // MSM SOURCE directives: the files they include must be there, the
+  // slices right.  Their statements are not parsed (Check_status).
+  std::vector<mdbls::Source_problem> source_errors;
+  std::vector<mdbls::Name_issue> issues;  // warnings
+  if (o.source) {
+    for (auto &p : mdbls::source_problems(mdbls::expand_sources(text, source_dir(file)))) {
+      if (p.error) {
+        ++sum.errors;
+        source_errors.push_back(std::move(p));
+      } else {
+        issues.push_back({0, p.range, std::move(p.message)});
+      }
+    }
+  }
+
   // With --connection: the tables and columns the server does not have.
-  std::vector<mdbls::Name_issue> issues;
   if (g_live) {
     mdbls::Outline_options oo;
     oo.version_id = o.index.version_id;
@@ -414,7 +442,8 @@ Check_summary run_check(const Options &o, const std::string &file, const std::st
     mdbls::Reference_options ro;
     ro.version_id = o.index.version_id;
     ro.initial_schema = g_live->server.current_schema;
-    issues = mdbls::unknown_names(text, index, view, pool, ro);
+    auto unknown = mdbls::unknown_names(text, index, view, pool, ro);
+    issues.insert(issues.end(), unknown.begin(), unknown.end());
   }
 
   auto pos = [&](uint32_t off) { return lines.position(text, off); };
@@ -465,8 +494,25 @@ Check_summary run_check(const Options &o, const std::string &file, const std::st
       w->EndArray();
       w->EndObject();
     }
+    for (const auto &p : source_errors) {
+      w->StartObject();
+      w->Key("start");
+      write_position(*w, pos(p.range.begin));
+      w->Key("offset");
+      w->Uint(p.range.begin);
+      w->Key("length");
+      w->Uint(p.range.end - p.range.begin);
+      w->Key("token");
+      w->String("SOURCE");
+      w->Key("message");
+      w->String(p.message.c_str());
+      w->Key("expected");
+      w->StartArray();
+      w->EndArray();
+      w->EndObject();
+    }
     w->EndArray();
-    if (g_live) {
+    if (g_live || !issues.empty()) {
       w->Key("warnings");
       w->StartArray();
       for (const auto &is : issues) {
@@ -514,6 +560,7 @@ Check_summary run_check(const Options &o, const std::string &file, const std::st
     *out += where(static_cast<uint32_t>(text.size())) +
             ": error: the file ends inside an unterminated " + open + "\n";
   }
+  for (const auto &p : source_errors) *out += where(p.range.begin) + ": error: " + p.message + "\n";
   for (const auto &is : issues) *out += where(is.range.begin) + ": warning: " + is.message + "\n";
   for (const auto &n : notes) *out += where(n.offset) + ": note: " + n.message + "\n";
   return sum;
@@ -756,6 +803,8 @@ std::optional<Options> parse_args(int argc, char **argv) {
       const auto n = number();
       if (!n) return std::nullopt;
       o.threads = static_cast<unsigned>(*n);
+    } else if (arg == "--no-source") {
+      o.source = false;
     } else if (arg == "--max-errors") {
       const auto n = number();
       if (!n) return std::nullopt;

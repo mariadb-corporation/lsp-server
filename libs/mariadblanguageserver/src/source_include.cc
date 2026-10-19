@@ -152,19 +152,27 @@ int64_t parse_number(std::string_view s) {
 }  // namespace
 
 std::vector<Source_directive> find_source_directives(std::string_view text) {
+  return find_source_directives(text, 0, text.size());
+}
+
+std::vector<Source_directive> find_source_directives(std::string_view text, size_t from,
+                                                     size_t to) {
   std::vector<Source_directive> out;
-  size_t from = 0;
+  // Only `SOURCE`s starting before `to` are looked for, so a statement's
+  // search does not run over the rest of a dump.
+  const std::string_view searched = text.substr(0, std::min(to + 5, text.size()));
+  size_t last_end = 0;  // of the previous match: matches do not overlap
   for (;;) {
-    const size_t at = text.find("SOURCE", from);
-    if (at == std::string_view::npos) break;
+    const size_t at = searched.find("SOURCE", from);
+    if (at >= to) break;
     size_t line_begin = at;
     while (line_begin > 0 && (text[line_begin - 1] == ' ' || text[line_begin - 1] == '\t'))
       --line_begin;
     const bool at_line_start =
         line_begin == 0 || text[line_begin - 1] == '\n' || text[line_begin - 1] == '\r';
-    if (at_line_start && line_begin >= from) {
+    if (at_line_start && line_begin >= last_end) {
       if (auto d = match_at(text, line_begin, at)) {
-        from = d->line.end;
+        from = last_end = d->line.end;
         out.push_back(std::move(*d));
         continue;
       }
@@ -231,6 +239,31 @@ Source_expansion::Located_range Source_expansion::map(Range range) const {
   return {0, {b.offset, std::max(b.offset, stop)}};
 }
 
+std::vector<Source_problem> source_problems(const Source_expansion &e) {
+  std::vector<Source_problem> out;
+  for (const auto &inc : e.includes) {
+    const auto &d = inc.directive;
+    const bool has_slice = d.slice.end > d.slice.begin;
+    const Range slice = has_slice ? d.slice : d.statement;
+    if (!inc.error.empty()) {
+      out.push_back({inc.read ? slice : d.path, true, inc.error});
+      continue;
+    }
+    if (inc.selected.end == inc.selected.begin) {
+      out.push_back({slice, false,
+                     has_slice ? "the slice selects nothing of " + d.file : d.file + " is empty"});
+    }
+    for (const auto &n : inc.nested) {
+      out.push_back({d.statement, false,
+                     d.file + " line " +
+                         std::to_string(inc.lines.position(inc.text, n.statement.begin).line + 1) +
+                         " has SOURCE '" + n.file +
+                         "', which msm does not expand: it expands one level only"});
+    }
+  }
+  return out;
+}
+
 Source_expansion expand_sources(std::string_view text, const std::string &base_dir,
                                 const Source_reader &read) {
   Source_expansion out;
@@ -252,8 +285,8 @@ Source_expansion expand_sources(std::string_view text, const std::string &base_d
       inc.error = "the path is relative, and the document is not in a folder";
     } else {
       inc.path = (fs::path(base_dir) / file).lexically_normal().generic_string();
-      const bool ok = read ? read(inc.path, &inc.text) : read_sql_file(inc.path, &inc.text);
-      if (!ok) {
+      inc.read = read ? read(inc.path, &inc.text) : read_sql_file(inc.path, &inc.text);
+      if (!inc.read) {
         inc.text.clear();
         inc.error = "cannot read " + inc.path;
       }

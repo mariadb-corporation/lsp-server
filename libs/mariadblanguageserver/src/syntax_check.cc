@@ -21,6 +21,7 @@
 #include <cctype>
 #include <utility>
 
+#include "mdbls/source_include.h"
 #include "mdbparse.h"
 
 namespace mdbls {
@@ -28,13 +29,35 @@ namespace mdbls {
 namespace {
 
 void check_one(std::string_view text, const Statement_index &index, const Statement &s,
-               Parser_cache &cache, unsigned long version_id, Statement_check *out) {
+               Parser_cache &cache, unsigned long version_id, bool source_directives,
+               Statement_check *out) {
   mdbp_parser *p = cache.get(index.modes()[s.mode].mode, version_id);
   if (p == nullptr) {
     out->status = Check_status::unsupported_mode;
     return;
   }
-  const std::string_view sql = index.text_of(text, s);
+  std::string_view sql = index.text_of(text, s);
+  std::string blanked;
+  if (const auto directives = source_directives ? find_source_directives(text, s.begin, s.end)
+                                                : std::vector<Source_directive>{};
+      !directives.empty()) {
+    const auto &d = directives.front();
+    if (d.statement.begin == s.begin && d.statement.end >= s.body_end) {
+      out->status = Check_status::source_directive;
+      return;
+    }
+    // Blanks, not removed: the offsets stay those of the text.
+    blanked = sql;
+    for (const auto &dir : directives) {
+      const uint32_t from = std::max(dir.line.begin, s.begin);
+      const uint32_t to = std::min(dir.line.end, s.body_end);
+      for (uint32_t k = from; k < to; ++k) {
+        char &c = blanked[k - s.begin];
+        if (c != '\n' && c != '\r') c = ' ';
+      }
+    }
+    sql = blanked;
+  }
   mdbp_result r;
   const mdbp_status st = mdbp_parse_sql(p, sql.data(), sql.size(), &r);
   if (st == MDBP_INTERNAL) {
@@ -71,10 +94,11 @@ void check_one(std::string_view text, const Statement_index &index, const Statem
 }  // namespace
 
 Statement_check check_statement(std::string_view text, const Statement_index &index, size_t i,
-                                Parser_cache &cache, unsigned long version_id) {
+                                Parser_cache &cache, unsigned long version_id,
+                                bool source_directives) {
   Statement_check out;
   const auto &s = index.statements()[i];
-  if (s.kind == Statement_kind::sql) check_one(text, index, s, cache, version_id, &out);
+  if (s.kind == Statement_kind::sql) check_one(text, index, s, cache, version_id, source_directives, &out);
   return out;
 }
 
@@ -209,7 +233,8 @@ std::vector<Statement_check> check_statements(std::string_view text,
   pool.run_all(options.priority, jobs.size(), [&](size_t job, Parser_cache &cache) {
     for (size_t i = jobs[job].first; i < jobs[job].second; ++i) {
       if (stmts[i].kind != Statement_kind::sql) continue;
-      check_one(text, index, stmts[i], cache, options.version_id, &results[i]);
+      check_one(text, index, stmts[i], cache, options.version_id, options.source_directives,
+                &results[i]);
     }
   });
   return results;

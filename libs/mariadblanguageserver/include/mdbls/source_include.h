@@ -48,6 +48,11 @@ struct Source_directive {
 // them: the path ends at a matching quote on the directive's line, and `\s`
 // is ASCII white space.
 std::vector<Source_directive> find_source_directives(std::string_view text);
+// The same for the directives whose `SOURCE` lies in [from, to) of `text`
+// (one statement's), the rest of the text still deciding where lines start
+// and end.
+std::vector<Source_directive> find_source_directives(std::string_view text, size_t from,
+                                                     size_t to);
 
 // The bytes of a UTF-8 `text` the slice [start:end] selects, by msm's rules:
 // a bound is empty, a character offset (a Python slice over code points,
@@ -67,6 +72,7 @@ struct Source_include {
   Line_map lines;              // of `text`
   Range selected;              // the bytes of `text` the slice selects
   std::string error;           // why nothing was included
+  bool read = false;           // the file was read: an error is the slice's
   // Directives in the selected text, offsets in `text`: msm expands one
   // level only, so they stay as they are.
   std::vector<Source_directive> nested;
@@ -106,6 +112,16 @@ struct Source_expansion {
   // the end of the selected text when it starts in an include.
   Located_range map(Range range) const;
 };
+
+// Something wrong with a directive, in the including text: a file that
+// cannot be read (on the path), a malformed slice (on the slice), nothing
+// selected, a directive in the included text that msm does not expand.
+struct Source_problem {
+  Range range;
+  bool error = true;  // else a warning
+  std::string message;
+};
+std::vector<Source_problem> source_problems(const Source_expansion &expansion);
 
 // Expands the directives of `text`, whose relative paths are relative to
 // `base_dir` (none when it is empty).  `read` gives the files' texts; by

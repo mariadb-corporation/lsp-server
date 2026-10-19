@@ -35,6 +35,7 @@ enum class Check_status : uint8_t {
   invalid_utf8,      // the statement is not valid UTF-8 and was not lexed
   unsupported_mode,  // its sql_mode (ORACLE, MSSQL) is one the parser refuses
   internal_error,    // the parser could not finish
+  source_directive,  // an MSM SOURCE directive (source_include.h), not SQL
 };
 
 // The verdict on one statement.  For a syntax error, `error_offset` is the
@@ -53,12 +54,17 @@ struct Check_options {
   unsigned long version_id = k_default_version_id;  // release id for versioned comments
   int priority = 0;                   // priority of the jobs in the pool
   size_t chunk_bytes = 1u << 20;      // statements per job: about this much text
+  bool source_directives = true;      // see check_statement(); false: plain SQL
 };
 
 // Parses statement `i` of `index` with a parser from `cache`.  A comment
-// statement is left unchecked.
+// statement is left unchecked.  A statement that is an MSM SOURCE directive
+// is not parsed; one with directive lines inside, such as a procedure whose
+// body includes a file, is parsed with those lines blanked: what a file
+// brings in is checked where that file is open.
 Statement_check check_statement(std::string_view text, const Statement_index &index, size_t i,
-                                Parser_cache &cache, unsigned long version_id);
+                                Parser_cache &cache, unsigned long version_id,
+                                bool source_directives = true);
 
 // A terminal name as a reader would write it: SELECT_SYM -> SELECT, '(' ->
 // (, IDENT -> identifier.  Empty for terminals nobody types.
