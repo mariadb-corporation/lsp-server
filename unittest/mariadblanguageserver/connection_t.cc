@@ -251,6 +251,36 @@ TEST(Live_catalog, reports_a_connection_that_is_not_configured) {
   fs::remove_all(dir);
 }
 
+TEST(Live_catalog, a_missing_password_is_retried_three_times_then_when_asked) {
+  const auto dir = temp_dir("retries");
+  set_env("MARIADB_SHELL_USER_CONFIG_HOME", dir.string());
+  set_env("MARIADB_SHELL_CREDENTIAL_STORE_HELPER", "plaintext");
+  {
+    Live_catalog_options o;
+    o.secrets.shell_bin_dir = MDBLS_SHELL_BIN_DIR;
+    o.retry_after = std::chrono::milliseconds(10);
+    Live_catalog live("nobody@127.0.0.1:1", o);
+    const auto settle = [&](uint64_t want) {
+      for (int k = 0; k < 500 && live.attempts() < want; ++k) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      // Long past the back-off of a fifth attempt (10 + 20 + 40 + 80 ms).
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    };
+    // The first attempt and three retries.
+    settle(4);
+    EXPECT_EQ(live.attempts(), 4u);
+    EXPECT_NE(live.error().find("connection not configured"), std::string::npos);
+    // Asked: three retries again.
+    live.refresh();
+    settle(8);
+    EXPECT_EQ(live.attempts(), 8u);
+  }
+  set_env("MARIADB_SHELL_CREDENTIAL_STORE_HELPER", "");
+  set_env("MARIADB_SHELL_USER_CONFIG_HOME", "");
+  fs::remove_all(dir);
+}
+
 TEST(Workspace_catalog, folds_files_in_order) {
   const auto dir = temp_dir("ws");
   fs::create_directories(dir / "schema" / "b");

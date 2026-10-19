@@ -889,7 +889,7 @@ class Live_connection(unittest.TestCase):
                                capture_output=True, text=True, stdin=subprocess.DEVNULL,
                                start_new_session=True)
             self.assertEqual(r.returncode, 2)
-            self.assertIn("-p needs a terminal", r.stderr)
+            self.assertIn("-p needs a password typed on a terminal", r.stderr)
             if os.name == "nt":
                 return
             # On a terminal: asked, not echoed.

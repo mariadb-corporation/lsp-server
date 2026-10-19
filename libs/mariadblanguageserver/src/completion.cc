@@ -775,7 +775,7 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
             if (other.table == nullptr || h.table == nullptr) continue;
             std::vector<Added_clause> link;
             std::vector<std::string> wheres{schema};
-            if (!iequals(schema_of(other), schema)) wheres.push_back(schema_of(other));
+            if (schema_of(other) != schema) wheres.push_back(schema_of(other));
             for (const std::string &where : wheres) {
               catalogs.for_each_table(where, [&](const Catalog_view::Table_hit &l) {
                 if (!link.empty() || l.table == nullptr || l.table == h.table || l.table == other.table) {

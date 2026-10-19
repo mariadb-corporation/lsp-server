@@ -173,6 +173,12 @@ TEST(Formatter, comments_stay_before_the_token_after_them) {
             "SELECT *\nFROM (\n  SELECT -- inner\n    a\n  FROM t\n) AS d;");
   EXPECT_EQ(layout("SELECT a FROM t JOIN u ON -- c\nt.a = u.a;"),
             "SELECT a\nFROM t\n  JOIN u\n    ON -- c\n      t.a = u.a;");
+  // Between the words of JOIN the line stays at their level; the table and
+  // ON follow the rule.
+  EXPECT_EQ(layout("SELECT a FROM t LEFT -- e\nJOIN u ON -- f\nt.id = u.id;"),
+            "SELECT a\nFROM t\n  LEFT -- e\n  JOIN u\n    ON -- f\n      t.id = u.id;");
+  EXPECT_EQ(layout("SELECT a FROM t LEFT OUTER JOIN -- g\nu ON t.id = u.id;"),
+            "SELECT a\nFROM t\n  LEFT OUTER JOIN -- g\n    u ON t.id = u.id;");
   // Any blank after "--" makes a comment, before the query too.
   EXPECT_EQ(layout("--\tlead\nselect a,b from t;"), "--\tlead\nSELECT a, b FROM t;");
 }

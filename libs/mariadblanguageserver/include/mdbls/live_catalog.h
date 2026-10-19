@@ -158,6 +158,8 @@ class Live_catalog {
   // request_details(), waiting up to `wait`: true when the details came in
   // time, false when they come later, not at all, or cannot be asked for.
   bool details(const std::set<Object_key> &objects, std::chrono::milliseconds wait);
+  // Whether details can be asked for at all (there is a detail fetcher).
+  bool fetches_details() const { return static_cast<bool>(m_options.fetch_details); }
   // Reads again this often from now on (0: only on refresh()), counted
   // from the last successful read.
   void set_refresh_interval(std::chrono::seconds interval);

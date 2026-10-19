@@ -243,9 +243,9 @@ with parameters, triggers and events from `information_schema` (not
 on `mariadb/refreshCatalog`, every `catalogRefreshSeconds`, and after a failure again
 after 5 s, 10 s, 20 s, ... up to five minutes. Shutting down stops a reading between
 its queries. The password is read from the store on every attempt, so one stored or
-changed meanwhile is used by the next: a missing password is retried like any failure,
-and `mariadb/refreshCatalog` or a change of `shellBinary`, `shellBinDir` or
-`credentialStoreHelper` tries at once. When the server refuses the login, the store is
+changed meanwhile is used by the next: a missing password is retried three times on the
+schedule, then only when asked, and `mariadb/refreshCatalog` or a change of
+`shellBinary`, `shellBinDir` or `credentialStoreHelper` tries at once. When the server refuses the login, the store is
 read again at once and a changed password tried before the failure is reported; the
 refused password is not tried again on the retry schedule (that could lock the account
 under `max_password_errors`), only when it changes or on `mariadb/refreshCatalog`. An SSH

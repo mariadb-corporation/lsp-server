@@ -561,6 +561,10 @@ void Live_catalog::run() {
   std::optional<size_t> refused;
   std::string refused_error;
   bool asked = false;  // refresh() or the creation wanted this attempt
+  // Attempts in a row that found no password: retried this often, then
+  // only when asked (refresh(), which new secret-store settings call).
+  constexpr unsigned k_unconfigured_retries = 3;
+  unsigned unconfigured = 0;
   for (;;) {
     {
       std::unique_lock lock(m_mutex);
@@ -580,6 +584,7 @@ void Live_catalog::run() {
       }
       if (m_stop) return;
       asked = m_wanted;
+      if (asked) unconfigured = 0;
       if (!m_wanted && !due) {
         // Only details were asked for: the schedule stays as it is.
         auto requests = std::move(m_detail_requests);
@@ -637,11 +642,15 @@ void Live_catalog::run() {
       };
       std::string source;
       std::optional<std::string> password = store.password_for(m_uri, &source, &error);
+      if (password) unconfigured = 0;
       if (!password) {
-        // Tried again with back-off: the user may store one meanwhile.
+        // Tried again with back-off a few times: the user may store one
+        // meanwhile.
         error = "connection not configured: " + error;
+        permanent = ++unconfigured > k_unconfigured_retries;
       } else if (refused && !asked && fingerprint(*password) == *refused) {
         error = refused_error;
+        wipe(*password);
       } else {
         bool login_refused = false;
         snap = connect(*password, source, &login_refused);

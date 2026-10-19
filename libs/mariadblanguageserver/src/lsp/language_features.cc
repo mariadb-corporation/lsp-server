@@ -161,7 +161,9 @@ void write_text_edits(Json_writer &w, const Snapshot &s, const std::vector<Text_
 // True when `view` met stubs a later pass can have read: they go into
 // `pass.wanted` and the request writes nothing this time.
 bool wants_details(const Catalog_sources &c, const Catalog_view &view, Details_pass &pass) {
-  if (pass.final || view.stubs_met().empty() || !c.live_source) return false;
+  if (pass.final || view.stubs_met().empty() || !c.live_source || !c.live_source->fetches_details()) {
+    return false;
+  }
   pass.wanted = view.stubs_met();
   return true;
 }

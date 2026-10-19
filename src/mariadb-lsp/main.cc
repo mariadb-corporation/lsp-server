@@ -31,6 +31,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <csignal>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -921,15 +922,24 @@ std::string redacted(const std::string &uri) {
 }
 
 // A line read from the terminal without echoing it, after `prompt`;
-// nullopt when there is no terminal.
+// nullopt when there is no terminal or no line was entered.
 std::optional<std::string> ask_hidden(const std::string &prompt) {
   std::string line;
 #ifdef _WIN32
   _cputs(prompt.c_str());
   for (;;) {
     const wint_t c = _getwch();
-    if (c == L'\r' || c == L'\n' || c == WEOF) break;
-    if (c == 3) return std::nullopt;  // Ctrl-C
+    if (c == L'\r' || c == L'\n') break;
+    if (c == 3 || c == WEOF) {  // Ctrl-C, or no console
+      _cputs("\r\n");
+      std::fill(line.begin(), line.end(), '\0');
+      return std::nullopt;
+    }
+    if (c == 0 || c == 0xE0) {
+      // A function or arrow key: its second code is not text.
+      (void)_getwch();
+      continue;
+    }
     if (c == L'\b') {
       // Back one UTF-8 character.
       while (!line.empty() && (static_cast<unsigned char>(line.back()) & 0xC0) == 0x80) line.pop_back();
@@ -950,17 +960,36 @@ std::optional<std::string> ask_hidden(const std::string &prompt) {
   termios saved{};
   const bool tty = ::tcgetattr(fd, &saved) == 0;
   if (tty) {
+    // No echo, and Ctrl-C read as a character: a signal would end the
+    // process with the terminal left silent.
     termios quiet = saved;
-    quiet.c_lflag &= ~static_cast<tcflag_t>(ECHO);
+    quiet.c_lflag &= ~static_cast<tcflag_t>(ECHO | ISIG);
     ::tcsetattr(fd, TCSAFLUSH, &quiet);
   }
   (void)!::write(fd, prompt.data(), prompt.size());
   char c;
-  while (::read(fd, &c, 1) == 1 && c != '\n' && c != '\r') line.push_back(c);
+  bool ended = false;        // by Return, not by the end of the input
+  bool interrupted = false;  // Ctrl-C
+  while (::read(fd, &c, 1) == 1) {
+    if (c == '\n' || c == '\r') {
+      ended = true;
+      break;
+    }
+    if (static_cast<unsigned char>(c) == saved.c_cc[VINTR]) {
+      interrupted = true;
+      break;
+    }
+    line.push_back(c);
+  }
   if (tty) ::tcsetattr(fd, TCSAFLUSH, &saved);
   (void)!::write(fd, "\n", 1);
   ::close(fd);
-  if (!tty) {
+  if (interrupted) {
+    std::fill(line.begin(), line.end(), '\0');
+    std::raise(SIGINT);
+    return std::nullopt;
+  }
+  if (!tty || !ended) {
     std::fill(line.begin(), line.end(), '\0');
     return std::nullopt;
   }
@@ -976,7 +1005,7 @@ bool read_connection(Options &o) {
   if (o.ask_password) {
     password = ask_hidden("Password for " + redacted(o.connection) + ": ");
     if (!password) {
-      std::cerr << "mariadb-lsp: -p needs a terminal to ask for the password on\n";
+      std::cerr << "mariadb-lsp: -p needs a password typed on a terminal\n";
       return false;
     }
   } else {

@@ -387,7 +387,10 @@ class Builder {
     bool empty() const { return first == npos; }
   };
 
-  enum class Sep : uint8_t { keep, space, line, soft, none };
+  // keep: the original "space or not"; space: one space inside a clause;
+  // word: one space between the words of one keyword (LEFT OUTER JOIN);
+  // line: a break of the enclosing group; soft: the same, nothing when flat.
+  enum class Sep : uint8_t { keep, space, word, line, soft, none };
 
   const Syntax_tree::Token &token(uint32_t j) const { return t_.tokens()[j]; }
 
@@ -397,7 +400,8 @@ class Builder {
   // (trailing); each comment that ended its line breaks the line after it.
   // With a kept layout (Sep::keep) and inside a clause (Sep::space) every
   // one of those breaks goes one level deeper, so a comment and the token
-  // after it land on the same level, under the clause's keyword:
+  // after it land on the same level, under the clause's keyword (between
+  // the words of one keyword, Sep::word, they stay on its level):
   // `SELECT -- c` puts the items on the next line, indented.
   Doc separator(uint32_t j, Sep kind) const {
     const Gap &g = gaps_[j];
@@ -409,6 +413,7 @@ class Builder {
         case Sep::keep:
           return g.newline ? line_break() : text(g.any ? " " : "");
         case Sep::space:
+        case Sep::word:
           return text(" ");
         case Sep::line:
           return line();
@@ -636,7 +641,9 @@ class Builder {
       if (right >= kids.size()) return children(n);
       std::vector<Piece> head;
       for (size_t k = 1; k <= right; ++k) head.push_back(build(kids[k]));
-      Piece h = join(std::move(head), [](size_t) { return Sep::space; });
+      // The table is the head's clause, after the words of the JOIN.
+      const size_t table = head.size() - 1;
+      Piece h = join(std::move(head), [&](size_t k) { return k == table ? Sep::space : Sep::word; });
       if (h.empty()) continue;
       joined.push_back(separator(h.first, Sep::line));
       joined.push_back(std::move(h.doc));
