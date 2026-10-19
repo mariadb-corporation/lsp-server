@@ -140,9 +140,7 @@ const char *const k_usage =
     "                     not read the files they include (check: report them as\n"
     "                     errors)\n"
     "  --source-dir DIR   check, outline, format: the folder relative SOURCE paths\n"
-    "                     are taken from: for stdin (-), which has none, and\n"
-    "                     instead of a FILE's own folder (format reads no\n"
-    "                     includes and only checks DIR)\n"
+    "                     are taken from (default: the FILE's; none for stdin)\n"
     "  --log FILE         lsp: write a log to FILE\n"
     "  --stdio            lsp: talk on stdin and stdout (the only transport)\n"
     "  --mcp              lsp: read connections' catalogs through the client, which\n"
@@ -385,14 +383,19 @@ struct Check_summary {
   size_t errors = 0;
 };
 
+// `p` made absolute; as given when that fails.
+std::filesystem::path absolute_or_given(const std::filesystem::path &p) {
+  std::error_code ec;
+  auto abs = std::filesystem::absolute(p, ec);
+  return ec ? p : abs;
+}
+
 // The folder relative SOURCE paths of `file` are relative to: --source-dir,
 // else the file's own; "" for stdin without --source-dir.
 std::string source_dir(const Options &o, const std::string &file) {
   if (!o.source_dir.empty()) return o.source_dir;
   if (file == "-") return {};
-  std::error_code ec;
-  const auto abs = std::filesystem::absolute(file, ec);
-  return (ec ? std::filesystem::path(file) : abs).parent_path().generic_string();
+  return absolute_or_given(file).parent_path().generic_string();
 }
 
 // Checks one file; writes text lines to `out` or one object to `w`.
@@ -898,9 +901,8 @@ std::optional<Options> parse_args(int argc, char **argv) {
       std::cerr << "mariadb-lsp: --source-dir " << o.source_dir << ": not a folder\n";
       return std::nullopt;
     }
-    // Absolute and folded, as a FILE's folder is.
-    const auto abs = std::filesystem::absolute(o.source_dir, ec);
-    o.source_dir = (ec ? std::filesystem::path(o.source_dir) : abs).lexically_normal().generic_string();
+    // Absolute, as a FILE's folder is; resolve_source_path folds the paths.
+    o.source_dir = absolute_or_given(o.source_dir).generic_string();
   }
   if (o.ask_password && o.connection.empty()) {
     std::cerr << "mariadb-lsp: -p goes with --connection\n";

@@ -287,13 +287,10 @@ context: a section without a `USE` gets the script's schema.
   positions in their file ([outline-format.md](outline-format.md)). `mariadb-lsp check` and
   `outline` expand directives too; `--no-source` reads them as SQL.
 - `--source-dir DIR` (`check`, `outline`, `format`) is the folder relative SOURCE paths are
-  taken from:
-  - **stdin (`-`):** it has no folder of its own, so without the option every relative path is refused. MariaDB Shell's MCP `sql` tools pass their script's folder this way.
-  - **A FILE argument:** it takes the place of the file's own folder.
-  - **The path rules are the same:** an absolute path as it is, a relative one joined to DIR, `..` folded.
-  - **Errors:** a DIR that is not a folder is a usage error (exit 2), as is the option with any other command.
-  - **`format`:** it reads no includes and only checks DIR.
-  - **`--no-source`** still wins.
+  taken from, in place of the file's own; stdin (`-`) has none otherwise, so MariaDB Shell's
+  MCP `sql` tools pass their script's folder this way. A DIR that is not a folder, or the
+  option with another command, is a usage error (exit 2); `format` only checks it, and
+  `--no-source` still wins.
 
 ## Live connections
 
