@@ -132,7 +132,7 @@ every segment maps 1:1.
   read" error.
 - `textDocument/documentSymbol`: the tree stays as it is (decision 3). An object from an
   include has the directive's range as `range` and `selectionRange`, since LSP allows only
-  ranges inside the document, and its `detail` ends with ` · <file name>:<line>`.
+  ranges inside the document, and its `detail` ends with a middle dot and `<file name>:<line>`.
 - Definition and hover: an origin with `source` > 0 points into the included file, with its
   URI and positions from that file's line map. The workspace catalog already does this.
 - Completion, hover and signature help see the included objects through the document's
