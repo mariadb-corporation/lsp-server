@@ -176,12 +176,15 @@ class Formatting(Lsp_test):
                                             **params})
 
     def test_a_document_gets_its_queries_laid_out(self):
-        text = "CREATE TABLE t (id INT);\n" + self.QUERY
+        text = "DROP TABLE t;\nCREATE TABLE t (id INT, name TEXT);\n" + self.QUERY
         edits = self.format("textDocument/formatting", text)
-        self.assertEqual(len(edits), 1)
+        self.assertEqual(len(edits), 2)
+        # tabSize 4: the columns, and the join under FROM, one level of four
+        # spaces deeper.
         self.assertEqual(edits[0]["range"]["start"], {"line": 1, "character": 0})
-        # tabSize 4: the join one level of four spaces under FROM.
-        self.assertEqual(edits[0]["newText"],
+        self.assertEqual(edits[0]["newText"], "CREATE TABLE t (\n    id INT,\n    name TEXT\n)")
+        self.assertEqual(edits[1]["range"]["start"], {"line": 2, "character": 0})
+        self.assertEqual(edits[1]["newText"],
                          "SELECT o.id, c.name\n"
                          "FROM orders o\n"
                          "    JOIN customer c ON c.id = o.customer_id\n"

@@ -167,10 +167,16 @@ key to or from a table in scope first.
 
 ## Formatting
 
-`textDocument/formatting` and `rangeFormatting` lay out queries: statements that start
-with `SELECT` or `WITH` (or a parenthesized query) and parse whole. Every other
-statement, and any statement that holds a versioned comment (`/*!NNNNN`), is left as it
-is, so DDL, routines and mysqldump files keep their own layout. A range formats each
+`textDocument/formatting` and `rangeFormatting` lay out queries, the statements built
+around them, and table definitions, when they parse whole: `SELECT`, `WITH` (or a
+parenthesized query), `INSERT`/`REPLACE ... SELECT`, `UPDATE`, `DELETE`,
+`CREATE`/`ALTER VIEW`, `CREATE TABLE` with its columns and `ALTER TABLE`. Every other
+statement (`INSERT ... VALUES`/`SET`, `CREATE TABLE ... LIKE` and `... SELECT`,
+routines, the rest of DDL), and any statement that holds a versioned comment
+(`/*!NNNNN`), is left as it is, so routines and the data and versioned parts of
+mysqldump files keep their own layout (a dump's CREATE TABLEs, already one column per
+line, only get their keywords recased); a scan of the first words skips those without
+parsing them. A range formats each
 statement it touches, whole. `keywordCase` sets the keywords' case, `lineWidth` the
 width, and `indentation` one level of indentation, by default the request's
 `tabSize`/`insertSpaces` (a tab when `insertSpaces` is false). A line comment that ends
@@ -192,7 +198,20 @@ LIMIT 20;
 - **Clauses** (FROM, WHERE, GROUP BY, HAVING, WINDOW, ORDER BY, LIMIT, INTO, FOR UPDATE,
   UNION and its kin) stay on one line when the query fits there and the statement was on
   one line; otherwise each starts a line of its own at the statement's indentation.
-- **Lists** of select items, GROUP BY and ORDER BY items continue after the comma on the
+- **Other statements** follow the same rules for their clauses: the query of an
+  `INSERT ... SELECT` and of a view starts a line of its own under the header
+  (`INSERT INTO t (a, b)`, `CREATE VIEW v AS`); `SET`, `ON DUPLICATE KEY UPDATE`,
+  `RETURNING`, `WITH CHECK OPTION`, and an `UPDATE`'s or `DELETE`'s WHERE, ORDER BY and
+  LIMIT are clauses; `DELETE FROM t` keeps FROM on its line, while the FROM or USING
+  after a multi-table DELETE's tables starts one. The tables of an `UPDATE` or `DELETE`
+  join as a FROM clause's do.
+- **Tables:** `CREATE TABLE` puts each column, key and constraint on a line of its own
+  one level deeper, whatever its length, and the closing parenthesis and the table
+  options on the next line (`) ENGINE=InnoDB`), the partitioning on a line after that.
+  `ALTER TABLE` with several changes puts each on a line one level deeper; a single
+  change stays on the statement's line. Inside a column the words keep their spacing.
+- **Lists** of select items, GROUP BY and ORDER BY items, `SET` and `ON DUPLICATE KEY
+  UPDATE` assignments, and the column lists of INSERT and CREATE VIEW continue after the comma on the
   same line up to the width, then on the next, aligned with the first item.
 - **Joins** go on lines of their own one level under FROM when the query breaks; a join
   in parentheses stays inline when it fits. `ON` stays on the JOIN's line, or goes one

@@ -267,6 +267,76 @@ struct Symbols {
   int opt_procedure_or_into = grammar::symbol("opt_procedure_or_into");
   int select_into_query_specification = grammar::symbol("select_into_query_specification");
   int query_specification_start = grammar::symbol("query_specification_start");
+  int verb_clause = grammar::symbol("verb_clause");
+  int insert = grammar::symbol("insert");
+  int replace = grammar::symbol("replace");
+  int update = grammar::symbol("update");
+  int delete_ = grammar::symbol("delete");
+  int create = grammar::symbol("create");
+  int alter = grammar::symbol("alter");
+  int view = grammar::symbol("VIEW_SYM");
+  int insert_field_spec = grammar::symbol("insert_field_spec");
+  int insert_values = grammar::symbol("insert_values");
+  int create_select_query_expression = grammar::symbol("create_select_query_expression");
+  int single_multi = grammar::symbol("single_multi");
+  int view_select = grammar::symbol("view_select");
+  int opt_with_clause = grammar::symbol("opt_with_clause");
+  int table = grammar::symbol("TABLE_SYM");
+  int create_body = grammar::symbol("create_body");
+  int create_field_list_parens = grammar::symbol("create_field_list_parens");
+  int opt_create_select = grammar::symbol("opt_create_select");
+  int alter_commands = grammar::symbol("alter_commands");
+  int alter_list = grammar::symbol("alter_list");
+  int from = grammar::symbol("FROM");
+  int using_ = grammar::symbol("USING");
+  int opt_insert_update = grammar::symbol("opt_insert_update");
+  int opt_returning = grammar::symbol("opt_returning");
+  int opt_order_clause = grammar::symbol("opt_order_clause");
+  int delete_limit_clause = grammar::symbol("delete_limit_clause");
+  int view_check_option = grammar::symbol("view_check_option");
+  // Comma lists: select items, GROUP BY, ORDER BY, SET a = 1, b = 2, ON
+  // DUPLICATE KEY UPDATE ..., the columns of INSERT and CREATE VIEW, the
+  // tables of a DELETE.
+  std::vector<int> lists = {
+      select_item_list,
+      group_list,
+      order_list,
+      grammar::symbol("update_list"),
+      grammar::symbol("insert_update_list"),
+      grammar::symbol("fields"),
+      grammar::symbol("view_list"),
+      grammar::symbol("table_alias_ref_list"),
+  };
+  // Nodes whose words are one space apart, besides the clauses: the start
+  // of a query, the statements besides queries and their parts.
+  std::vector<int> spaced = {
+      query_specification_start, insert, replace, update, delete_, create, alter, insert_field_spec,
+      single_multi, grammar::symbol("delete_part2"), grammar::symbol("delete_single_table"), opt_insert_update,
+      opt_returning, delete_limit_clause, view_check_option, create_body, alter_commands,
+  };
+  // Clauses of those statements, as {clause, the statement part it is a
+  // clause of}: each starts a line of its own when the statement breaks.
+  // (ORDER BY and LIMIT are clauses only there, not inside GROUP_CONCAT.)
+  std::vector<std::pair<int, int>> statement_clauses = {
+      {grammar::symbol("SET"), update},
+      {insert_values, insert_field_spec},
+      {opt_insert_update, insert},
+      {opt_returning, insert},
+      {opt_returning, replace},
+      {opt_returning, update},
+      {opt_returning, single_multi},
+      {opt_order_clause, update},
+      {opt_order_clause, single_multi},
+      {delete_limit_clause, update},
+      {delete_limit_clause, single_multi},
+      {grammar::symbol("opt_order_or_limit"), single_multi},
+      {view_select, create},
+      {view_select, alter},
+      {view_check_option, view_select},
+      {grammar::symbol("opt_create_partitioning"), create_body},
+      {grammar::symbol("opt_partitioning"), alter_commands},
+      {grammar::symbol("remove_partitioning"), alter_commands},
+  };
   // Each starts a line of its own when its query breaks.
   std::vector<int> clauses = {
       grammar::symbol("opt_from_clause"),        grammar::symbol("from_clause"),
@@ -373,12 +443,15 @@ class Builder {
       }
       prev = j;
     }
+    mark_statement_clauses();
   }
 
   bool ok() const { return ok_; }
 
-  // The query `select`; its clauses on lines of their own when `multiline`.
-  Doc statement(uint32_t select, bool multiline) { return group(build(select).doc, multiline); }
+  // The statement `root`; its clauses on lines of their own when `multiline`.
+  // A hard line inside (one per line) breaks it too, as when the statement
+  // was on several lines: formatting it again changes nothing.
+  Doc statement(uint32_t root, bool multiline) { return group(build(root).doc, multiline); }
 
  private:
   struct Piece {
@@ -389,10 +462,38 @@ class Builder {
 
   // keep: the original "space or not"; space: one space inside a clause;
   // word: one space between the words of one keyword (LEFT OUTER JOIN);
-  // line: a break of the enclosing group; soft: the same, nothing when flat.
-  enum class Sep : uint8_t { keep, space, word, line, soft, none };
+  // line: a break of the enclosing group; soft: the same, nothing when flat;
+  // hard: a line break whatever the group (and the groups around it) does;
+  // close: a line break before a closing parenthesis, the comments before
+  // it one level deeper, with what they close.
+  enum class Sep : uint8_t { keep, space, word, line, soft, hard, close, none };
 
   const Syntax_tree::Token &token(uint32_t j) const { return t_.tokens()[j]; }
+
+  // The first token of each clause of a statement besides a query: the
+  // line breaks before it as before a query's clauses.
+  void mark_statement_clauses() {
+    clause_starts_.assign(t_.tokens().size(), false);
+    for (uint32_t n = 0; n < t_.size(); ++n) {
+      const auto &node = t_.node(n);
+      if (node.parent == npos) continue;
+      const std::pair<int, int> at{node.symbol, symbol(node.parent)};
+      bool clause = std::find(s_.statement_clauses.begin(), s_.statement_clauses.end(), at) !=
+                    s_.statement_clauses.end();
+      // FROM and USING after the tables of a DELETE (DELETE t FROM t JOIN
+      // u ...), not the FROM it starts with (DELETE FROM t USING ...).
+      if (at.second == s_.single_multi && (at.first == s_.from || at.first == s_.using_)) {
+        clause = t_.children(node.parent)[0] != n;
+      }
+      if (!clause) continue;
+      for (uint32_t j = node.first_token; j < node.first_token + node.token_count; ++j) {
+        if (token(j).begin != token(j).end) {
+          clause_starts_[j] = true;
+          break;
+        }
+      }
+    }
+  }
 
   // The separator before token j: `kind`, with the comments of the gap
   // before it.  A comment on a line of its own breaks the line before it; a
@@ -419,6 +520,9 @@ class Builder {
           return line();
         case Sep::soft:
           return softline();
+        case Sep::hard:
+        case Sep::close:
+          return hardline();
         case Sep::none:
           return text("");
       }
@@ -428,8 +532,8 @@ class Builder {
     const Comment &first = g.comments.front();
     if (first.own_line) {
       parts.push_back(line_break());
-    } else if (kind == Sep::line && !first.line_after) {
-      parts.push_back(line());
+    } else if ((kind == Sep::line || kind == Sep::hard) && !first.line_after) {
+      parts.push_back(kind == Sep::hard ? hardline() : line());
     } else {
       parts.push_back(text(" "));  // trailing, or a comment inside the line
     }
@@ -440,6 +544,10 @@ class Builder {
     // A soft break keeps its place after the comments: `( /* c */` and
     // `x /* c */` still break before the query and before `)`.
     if (kind == Sep::soft && !g.comments.back().line_after) parts.push_back(softline());
+    if (kind == Sep::close) {
+      parts.pop_back();  // what followed the last comment
+      return concat({nest(o_.indent, concat(std::move(parts))), hardline()});
+    }
     return concat(std::move(parts));
   }
 
@@ -474,7 +582,8 @@ class Builder {
     return npos;
   }
 
-  // Pieces joined, `sep(k)` the separator before piece k (k >= 1).
+  // Pieces joined, `sep(k)` the separator before piece k (k >= 1); a
+  // break of the group before a statement's clause.
   template <typename F>
   Piece join(std::vector<Piece> pieces, F sep) const {
     Piece out;
@@ -485,7 +594,7 @@ class Builder {
       if (out.empty()) {
         out.first = p.first;
       } else {
-        parts.push_back(separator(p.first, sep(k)));
+        parts.push_back(separator(p.first, clause_starts_[p.first] ? Sep::line : sep(k)));
       }
       parts.push_back(std::move(p.doc));
     }
@@ -500,11 +609,14 @@ class Builder {
       return {leaf(j), j};
     }
     const int sym = symbol(n);
-    if (sym == s_.select_item_list || sym == s_.group_list || sym == s_.order_list ||
-        (sym == s_.derived_table_list && has_comma(n))) {
+    if (contains(s_.lists, sym) || (sym == s_.derived_table_list && has_comma(n))) {
       return list(n);
     }
     if (sym == s_.join_table) return joins(n);
+    if (sym == s_.create_field_list_parens) return table_elements(n);
+    if (sym == s_.alter) {
+      if (const uint32_t changes = several_changes(n); changes != npos) return alter_table(n, changes);
+    }
     if (sym == s_.expr && chain_operator(n) != -1) return chain(n);
     return children(n);
   }
@@ -528,7 +640,7 @@ class Builder {
     const auto kids = t_.children(n);
     const int sym = symbol(n);
     // Inside a clause the words are one space apart.
-    const bool spaced = contains(s_.clauses, sym) || sym == s_.query_specification_start;
+    const bool spaced = contains(s_.clauses, sym) || contains(s_.spaced, sym);
     std::vector<Piece> pieces;
     std::vector<Sep> seps;
     int previous = -1;  // the symbol of the last child with tokens
@@ -548,7 +660,7 @@ class Builder {
       }
       Sep sep = spaced ? Sep::space : Sep::keep;
       if (is_clause(kids[k], n) || symbol(kids[k]) == s_.unit_type_decl || previous == s_.unit_type_decl ||
-          previous == s_.with_clause) {
+          previous == s_.with_clause || previous == s_.opt_with_clause) {
         sep = Sep::line;
       }
       pieces.push_back(build(kids[k]));
@@ -580,35 +692,105 @@ class Builder {
   // A comma list (select items, GROUP BY, ORDER BY, tables): the items fill
   // the line, the comma after each, and continue aligned with the first.
   Piece list(uint32_t n) {
+    Piece out = join(items(n), [](size_t) { return Sep::line; });
+    out.doc = align(fill(std::move(out.doc.parts)));
+    return out;
+  }
+
+  // The items of the comma list `n` (left-recursive: n ',' item), each with
+  // the comma after it.
+  std::vector<Piece> items(uint32_t n) {
     const int sym = symbol(n);
-    std::vector<std::vector<uint32_t>> items;
+    std::vector<std::vector<uint32_t>> groups;
     std::vector<uint32_t> commas;
     uint32_t at = n;
     while (true) {
       const auto kids = t_.children(at);
       if (kids.size() > 1 && symbol(kids[0]) == sym && symbol(kids[1]) == s_.comma) {
-        items.emplace_back(kids.begin() + 2, kids.end());
+        groups.emplace_back(kids.begin() + 2, kids.end());
         commas.push_back(kids[1]);
         at = kids[0];
       } else {
-        items.emplace_back(kids.begin(), kids.end());
+        groups.emplace_back(kids.begin(), kids.end());
         break;
       }
     }
-    std::reverse(items.begin(), items.end());
+    std::reverse(groups.begin(), groups.end());
     std::reverse(commas.begin(), commas.end());
-    std::vector<Piece> docs;
-    for (size_t i = 0; i < items.size(); ++i) {
+    std::vector<Piece> out;
+    for (size_t i = 0; i < groups.size(); ++i) {
       std::vector<Piece> parts;
-      for (const uint32_t c : items[i]) parts.push_back(build(c));
+      for (const uint32_t c : groups[i]) parts.push_back(build(c));
       if (i < commas.size()) parts.push_back(build(commas[i]));
       const size_t last = parts.size() - 1;
-      docs.push_back(join(std::move(parts), [&](size_t k) {
+      out.push_back(join(std::move(parts), [&](size_t k) {
         return i < commas.size() && k == last ? Sep::none : Sep::keep;
       }));
     }
-    Piece out = join(std::move(docs), [](size_t) { return Sep::line; });
-    out.doc = align(fill(std::move(out.doc.parts)));
+    return out;
+  }
+
+  // Items on lines of their own, one level deeper.
+  Doc one_per_line(std::vector<Piece> pieces) {
+    std::vector<Doc> lines;
+    for (Piece &p : pieces) {
+      if (p.empty()) continue;
+      lines.push_back(separator(p.first, Sep::hard));
+      lines.push_back(std::move(p.doc));
+    }
+    return nest(o_.indent, concat(std::move(lines)));
+  }
+
+  // The ( columns, keys, constraints ) of CREATE TABLE: one per line, the
+  // parenthesis closing on a line of its own.
+  Piece table_elements(uint32_t n) {
+    const auto kids = t_.children(n);
+    if (kids.size() != 3) return children(n);
+    Piece lp = build(kids[0]);
+    Piece rp = build(kids[2]);
+    if (lp.empty() || rp.empty()) return children(n);
+    Piece out;
+    out.first = lp.first;
+    out.doc = concat({std::move(lp.doc), one_per_line(items(kids[1])), separator(rp.first, Sep::close),
+                      std::move(rp.doc)});
+    return out;
+  }
+
+  // The list of changes of ALTER TABLE `n` when it has more than one, else
+  // npos.
+  uint32_t several_changes(uint32_t n) const {
+    const uint32_t commands = t_.child(n, s_.alter_commands);
+    if (commands == npos) return npos;
+    const auto kids = t_.children(commands);
+    return !kids.empty() && symbol(kids[0]) == s_.alter_list && has_comma(kids[0]) ? kids[0] : npos;
+  }
+
+  // ALTER TABLE t with its changes `changes` one per line, one level deeper,
+  // between the words before them and the clauses after them.
+  Piece alter_table(uint32_t n, uint32_t changes) {
+    const uint32_t commands = t_.node(changes).parent;
+    std::vector<Piece> head;
+    std::vector<Piece> tail;
+    bool after = false;
+    for (const uint32_t k : t_.children(n)) {
+      if (k != commands) {
+        (after ? tail : head).push_back(build(k));
+        continue;
+      }
+      for (const uint32_t c : t_.children(commands)) {
+        if (c != changes) tail.push_back(build(c));
+      }
+      after = true;
+    }
+    Piece out = join(std::move(head), [](size_t) { return Sep::space; });
+    Piece rest = join(std::move(tail), [](size_t) { return Sep::space; });
+    if (out.empty()) return children(n);
+    std::vector<Doc> parts{std::move(out.doc), one_per_line(items(changes))};
+    if (!rest.empty()) {
+      parts.push_back(separator(rest.first, clause_starts_[rest.first] ? Sep::line : Sep::space));
+      parts.push_back(std::move(rest.doc));
+    }
+    out.doc = concat(std::move(parts));
     return out;
   }
 
@@ -718,6 +900,7 @@ class Builder {
   const Symbols &s_;
   std::vector<Gap> gaps_;
   std::vector<uint32_t> leaves_;
+  std::vector<bool> clause_starts_;  // by token
   bool ok_ = true;
 };
 
@@ -731,25 +914,133 @@ std::string without_blanks(std::string_view s) {
   return out;
 }
 
-// Whether the statement starts with a query: SELECT, WITH, or '('.
-bool starts_with_query(std::string_view s) {
+// The first `max` words of a statement outside parentheses, lowercased, to
+// `f` until it returns true: a parenthesis as "(" and the first word inside
+// it ("(select"), quoted strings and names as "", other characters left
+// out.  It ends at a versioned comment, which keeps the statement as it is
+// anyway.  Cheap, so the INSERT ... VALUES of a dump is never parsed.
+template <typename F>
+void leading_words(std::string_view s, size_t max, F f) {
+  size_t count = 0;
+  auto add = [&](std::string w) {
+    ++count;
+    return f(std::move(w));
+  };
   size_t i = 0;
-  while (i < s.size()) {
-    if (std::isspace(static_cast<unsigned char>(s[i])) || s[i] == '(') {
+  int depth = 0;
+  // Skips blanks and comments; false at a versioned or unterminated one.
+  auto skip = [&] {
+    while (i < s.size()) {
+      if (std::isspace(static_cast<unsigned char>(s[i]))) {
+        ++i;
+      } else if (s.substr(i, 2) == "/*") {
+        const size_t e = s.find("*/", i + 2);
+        if (s.substr(i, 3) == "/*!" || s.substr(i, 4) == "/*M!" || e == std::string_view::npos) return false;
+        i = e + 2;
+      } else if (line_comment_at(s, i)) {
+        i = std::min(s.find('\n', i), s.size());
+      } else {
+        break;
+      }
+    }
+    return true;
+  };
+  auto is_word = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '$'; };
+  auto word = [&] {
+    const size_t b = i;
+    while (i < s.size() && is_word(s[i])) ++i;
+    return lower(s.substr(b, i - b));
+  };
+  while (count < max && skip() && i < s.size()) {
+    const char c = s[i];
+    if (c == '\'' || c == '"' || c == '`') {
+      // Doubled quotes and backslashes need no care: they only end it later.
+      for (++i; i < s.size() && s[i] != c; ++i) {
+        if (s[i] == '\\' && c != '`') ++i;
+      }
       ++i;
-    } else if (s.substr(i, 2) == "/*") {
-      const size_t e = s.find("*/", i + 2);
-      if (e == std::string_view::npos) return false;
-      i = e + 2;
-    } else if (line_comment_at(s, i)) {
-      const size_t e = s.find('\n', i);
-      if (e == std::string_view::npos) return false;
-      i = e + 1;
+      if (depth == 0 && add({})) return;
+    } else if (c == '(') {
+      ++i;
+      if (depth++ == 0) {
+        while (skip() && i < s.size() && s[i] == '(') {
+          ++i;
+          ++depth;
+        }
+        if (add("(" + word())) return;
+      }
+    } else if (c == ')') {
+      ++i;
+      if (depth > 0) --depth;
+    } else if (is_word(c)) {
+      std::string w = word();
+      if (depth == 0 && add(std::move(w))) return;
     } else {
-      break;
+      ++i;
     }
   }
-  return istarts_with(s.substr(i), "select") || istarts_with(s.substr(i), "with");
+}
+
+// Whether the statement can be one the formatter lays out: a query
+// (SELECT, WITH, a parenthesized one), INSERT or REPLACE ... SELECT,
+// UPDATE, DELETE, CREATE or ALTER VIEW or TABLE.  A cheap filter before
+// the parse; `statement_node` decides on the tree, so the two take the same
+// statements.
+bool may_format(std::string_view s) {
+  enum { start, insert, create, yes, no } state = start;
+  leading_words(s, 24, [&](std::string w) {
+    if (state == start) {
+      const std::string_view first = std::string_view(w).substr(w.starts_with('(') ? 1 : 0);
+      if (first == "select" || first == "with" || first == "update" || first == "delete") {
+        state = yes;
+      } else if (first == "insert" || first == "replace") {
+        state = insert;
+      } else if (first == "create" || first == "alter") {
+        state = create;
+      } else {
+        state = no;
+      }
+    } else if (state == insert) {
+      if (w == "select" || w == "with" || w == "(select" || w == "(with") state = yes;
+      if (w == "values" || w == "value" || w == "set") state = no;
+    } else if (state == create) {
+      if (w == "view" || w == "table") state = yes;
+      // Not the CREATE TABLE in a routine's body.
+      if (w == "procedure" || w == "function" || w == "trigger" || w == "event" || w == "begin") state = no;
+    }
+    return state == yes || state == no;
+  });
+  return state == yes;
+}
+
+// The statement node of a tree the formatter lays out, or npos: a query,
+// INSERT or REPLACE ... SELECT, UPDATE, DELETE, CREATE or ALTER VIEW,
+// CREATE TABLE with its columns (not ... LIKE, not ... SELECT), ALTER TABLE.
+// `may_format` lets the same ones through to the parse.
+uint32_t statement_node(const Syntax_tree &tree) {
+  const auto &s = syms();
+  const uint32_t verb = tree.find(tree.roots()[0], s.verb_clause);
+  if (verb == npos || tree.children(verb).size() != 1) return npos;
+  const uint32_t n = tree.children(verb)[0];
+  const int sym = tree.node(n).symbol;
+  if (sym == s.select || sym == s.select_into || sym == s.update || sym == s.delete_) return n;
+  auto has_child = [&](uint32_t x, int symbol) { return tree.child(x, symbol) != npos; };
+  if (sym == s.insert || sym == s.replace) {
+    const uint32_t spec = tree.child(n, s.insert_field_spec);
+    const uint32_t values = spec == npos ? npos : tree.child(spec, s.insert_values);
+    if (values == npos) return npos;
+    const auto v = tree.children(values);
+    return v.size() == 1 && tree.node(v[0]).symbol == s.create_select_query_expression ? n : npos;
+  }
+  if ((sym == s.create || sym == s.alter) && has_child(n, s.view) && has_child(n, s.view_select)) return n;
+  if (sym == s.alter && has_child(n, s.table) && has_child(n, s.alter_commands)) return n;
+  if (sym == s.create && has_child(n, s.table)) {
+    const uint32_t body = tree.child(n, s.create_body);
+    if (body == npos || !has_child(body, s.create_field_list_parens)) return npos;
+    const uint32_t select = tree.child(body, s.opt_create_select);
+    return select == npos || tree.begin(select) == tree.end(select) ? n : npos;
+  }
+  return npos;
 }
 
 bool parses(mdbp_parser *parser, std::string_view sql) {
@@ -760,31 +1051,29 @@ bool parses(mdbp_parser *parser, std::string_view sql) {
 // The layout of the statement [st_begin, st_end) of `text`, parsed with
 // `parser` (one that records derivations), its lines ending in `eol`: the
 // edit replacing its first token to its last, or nullopt when the statement
-// stays as it is - it is already laid out, it is not a query (SELECT, WITH,
-// a parenthesized query), does not parse whole, holds a versioned comment,
+// stays as it is - it is already laid out, it is none of the statements
+// `statement_node` takes, does not parse whole, holds a versioned comment,
 // or the layout would not keep its tokens and comments.
 std::optional<Text_edit> format_statement(std::string_view text, uint32_t st_begin, uint32_t st_end,
                                           mdbp_parser *parser, const Format_options &options,
                                           std::string_view eol) {
   const std::string_view sql = text.substr(st_begin, st_end - st_begin);
-  if (parser == nullptr || !starts_with_query(sql)) return std::nullopt;
+  if (parser == nullptr || !may_format(sql)) return std::nullopt;
   mdbp_result r;
   if (mdbp_parse_sql(parser, sql.data(), sql.size(), &r) != MDBP_OK || !r.accepted) return std::nullopt;
   const Syntax_tree tree = Syntax_tree::build(parser, r, st_begin);
   if (tree.empty() || tree.roots().size() != 1) return std::nullopt;
-  const auto &s = syms();
-  uint32_t select = tree.find(tree.roots()[0], s.select);
-  if (select == npos) select = tree.find(tree.roots()[0], s.select_into);
-  if (select == npos) return std::nullopt;
-  // Nothing but the query: no other token before or after it.
+  const uint32_t root = statement_node(tree);
+  if (root == npos) return std::nullopt;
+  // Nothing but the statement: no other token before or after it.
   uint32_t first = npos, last = npos;
   for (uint32_t j = 0; j < tree.tokens().size(); ++j) {
     if (tree.tokens()[j].begin == tree.tokens()[j].end) continue;
     if (first == npos) first = j;
     last = j;
   }
-  if (first == npos || tree.begin(select) != tree.tokens()[first].begin ||
-      tree.end(select) != tree.tokens()[last].end) {
+  if (first == npos || tree.begin(root) != tree.tokens()[first].begin ||
+      tree.end(root) != tree.tokens()[last].end) {
     return std::nullopt;
   }
   const uint32_t b = tree.tokens()[first].begin;
@@ -799,7 +1088,7 @@ std::optional<Text_edit> format_statement(std::string_view text, uint32_t st_beg
 
   Builder builder(tree, text, options);
   if (!builder.ok()) return std::nullopt;
-  const Doc doc = builder.statement(select, original.find('\n') != std::string_view::npos);
+  const Doc doc = builder.statement(root, original.find('\n') != std::string_view::npos);
 
   // At the indentation and the column of the line the statement starts on.
   // A statement that spans lines keeps its own line break; one on a single

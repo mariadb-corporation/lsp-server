@@ -189,12 +189,19 @@ TEST(Formatter, line_breaks_inside_other_constructs_are_kept) {
 }
 
 TEST(Formatter, other_statements_are_left_alone) {
-  const std::string ddl = "CREATE TABLE t (\n  id INT,\n  name TEXT\n);\nINSERT INTO t VALUES (1,'a');\n";
+  const std::string ddl = "DROP TABLE t;\nINSERT INTO t VALUES (1,'a');\n";
   EXPECT_EQ(layout(ddl), ddl);
   const std::string versioned = "/*!40101 SELECT a FROM t */;";
   EXPECT_EQ(layout(versioned), versioned);
   const std::string broken = "SELECT a FROM WHERE;";
   EXPECT_EQ(layout(broken), broken);
+  // Rows, tables made from a query, and routines are not laid out.
+  for (const std::string sql :
+       {"INSERT INTO t SET a = 1;", "INSERT INTO t (a, b) VALUES (1, 'select');",
+        "CREATE TABLE c AS SELECT * FROM t WHERE x = 1;",
+        "DELIMITER ;;\nCREATE PROCEDURE p() BEGIN CREATE TABLE t (a INT, b INT); UPDATE t SET a = 1; END;;\nDELIMITER ;\n"}) {
+    EXPECT_EQ(layout(sql, 20), sql);
+  }
 }
 
 TEST(Formatter, the_indentation_and_line_endings_of_the_statement_are_kept) {
@@ -231,6 +238,101 @@ TEST(Formatter, select_into_is_a_query_too) {
             "SELECT x\nINTO @v\nFROM t\nWHERE id = 1\nFOR UPDATE;");
 }
 
+TEST(Formatter, insert_select_puts_the_query_under_the_table) {
+  EXPECT_EQ(layout("insert into t (a, b) select x, y from u where z = 1;"),
+            "INSERT INTO t (a, b) SELECT x, y FROM u WHERE z = 1;");
+  EXPECT_EQ(layout("INSERT INTO rental_archive (rental_id, rental_date, inventory_id, customer_id, return_date) "
+                   "SELECT rental_id, rental_date, inventory_id, customer_id, return_date FROM rental "
+                   "WHERE return_date < '2005-06-01' ON DUPLICATE KEY UPDATE return_date = NULL;"),
+            "INSERT INTO rental_archive (rental_id, rental_date, inventory_id, customer_id,\n"
+            "                            return_date)\n"
+            "SELECT rental_id, rental_date, inventory_id, customer_id, return_date\n"
+            "FROM rental\n"
+            "WHERE return_date < '2005-06-01'\n"
+            "ON DUPLICATE KEY UPDATE return_date = NULL;");
+  EXPECT_EQ(layout("REPLACE INTO t SELECT * FROM u\nWHERE x = 1;"), "REPLACE INTO t\nSELECT *\nFROM u\nWHERE x = 1;");
+}
+
+TEST(Formatter, update_puts_set_and_its_clauses_on_lines) {
+  EXPECT_EQ(layout("update t set a=1,b = 2 where c = 3;"), "UPDATE t SET a=1, b = 2 WHERE c = 3;");
+  EXPECT_EQ(layout("UPDATE film SET rental_rate = rental_rate * 1.1, last_update = NOW(), special_features = "
+                   "'Trailers' WHERE rating = 'PG' ORDER BY film_id LIMIT 10;"),
+            "UPDATE film\n"
+            "SET rental_rate = rental_rate * 1.1, last_update = NOW(),\n"
+            "    special_features = 'Trailers'\n"
+            "WHERE rating = 'PG'\n"
+            "ORDER BY film_id\n"
+            "LIMIT 10;");
+  EXPECT_EQ(layout("UPDATE t JOIN u ON t.id = u.id SET t.a = u.b\nWHERE u.c = 1;"),
+            "UPDATE t\n  JOIN u ON t.id = u.id\nSET t.a = u.b\nWHERE u.c = 1;");
+  EXPECT_EQ(layout("WITH x AS (SELECT id FROM t) UPDATE t SET a = 1\nWHERE id IN (SELECT id FROM x);"),
+            "WITH x AS (SELECT id FROM t)\nUPDATE t\nSET a = 1\nWHERE id IN (SELECT id FROM x);");
+}
+
+TEST(Formatter, delete_keeps_from_on_its_line_unless_tables_come_first) {
+  EXPECT_EQ(layout("DELETE FROM t WHERE id = 1\nRETURNING id, a;"), "DELETE FROM t\nWHERE id = 1\nRETURNING id, a;");
+  EXPECT_EQ(layout("DELETE t FROM t JOIN u ON t.id = u.id\nWHERE u.c = 1;"),
+            "DELETE t\nFROM t\n  JOIN u ON t.id = u.id\nWHERE u.c = 1;");
+  EXPECT_EQ(layout("DELETE FROM t1 USING t1 JOIN t2 ON t1.id = t2.id\nWHERE t2.x = 1;"),
+            "DELETE FROM t1\nUSING t1\n  JOIN t2 ON t1.id = t2.id\nWHERE t2.x = 1;");
+  // ORDER BY inside a function is no clause of the DELETE.
+  EXPECT_EQ(layout("DELETE FROM t\nWHERE GROUP_CONCAT(a ORDER BY b) = 'x';"),
+            "DELETE FROM t\nWHERE GROUP_CONCAT(a ORDER BY b) = 'x';");
+}
+
+TEST(Formatter, a_view_puts_its_query_under_the_header) {
+  EXPECT_EQ(layout("create view v as select a from t;"), "CREATE VIEW v AS SELECT a FROM t;");
+  EXPECT_EQ(layout("CREATE OR REPLACE DEFINER=`root`@`%` SQL SECURITY INVOKER VIEW v (x) AS SELECT a FROM t\n"
+                   "WITH CHECK OPTION;"),
+            "CREATE OR REPLACE DEFINER=`root`@`%` SQL SECURITY INVOKER VIEW v (x) AS\n"
+            "SELECT a\n"
+            "FROM t\n"
+            "WITH CHECK OPTION;");
+  EXPECT_EQ(layout("ALTER ALGORITHM=MERGE VIEW v AS SELECT a, b FROM t\nWHERE c = 1;"),
+            "ALTER ALGORITHM=MERGE VIEW v AS\nSELECT a, b\nFROM t\nWHERE c = 1;");
+}
+
+TEST(Formatter, create_table_puts_each_column_and_key_on_a_line) {
+  EXPECT_EQ(layout("create table t (id int primary key, name text);"),
+            "CREATE TABLE t (\n  id INT PRIMARY KEY,\n  name TEXT\n);");
+  EXPECT_EQ(layout("CREATE TABLE IF NOT EXISTS film (film_id SMALLINT UNSIGNED NOT NULL AUTO_INCREMENT, PRIMARY KEY "
+                   "(film_id), CONSTRAINT fk FOREIGN KEY (lang) REFERENCES language (id) ON DELETE CASCADE) "
+                   "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 PARTITION BY HASH(film_id) PARTITIONS 4;"),
+            "CREATE TABLE IF NOT EXISTS film (\n"
+            "  film_id SMALLINT UNSIGNED NOT NULL AUTO_INCREMENT,\n"
+            "  PRIMARY KEY (film_id),\n"
+            "  CONSTRAINT fk FOREIGN KEY (lang) REFERENCES language (id) ON DELETE CASCADE\n"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4\n"
+            "PARTITION BY HASH(film_id) PARTITIONS 4;");
+  // Comments stay with the column after them; the last ones before the
+  // parenthesis stay at the columns' level.
+  EXPECT_EQ(layout("CREATE TABLE c ( -- the columns\nid INT, -- the id\n/* the name */\nname TEXT\n-- last\n);", 80, true,
+                   "\t"),
+            "CREATE TABLE c ( -- the columns\n\tid INT, -- the id\n\t/* the name */\n\tname TEXT\n\t-- last\n);");
+  // Nothing to lay out in a copy, nor in a table made from a query.
+  for (const std::string sql : {"CREATE TABLE l LIKE t;", "CREATE TABLE s (a INT) SELECT 1 AS a;"}) {
+    EXPECT_EQ(layout(sql), sql);
+  }
+}
+
+TEST(Formatter, alter_table_puts_several_changes_on_lines) {
+  EXPECT_EQ(layout("alter table t add column y int;"), "ALTER TABLE t ADD COLUMN y INT;");
+  EXPECT_EQ(layout("ALTER TABLE film ADD COLUMN x INT AFTER title, DROP INDEX idx_title, ADD INDEX idx_x (x);"),
+            "ALTER TABLE film\n"
+            "  ADD COLUMN x INT AFTER title,\n"
+            "  DROP INDEX idx_title,\n"
+            "  ADD INDEX idx_x (x);");
+  EXPECT_EQ(layout("ALTER TABLE t ADD y INT, ENGINE=InnoDB PARTITION BY HASH(id) PARTITIONS 2;"),
+            "ALTER TABLE t\n  ADD y INT,\n  ENGINE=InnoDB\nPARTITION BY HASH(id) PARTITIONS 2;");
+  EXPECT_EQ(layout("ALTER TABLE t ADD y INT, DROP z REMOVE PARTITIONING;"),
+            "ALTER TABLE t\n  ADD y INT,\n  DROP z\nREMOVE PARTITIONING;");
+}
+
+TEST(Formatter, comments_in_other_statements_stay_where_they_are) {
+  const std::string sql = "UPDATE t -- the table\nSET a = 1 /* one */, b = 2\nWHERE c = 3;";
+  EXPECT_EQ(layout(sql), sql);
+}
+
 TEST(Formatter, every_layout_is_its_own_layout) {
   const std::vector<std::string> queries = {
       "select f.title, c.name as category, count(r.rental_id) as rentals, sum(p.amount) revenue from film f join "
@@ -250,17 +352,29 @@ TEST(Formatter, every_layout_is_its_own_layout) {
       "SELECT x INTO @v FROM t WHERE id = 1 FOR UPDATE",
       "SELECT * FROM a LEFT JOIN (b JOIN c ON b.id = c.id) ON a.id = b.id WHERE a.x BETWEEN 1 AND 10",
       "SELECT * FROM (SELECT a, b FROM t WHERE c = 1 GROUP BY a, b HAVING COUNT(*) > 1) AS d JOIN e USING (a)",
+      "INSERT IGNORE INTO t (a, b, c) SELECT x, y, z FROM u JOIN v ON u.id = v.id WHERE u.k > 1 ON DUPLICATE KEY "
+      "UPDATE b = VALUES(b), c = c + 1",
+      "INSERT INTO t (a) (SELECT x FROM u WHERE y = 1)",
+      "UPDATE LOW_PRIORITY t1, t2 SET t1.a = t2.a, t1.b = 'x' WHERE t1.id = t2.id AND t2.c IS NOT NULL",
+      "WITH x AS (SELECT id FROM t) DELETE FROM t WHERE id IN (SELECT id FROM x) ORDER BY id LIMIT 5",
+      "DELETE t1, t2 FROM t1 JOIN t2 ON t1.id = t2.id WHERE t1.a = 1",
+      "CREATE OR REPLACE VIEW v (a, b) AS SELECT x, y FROM t WHERE z = 1 UNION SELECT x, y FROM u WITH CASCADED "
+      "CHECK OPTION",
+      "CREATE TABLE t (id INT NOT NULL, name VARCHAR(20) DEFAULT 'x' COMMENT 'the name', KEY k (name), CHECK (id > 0 "
+      "AND id < 100)) ENGINE=InnoDB",
+      "ALTER TABLE t ADD COLUMN x INT AFTER y, DROP INDEX i, ADD CONSTRAINT c CHECK (x > 0)",
   };
   for (const auto &q : queries) {
     for (const size_t width : {0, 20, 40, 80, 120}) {
       const std::string once = layout(q + ";", width);
       EXPECT_EQ(layout(once, width), once) << "width " << width << "\n" << once;
-      // The same, every line indented: it stays so.
+      // The same, every line indented, with the width two columns wider
+      // (it counts from the start of the line): it stays so.
       std::string indented = "  " + once;
       for (size_t at = indented.find('\n'); at != std::string::npos; at = indented.find('\n', at + 1)) {
         indented.insert(at + 1, "  ");
       }
-      EXPECT_EQ(layout(indented, width), indented) << "width " << width << ", indented\n" << indented;
+      EXPECT_EQ(layout(indented, width == 0 ? 0 : width + 2), indented) << "width " << width << ", indented\n" << indented;
     }
   }
 }

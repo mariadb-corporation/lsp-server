@@ -1074,10 +1074,14 @@ non-query statement
 are left alone. Each layout is checked: the same tokens and comments, and it parses.
 
 **Status 2026-10-18: queries done** (SELECT, WITH, UNION, SELECT ... INTO), see
-`docs/language-server.md` "Formatting". Open: other statements (INSERT ... SELECT,
-UPDATE, DELETE, CREATE VIEW ... AS SELECT, DDL), the original relative indentation of
-line breaks inside other constructs (they all continue one level deeper),
-`onTypeFormatting`.
+`docs/language-server.md` "Formatting". **2026-10-19: DML and views done**: INSERT and
+REPLACE ... SELECT, UPDATE, DELETE (single and multi-table), CREATE and ALTER VIEW, with
+the query rules for their clauses (the query on a line of its own under the header;
+`DELETE FROM t` keeps FROM on its line); CREATE TABLE and ALTER TABLE with several
+changes one item per line, one level deeper, whatever their length (the user's choice,
+2026-10-19; not aligned in columns, short tables too). Open: other DDL, routine bodies,
+the original relative indentation of line breaks inside other constructs (they all
+continue one level deeper), `onTypeFormatting`.
 
 Estimated total: about four months of one engineer's work to the end of P6, with P0–P2
 being the part that de-risks everything else and should be done first in exactly that
