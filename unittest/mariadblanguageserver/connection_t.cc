@@ -316,7 +316,8 @@ TEST(Workspace_catalog, folds_files_in_order) {
   const auto &f = ws.files[item->origin.source];
   EXPECT_EQ(f.text.substr(item->origin.name.begin, 4), "item");
   EXPECT_EQ(ws.file(f.uri), &f);
-  EXPECT_EQ(file_uri_to_path(f.uri), f.path);
+  // The same file; a drive letter comes back in lower case (path_to_file_uri).
+  EXPECT_EQ(canonical_path(file_uri_to_path(f.uri)), f.path);
   fs::remove_all(dir);
 }
 
