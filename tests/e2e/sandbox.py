@@ -101,6 +101,12 @@ class Sandbox:
         subprocess.run([self.client, "--no-defaults", "-S", self.socket, "-uroot", "-e",
                         statements], check=True, capture_output=True)
 
+    def query(self, statement):
+        """The first column of the first row, as text."""
+        r = subprocess.run([self.client, "--no-defaults", "-S", self.socket, "-uroot", "-N", "-B",
+                            "-e", statement], check=True, capture_output=True, text=True)
+        return r.stdout.split("\n")[0].split("\t")[-1]
+
     def stop(self):
         if self.proc.poll() is None:
             self.proc.terminate()

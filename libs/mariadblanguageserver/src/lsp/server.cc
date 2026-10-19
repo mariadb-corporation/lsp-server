@@ -1009,6 +1009,24 @@ struct Server::Impl {
       return nullptr;
     }
     const std::string &key = *normalized;
+    // Passwords come from the secret store only: one in a URI would end up
+    // in settings files and the client's message traces.
+    if (const auto parsed = parse_connection_uri(uri); parsed && parsed->password) {
+      if (reported.insert(key + "\npassword").second) {
+        notify("window/showMessage", [&](Json_writer &w) {
+          w.StartObject();
+          w.Key("type");
+          w.Int(2);
+          w.Key("message");
+          const std::string msg = "MariaDB: " + key +
+                                  ": a connection URI must not hold a password; store it with "
+                                  "MariaDB Shell";
+          w.String(msg.c_str());
+          w.EndObject();
+        });
+      }
+      return nullptr;
+    }
     if (const auto it = live.find(key); it != live.end()) return it->second;
     Live_catalog_options o;
     o.secrets = secrets;
@@ -1107,6 +1125,10 @@ struct Server::Impl {
       }
       return;
     }
+    // Read: a later failure is reported again.
+    for (auto r = reported.lower_bound(key + "\n"); r != reported.end() && r->starts_with(key + "\n");) {
+      r = reported.erase(r);
+    }
     for (auto &[uri, d] : documents) {
       if (d->live != lc) continue;
       Index_options o = d->doc.options();
@@ -1151,10 +1173,18 @@ struct Server::Impl {
     const auto connection = default_connection;
     const auto defaults = options.defaults;
     const auto interval = live_interval;
+    const auto store = secrets;
     apply_settings(*settings);
     if (catalog_entries != entries) rebuild_workspace();
     if (live_interval != interval) {
       for (auto &[key, lc] : live) lc->set_refresh_interval(live_interval);
+    }
+    if (secrets != store) {
+      // A connection that found no password may find one now.
+      for (auto &[key, lc] : live) {
+        lc->set_secrets(secrets);
+        lc->refresh();
+      }
     }
     const bool moved = default_connection != connection;
     if (!moved && options.defaults == defaults) return;

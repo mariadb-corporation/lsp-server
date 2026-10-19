@@ -62,6 +62,18 @@
 #include "mdbls/syntax_tree.h"
 #include "mdbparse.h"
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <conio.h>
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <termios.h>
+#include <unistd.h>
+#endif
+
 namespace {
 
 constexpr int k_exit_ok = 0;
@@ -108,7 +120,10 @@ const char *const k_usage =
     "  --connection URI   check, outline, complete: read the sql_mode, the version\n"
     "                     and the catalog from this server (its password from the\n"
     "                     shell's secret store); check then also reports tables and\n"
-    "                     columns the server does not have, as warnings\n"
+    "                     columns the server does not have, as warnings.  The URI\n"
+    "                     must not hold a password\n"
+    "  -p, --password     with --connection: ask for the password on the terminal\n"
+    "                     instead of reading the secret store (takes no value)\n"
     "  --shell-bin-dir DIR\n"
     "                     where mariadb-shell and its secret store helpers are\n"
     "                     (default: mariadb-shell on PATH)\n"
@@ -142,6 +157,7 @@ struct Options {
   std::string log;
   std::optional<mdbls::Position> at;  // 0-based
   std::string connection;
+  bool ask_password = false;  // -p
   std::string shell_bin_dir;
   bool mcp = false;
   bool sql_mode_given = false;
@@ -707,11 +723,24 @@ std::optional<Options> parse_args(int argc, char **argv) {
     } else if (arg == "--connection") {
       const auto v = value();
       if (!v) return std::nullopt;
-      if (!mdbls::parse_connection_uri(*v)) {
+      const auto uri = mdbls::parse_connection_uri(*v);
+      if (!uri) {
         std::cerr << "mariadb-lsp: --connection is not a connection URI\n";
         return std::nullopt;
       }
+      // A password on the command line is seen by ps and kept in shell
+      // histories.
+      if (uri->password) {
+        std::cerr << "mariadb-lsp: --connection must not hold a password: use -p, or store it "
+                     "with MariaDB Shell\n";
+        return std::nullopt;
+      }
       o.connection = *v;
+    } else if (arg == "-p" || arg == "--password") {
+      o.ask_password = true;
+    } else if (arg.starts_with("-p") || arg.starts_with("--password=")) {
+      std::cerr << "mariadb-lsp: -p takes no value: the password is asked for on the terminal\n";
+      return std::nullopt;
     } else if (arg == "--shell-bin-dir") {
       const auto v = value();
       if (!v) return std::nullopt;
@@ -780,7 +809,15 @@ std::optional<Options> parse_args(int argc, char **argv) {
               << k_usage;
     return std::nullopt;
   }
+  if (o.ask_password && o.connection.empty()) {
+    std::cerr << "mariadb-lsp: -p goes with --connection\n";
+    return std::nullopt;
+  }
   if (o.command == "lsp" || o.command == "connections") {
+    if (o.ask_password) {
+      std::cerr << "mariadb-lsp: " << o.command << " takes no -p\n";
+      return std::nullopt;
+    }
     if (!o.files.empty()) {
       std::cerr << "mariadb-lsp: " << o.command << " takes no files\n";
       return std::nullopt;
@@ -866,21 +903,76 @@ int run_connections(const Options &o) {
   return k_exit_ok;
 }
 
-// A URI as it may be shown: normalized, so without its password.
+// A URI as it may be shown: normalized.
 std::string redacted(const std::string &uri) {
   return mdbls::normalize_connection_uri(uri).value_or("(the URI)");
+}
+
+// A line read from the terminal without echoing it, after `prompt`;
+// nullopt when there is no terminal.
+std::optional<std::string> ask_hidden(const std::string &prompt) {
+  std::string line;
+#ifdef _WIN32
+  _cputs(prompt.c_str());
+  for (;;) {
+    const wint_t c = _getwch();
+    if (c == L'\r' || c == L'\n' || c == WEOF) break;
+    if (c == 3) return std::nullopt;  // Ctrl-C
+    if (c == L'\b') {
+      // Back one UTF-8 character.
+      while (!line.empty() && (static_cast<unsigned char>(line.back()) & 0xC0) == 0x80) line.pop_back();
+      if (!line.empty()) line.pop_back();
+      continue;
+    }
+    char utf8[4];
+    const int n = WideCharToMultiByte(CP_UTF8, 0, reinterpret_cast<const wchar_t *>(&c), 1, utf8,
+                                      sizeof utf8, nullptr, nullptr);
+    line.append(utf8, n > 0 ? static_cast<size_t>(n) : 0);
+  }
+  _cputs("\r\n");
+#else
+  // The controlling terminal, else stdin when it is a terminal.
+  int fd = ::open("/dev/tty", O_RDWR | O_CLOEXEC);
+  if (fd < 0 && ::isatty(0)) fd = ::dup(0);
+  if (fd < 0) return std::nullopt;
+  termios saved{};
+  const bool tty = ::tcgetattr(fd, &saved) == 0;
+  if (tty) {
+    termios quiet = saved;
+    quiet.c_lflag &= ~static_cast<tcflag_t>(ECHO);
+    ::tcsetattr(fd, TCSAFLUSH, &quiet);
+  }
+  (void)!::write(fd, prompt.data(), prompt.size());
+  char c;
+  while (::read(fd, &c, 1) == 1 && c != '\n' && c != '\r') line.push_back(c);
+  if (tty) ::tcsetattr(fd, TCSAFLUSH, &saved);
+  (void)!::write(fd, "\n", 1);
+  ::close(fd);
+  if (!tty) {
+    std::fill(line.begin(), line.end(), '\0');
+    return std::nullopt;
+  }
+#endif
+  return line;
 }
 
 // --connection: reads the server's catalog, sql_mode and version once.
 bool read_connection(Options &o) {
   const auto uri = mdbls::parse_connection_uri(o.connection);
   std::string error;
-  std::optional<std::string> password = uri->password;
-  if (!password) {
+  std::optional<std::string> password;
+  if (o.ask_password) {
+    password = ask_hidden("Password for " + redacted(o.connection) + ": ");
+    if (!password) {
+      std::cerr << "mariadb-lsp: -p needs a terminal to ask for the password on\n";
+      return false;
+    }
+  } else {
     const mdbls::Secret_store store({o.shell_bin_dir, ""});
     password = store.password_for(o.connection, nullptr, &error);
     if (!password) {
-      std::cerr << "mariadb-lsp: --connection " << redacted(o.connection) << ": " << error << "\n";
+      std::cerr << "mariadb-lsp: --connection " << redacted(o.connection) << ": " << error
+                << " (use -p to type the password)\n";
       return false;
     }
   }

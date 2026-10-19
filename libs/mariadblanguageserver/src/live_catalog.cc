@@ -37,6 +37,17 @@ namespace mdbls {
 
 bool live_connections_supported() { return MDBLS_WITH_CLIENT != 0; }
 
+namespace {
+
+// Overwrites a password before its memory is given back.
+void wipe(std::string &s) {
+  volatile char *p = s.data();
+  for (size_t i = 0; i < s.size(); ++i) p[i] = 0;
+  s.clear();
+}
+
+}  // namespace
+
 #if MDBLS_WITH_CLIENT
 
 namespace {
@@ -47,13 +58,6 @@ void library_init() {
     return true;
   }();
   (void)done;
-}
-
-// Overwrites a password before its memory is given back.
-void wipe(std::string &s) {
-  volatile char *p = s.data();
-  for (size_t i = 0; i < s.size(); ++i) p[i] = 0;
-  s.clear();
 }
 
 class Session {
@@ -106,8 +110,9 @@ constexpr const char *k_not_performance = " <> 'performance_schema'";
 }  // namespace
 
 std::optional<Live_snapshot> fetch_live_catalog(const Connection_uri &uri, std::string password,
-                                                std::string *error,
-                                                const Session_options &options) {
+                                                std::string *error, const Session_options &options,
+                                                bool *login_refused) {
+  if (login_refused != nullptr) *login_refused = false;
   auto fail = [&](const std::string &e) -> std::optional<Live_snapshot> {
     wipe(password);
     if (error != nullptr) *error = e;
@@ -159,7 +164,12 @@ std::optional<Live_snapshot> fetch_live_catalog(const Connection_uri &uri, std::
   const bool connected = mysql_real_connect(m, host, user, password.c_str(), schema, port, socket,
                                             CLIENT_MULTI_RESULTS) != nullptr;
   wipe(password);
-  if (!connected) return fail("cannot connect: " + s.error());
+  if (!connected) {
+    // ER_ACCESS_DENIED_ERROR, ER_ACCESS_DENIED_NO_PASSWORD_ERROR
+    const unsigned code = mysql_errno(m);
+    if (login_refused != nullptr) *login_refused = code == 1045 || code == 1698;
+    return fail("cannot connect: " + s.error());
+  }
   if (mode == "REQUIRED" && mysql_get_ssl_cipher(m) == nullptr) {
     return fail("ssl-mode REQUIRED, but the server offers no TLS");
   }
@@ -338,7 +348,9 @@ std::optional<Live_snapshot> fetch_live_catalog(const Connection_uri &uri, std::
 #else
 
 std::optional<Live_snapshot> fetch_live_catalog(const Connection_uri &, std::string password,
-                                                std::string *error, const Session_options &) {
+                                                std::string *error, const Session_options &,
+                                                bool *login_refused) {
+  if (login_refused != nullptr) *login_refused = false;
   for (auto &c : password) c = 0;
   if (error != nullptr) *error = "this build has no MariaDB client library";
   return std::nullopt;
@@ -400,7 +412,8 @@ Live_catalog::Live_catalog(std::string uri, Live_catalog_options options,
     : m_uri(std::move(uri)),
       m_options(std::move(options)),
       m_on_update(std::move(on_update)),
-      m_interval(m_options.refresh_interval) {
+      m_interval(m_options.refresh_interval),
+      m_secrets(m_options.secrets) {
   m_normalized = normalize_connection_uri(m_uri).value_or("<invalid connection URI>");
   m_thread = std::thread([this] { run(); });
 }
@@ -497,6 +510,11 @@ void Live_catalog::refresh() {
   m_cv.notify_all();
 }
 
+void Live_catalog::set_secrets(Secret_store_options secrets) {
+  std::lock_guard lock(m_mutex);
+  m_secrets = std::move(secrets);
+}
+
 void Live_catalog::set_refresh_interval(std::chrono::seconds interval) {
   {
     std::lock_guard lock(m_mutex);
@@ -538,6 +556,11 @@ void Live_catalog::run() {
     }
     return from + interval;
   };
+  // The password the server last refused, as a fingerprint (the password
+  // itself is not kept), and the error it gave.
+  std::optional<size_t> refused;
+  std::string refused_error;
+  bool asked = false;  // refresh() or the creation wanted this attempt
   for (;;) {
     {
       std::unique_lock lock(m_mutex);
@@ -556,6 +579,7 @@ void Live_catalog::run() {
         }
       }
       if (m_stop) return;
+      asked = m_wanted;
       if (!m_wanted && !due) {
         // Only details were asked for: the schedule stays as it is.
         auto requests = std::move(m_detail_requests);
@@ -587,20 +611,19 @@ void Live_catalog::run() {
     } else if (!live_connections_supported()) {
       error = "this build has no MariaDB client library";
       permanent = true;
+    } else if (parsed->password) {
+      error = "a connection URI must not hold a password: store it with MariaDB Shell";
+      permanent = true;
     } else {
-      std::string source;
-      std::optional<std::string> password;
-      if (parsed->password) {
-        password = *parsed->password;
-      } else {
-        const Secret_store store(m_options.secrets);
-        password = store.password_for(m_uri, &source, &error);
-        if (!password) {
-          error = "connection not configured: " + error;
-          permanent = true;
-        }
+      Secret_store_options secrets;
+      {
+        std::lock_guard lock(m_mutex);
+        secrets = m_secrets;
       }
-      if (password) {
+      const Secret_store store(secrets);
+      const auto fingerprint = [](const std::string &p) { return std::hash<std::string>{}(p); };
+      const auto connect = [&](const std::string &password, const std::string &source,
+                               bool *login_refused) {
         if (m_options.log) {
           m_options.log("live catalog " + m_normalized + ": connecting" +
                         (source.empty() ? "" : " (password from " + source + ")"));
@@ -610,7 +633,39 @@ void Live_catalog::run() {
           std::lock_guard lock(m_mutex);
           return m_stop;
         };
-        snap = fetch_live_catalog(*parsed, std::move(*password), &error, session);
+        return fetch_live_catalog(*parsed, password, &error, session, login_refused);
+      };
+      std::string source;
+      std::optional<std::string> password = store.password_for(m_uri, &source, &error);
+      if (!password) {
+        // Tried again with back-off: the user may store one meanwhile.
+        error = "connection not configured: " + error;
+      } else if (refused && !asked && fingerprint(*password) == *refused) {
+        error = refused_error;
+      } else {
+        bool login_refused = false;
+        snap = connect(*password, source, &login_refused);
+        if (!snap && login_refused) {
+          // The password may have changed in the store since it was read.
+          std::string fresh_source, ignored;
+          auto fresh = store.password_for(m_uri, &fresh_source, &ignored);
+          if (fresh && *fresh != *password) {
+            if (m_options.log) {
+              m_options.log("live catalog " + m_normalized + ": the secret store has a new password");
+            }
+            password.swap(fresh);
+            snap = connect(*password, fresh_source, &login_refused);
+          }
+          if (fresh) wipe(*fresh);
+        }
+        if (!snap && login_refused) {
+          error += " (the stored password was refused: store the new one with MariaDB Shell)";
+          refused = fingerprint(*password);
+          refused_error = error;
+        } else {
+          refused.reset();
+        }
+        wipe(*password);
       }
     }
     {

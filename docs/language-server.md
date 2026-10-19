@@ -81,7 +81,7 @@ completions snippets (`CONCAT($0)`).
 | `mariadb/refreshCatalog` | client to server, request | `{textDocument?: {uri}}`: reads the workspace catalog again, and the catalog of the document's connection (of every connection without `textDocument`), in the background; the result is `null` at once |
 | `mariadb/parseProgress` | server to client, notification | `{uri, version, checked, total, done}` while a large document is checked |
 | `mariadb/dbCall` | server to client, request | `--mcp` only: `{connection, tool, arguments}`, a call of one `db.*` tool of MariaDB Shell's MCP server on the connection URI; the result is the tool's result as the client decoded it, or an error whose `data.permanent` says another call would fail alike (a connection that is not configured). See [MCP mode](#mcp-mode) |
-| `window/showMessage` | server to client | a connection that cannot be used ("connection not configured", a failed login, an SSH URI), once per connection and message; a `connection` that is not a URI, which is refused (and never shown as given, since it may hold a password) |
+| `window/showMessage` | server to client | a connection that cannot be used ("connection not configured", a failed login, an SSH URI, a URI holding a password), once per connection and message until it is read; a `connection` that is not a URI, which is refused (and never shown as given, since it may hold a password) |
 
 When the client announces `window.workDoneProgress`, a large document's check is also
 reported as work done progress ("Checking SQL").
@@ -222,11 +222,13 @@ lower case, port 3306 added. The password is read from MariaDB Shell's secret st
 directly, through its helper program (`mariadb-secret-store-<helper> get|list`, JSON on
 stdin and stdout): the GUI's entry (`GUI:CONN:<uri>`), then the MCP server's
 (`MCP:CONN:<uri>`, and the older `...:Connection:` keys), then one the shell stored
-when it connected itself (secret type `password`, `user@host:port`). A password
-written into the URI is used as it is. The helper is the one the shell would use: the
-variable `MARIADB_SHELL_CREDENTIAL_STORE_HELPER`, else `credentialStore.helper` in the
-shell's `options.json`, else `keychain` (macOS), `windows-credential` (Windows) or
-`login-path`. Helpers run one at a time, so none inherits another's pipes, and one that
+when it connected itself (secret type `password`, `user@host:port`). A URI holding a
+password is refused (`connection`, `documentContext`, the CLI's `--connection`): it
+would end up in settings files, shell histories, `ps` and the client's message traces.
+The CLI's `-p` asks for the password on the terminal instead. The helper is the one
+the shell would use: the variable `MARIADB_SHELL_CREDENTIAL_STORE_HELPER`, else
+`credentialStore.helper` in the shell's `options.json`, else `keychain` (macOS),
+`windows-credential` (Windows) or `login-path`. Helpers run one at a time, so none inherits another's pipes, and one that
 has not finished after 60 s (a keychain prompt nobody answers) is killed.
 
 Each connection has a thread of its own. It connects (5 s connect and 30 s read
@@ -237,10 +239,16 @@ with parameters, triggers and events from `information_schema` (not
 `performance_schema`), and disconnects. It does so when the connection is first named,
 on `mariadb/refreshCatalog`, every `catalogRefreshSeconds`, and after a failure again
 after 5 s, 10 s, 20 s, ... up to five minutes. Shutting down stops a reading between
-its queries. A missing password or an SSH URI
-(`mariadb+ssh://`, not supported) is not retried. No request waits for a connection:
-requests use the last catalog read. The password is held only until the connect call
-returns, and never logged.
+its queries. The password is read from the store on every attempt, so one stored or
+changed meanwhile is used by the next: a missing password is retried like any failure,
+and `mariadb/refreshCatalog` or a change of `shellBinary`, `shellBinDir` or
+`credentialStoreHelper` tries at once. When the server refuses the login, the store is
+read again at once and a changed password tried before the failure is reported; the
+refused password is not tried again on the retry schedule (that could lock the account
+under `max_password_errors`), only when it changes or on `mariadb/refreshCatalog`. An SSH
+URI (`mariadb+ssh://`, not supported) and a URI holding a password are not retried. No
+request waits for a connection: requests use the last catalog read. The password is held
+only until the connect call returns, and never logged.
 
 ## MCP mode
 

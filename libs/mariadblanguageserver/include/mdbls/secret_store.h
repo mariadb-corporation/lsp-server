@@ -46,6 +46,8 @@ struct Secret_store_options {
   // the shell's options.json, else the platform's default (keychain,
   // windows-credential, login-path).
   std::string helper;
+
+  bool operator==(const Secret_store_options &) const = default;
 };
 
 struct Secret_spec {

@@ -40,7 +40,7 @@ mariadb-lsp check --connection app@db.example.com/shop FILE
 
 The language server's capabilities, options and MariaDB-specific messages are described in [docs/language-server.md](docs/language-server.md).
 
-`--sql-mode`, `--delimiter` and `--version-id` set the state at the start of the file; `SET sql_mode` and `DELIMITER` in the file are followed from there. `--connection URI` reads them from a server instead, unless given; the password comes from MariaDB Shell's secret store, found next to `mariadb-shell` on `PATH` or in `--shell-bin-dir`. `mariadb-lsp --help` lists all options.
+`--sql-mode`, `--delimiter` and `--version-id` set the state at the start of the file; `SET sql_mode` and `DELIMITER` in the file are followed from there. `--connection URI` reads them from a server instead, unless given; the password comes from MariaDB Shell's secret store, found next to `mariadb-shell` on `PATH` or in `--shell-bin-dir`, or with `-p` is asked for on the terminal; a URI holding a password is refused. `mariadb-lsp --help` lists all options.
 
 Files are read as UTF-8. A Latin-1 file is converted to UTF-8 first when `--charset latin1` is given, or when it declares `SET NAMES latin1` (also in a versioned comment, as mysqldump writes it) before its first byte that is not UTF-8. Line and column numbers stay those of the original file. Any other file that is not valid UTF-8 is an error naming the first such byte, with exit status 2.
 

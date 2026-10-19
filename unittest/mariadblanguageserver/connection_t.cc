@@ -225,7 +225,7 @@ TEST(Live_catalog, reports_a_connection_that_is_not_configured) {
     EXPECT_EQ(live.normalized_uri(), "mariadb://nobody@127.0.0.1:1");
   }
   {
-    // A password in the URI is used as it is: the connection is refused.
+    // A password in the URI is refused, never sent.
     std::mutex m;
     std::condition_variable cv;
     bool updated = false;
@@ -236,9 +236,8 @@ TEST(Live_catalog, reports_a_connection_that_is_not_configured) {
     });
     std::unique_lock lock(m);
     ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(20), [&] { return updated; }));
-    if (live_connections_supported()) {
-      EXPECT_NE(live.error().find("cannot connect"), std::string::npos) << live.error();
-    }
+    EXPECT_NE(live.error().find("must not hold a password"), std::string::npos) << live.error();
+    EXPECT_EQ(live.error().find("pw@"), std::string::npos);
   }
   {
     Live_catalog ssh("mariadb+ssh://root@host", {});

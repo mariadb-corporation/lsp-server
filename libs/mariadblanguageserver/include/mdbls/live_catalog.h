@@ -70,10 +70,12 @@ struct Session_options {
 // parameters, triggers and events from information_schema (all but
 // performance_schema), and disconnects.  TLS is used when the server offers
 // it (ssl-mode=PREFERRED); the URI's ssl-mode, ssl-ca, ssl-cert and ssl-key
-// options apply.  nullopt, with `error` set, on failure.
+// options apply.  nullopt, with `error` set, on failure; `login_refused`
+// (may be null) then tells whether the server refused the user and password.
 std::optional<Live_snapshot> fetch_live_catalog(const Connection_uri &uri, std::string password,
                                                 std::string *error,
-                                                const Session_options &options = {});
+                                                const Session_options &options = {},
+                                                bool *login_refused = nullptr);
 
 // Reads a connection's catalog some other way than through a direct
 // connection: the language server's --mcp mode asks its client, which has
@@ -123,6 +125,13 @@ struct Live_catalog_options {
 // its own: read when created, when refresh() is called, at the refresh
 // interval, and again with back-off after a failure.  Requests never wait
 // for it; they use the last snapshot.
+//
+// The password is read from the secret store on every attempt, so one
+// stored or changed meanwhile is used by the next.  A URI holding a
+// password is refused.  When the server refuses the login, the store is
+// read again at once and a changed password tried before the failure
+// counts; the refused one is not tried again on a schedule (that could
+// lock the account, max_password_errors), only on refresh().
 class Live_catalog {
  public:
   // `on_update` runs on the background thread after each attempt, success
@@ -152,6 +161,8 @@ class Live_catalog {
   // Reads again this often from now on (0: only on refresh()), counted
   // from the last successful read.
   void set_refresh_interval(std::chrono::seconds interval);
+  // Where passwords come from from now on; the next attempt uses it.
+  void set_secrets(Secret_store_options secrets);
 
   // The last snapshot read, nullptr before the first one.
   std::shared_ptr<const Live_snapshot> snapshot() const;
@@ -179,6 +190,7 @@ class Live_catalog {
   bool m_wanted = true;  // a refresh is due
   std::chrono::seconds m_interval;  // m_options.refresh_interval until set
   bool m_reschedule = false;        // m_interval changed
+  Secret_store_options m_secrets;   // m_options.secrets until set
   std::vector<Detail_request> m_detail_requests;
   std::set<Object_key> m_details_failed;  // since the last reading
   std::shared_ptr<const Live_snapshot> m_snapshot;

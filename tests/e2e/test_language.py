@@ -758,6 +758,134 @@ class Live_connection(unittest.TestCase):
                                      lambda p: "connection not configured" in p["message"], 30)
         self.assertEqual(msg["type"], 2)
 
+    def labels_when_read(self, c, pos, want="item", timeout=30):
+        """Completion labels at `pos` once `want` is among them, or at the end."""
+        deadline = time.monotonic() + timeout
+        while True:
+            r = c.request("textDocument/completion", {"textDocument": {"uri": URI},
+                                                      "position": pos})
+            labels = [i["label"] for i in r["items"]]
+            if want in labels or time.monotonic() > deadline:
+                return labels
+            time.sleep(0.1)
+
+    def test_a_password_in_the_uri_is_refused(self):
+        c = self.client
+        c.open(URI, "SELECT 1;")
+        c.notify("mariadb/documentContext", {
+            "textDocument": {"uri": URI},
+            "connection": "app:app%%20pw@127.0.0.1:%d" % self.server.port})
+        msg, _ = c.wait_notification("window/showMessage",
+                                     lambda p: "must not hold a password" in p["message"], 30)
+        self.assertNotIn("app%20pw", msg["message"])
+        self.assertNotIn("app pw", msg["message"])
+
+    def test_a_password_stored_later_is_used(self):
+        self.server.sql("CREATE USER late@'%' IDENTIFIED BY 'late pw';"
+                        "GRANT SELECT ON store.* TO late@'%';")
+        uri = "late@127.0.0.1:%d" % self.server.port
+        c = self.client
+        text, pos = split_cursor("SELECT * FROM |")
+        c.open(URI, text)
+        c.notify("mariadb/documentContext", {"textDocument": {"uri": URI}, "connection": uri,
+                                             "currentSchema": "store"})
+        c.wait_notification("window/showMessage",
+                            lambda p: "connection not configured" in p["message"], 30)
+        self.secrets.store("generic", "MCP:CONN:" + uri, "rlate pw")
+        # Asked for again: no restart needed.
+        c.request("mariadb/refreshCatalog", {"textDocument": {"uri": URI}})
+        self.assertIn("item", self.labels_when_read(c, pos))
+
+    def test_a_refused_password_is_not_tried_again_until_it_changes(self):
+        self.server.sql("CREATE USER moved@'%' IDENTIFIED BY 'new pw';"
+                        "GRANT SELECT ON store.* TO moved@'%';")
+        uri = "moved@127.0.0.1:%d" % self.server.port
+        self.secrets.store("generic", "MCP:CONN:" + uri, "rold pw")
+        c = self.client
+        text, pos = split_cursor("SELECT * FROM |")
+        c.open(URI, text)
+        c.notify("mariadb/documentContext", {"textDocument": {"uri": URI}, "connection": uri,
+                                             "currentSchema": "store"})
+        msg, _ = c.wait_notification("window/showMessage",
+                                     lambda p: "stored password was refused" in p["message"], 30)
+        self.assertNotIn("old pw", msg["message"])
+        denied = self.server.query("SHOW GLOBAL STATUS LIKE 'Access_denied_errors'")
+        # The first retry comes after 5 s: it reads the store, and does not
+        # log in with the password the server refused.
+        time.sleep(6)
+        self.assertEqual(self.server.query("SHOW GLOBAL STATUS LIKE 'Access_denied_errors'"),
+                         denied)
+        # The next one (10 s later) finds the new password.
+        self.secrets.store("generic", "MCP:CONN:" + uri, "rnew pw")
+        self.assertIn("item", self.labels_when_read(c, pos, timeout=20))
+
+    def test_new_secret_store_settings_reach_connections_already_named(self):
+        c = Client(BINARY)
+        try:
+            c.initialize({"shellBinDir": os.path.join(self.secrets.dir, "nothing")})
+            text, pos = split_cursor("SELECT * FROM |")
+            c.open(URI, text)
+            c.notify("mariadb/documentContext", {"textDocument": {"uri": URI},
+                                                 "connection": self.uri,
+                                                 "currentSchema": "store"})
+            c.wait_notification("window/showMessage",
+                                lambda p: "connection not configured" in p["message"], 30)
+            c.notify("workspace/didChangeConfiguration",
+                     {"settings": {"mariadb": {"shellBinDir": self.secrets.bin}}})
+            self.assertIn("item", self.labels_when_read(c, pos))
+        finally:
+            self.assertEqual(c.close(), 0)
+
+    def test_cli_password(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False) as f:
+            f.write("USE store;\nSELECT lable FROM item;\n")
+        port = self.server.port
+        base = [BINARY, "check", "--shell-bin-dir", self.secrets.bin]
+        try:
+            r = subprocess.run(base + ["--connection", "app:app%%20pw@127.0.0.1:%d" % port, f.name],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("must not hold a password", r.stderr)
+            self.assertNotIn("app%20pw", r.stderr)
+            r = subprocess.run(base + ["--connection", "nobody@127.0.0.1:%d" % port, "-psecret",
+                                       f.name], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("-p takes no value", r.stderr)
+            # Without a terminal there is nobody to ask.
+            r = subprocess.run(base + ["--connection", "nobody@127.0.0.1:%d" % port, "-p", f.name],
+                               capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                               start_new_session=True)
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("-p needs a terminal", r.stderr)
+            if os.name == "nt":
+                return
+            # On a terminal: asked, not echoed.
+            fd, tty = os.openpty()
+            proc = subprocess.Popen(base + ["--connection", "app@127.0.0.1:%d" % port, "-p",
+                                            f.name], stdin=tty, stdout=tty, stderr=tty,
+                                    start_new_session=True)
+            os.close(tty)
+            out = b""
+            while b"Password for" not in out:
+                out += os.read(fd, 1024)
+            os.write(fd, b"app pw\n")
+            while True:
+                try:
+                    chunk = os.read(fd, 1024)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                out += chunk
+            os.close(fd)
+            text = out.decode()
+            self.assertEqual(proc.wait(10), 0, text)
+            self.assertIn("Password for mariadb://app@127.0.0.1:%d: " % port, text)
+            self.assertNotIn("app pw", text)
+            self.assertIn("unknown column `lable` in table `item`", text)
+        finally:
+            os.unlink(f.name)
+
     def test_cli(self):
         env = dict(os.environ)
         with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False) as f:
@@ -772,8 +900,9 @@ class Live_connection(unittest.TestCase):
             r = subprocess.run([BINARY, "connections", "--shell-bin-dir", self.secrets.bin,
                                 "--format", "json"], capture_output=True, text=True, env=env)
             self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertEqual(json.loads(r.stdout), [{
-                "kind": "mcp", "uri": self.uri, "normalized": "mariadb://" + self.uri}])
+            # Other tests store connections of their own in the shared store.
+            self.assertIn({"kind": "mcp", "uri": self.uri, "normalized": "mariadb://" + self.uri},
+                          json.loads(r.stdout))
         finally:
             os.unlink(f.name)
 
