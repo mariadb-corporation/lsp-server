@@ -270,6 +270,7 @@ struct Open_document {
   // the state this document takes from an open script that includes it.
   std::map<std::string, Source_context> include_contexts;
   std::optional<Source_context> includer_context;
+  std::string includer_uri;  // the script it comes from
   bool explicit_schema = false;  // documentContext gave currentSchema
 
   Open_document(std::string u, std::string text, int64_t version, Index_options o)
@@ -1824,6 +1825,7 @@ struct Server::Impl {
               (ctx->schema.empty() ? "none" : ctx->schema) + ", delimiter " + ctx->delimiter + ")");
         }
       }
+      x->includer_uri = ctx ? *by_uri(x->path, uri) : std::string();
       if (ctx == x->includer_context) continue;
       x->includer_context = ctx;
       Index_options o = x->doc.options();
@@ -1831,6 +1833,40 @@ struct Server::Impl {
       set_options(*x, o, true);
       if (!x->explicit_schema) set_schema(*x, ctx ? ctx->schema : "");
     }
+  }
+
+  // The first open document by URI, other than `self`, that includes the
+  // file at `path`.
+  std::optional<std::string> by_uri(const std::string &path, const std::string &self) const {
+    std::optional<std::string> out;
+    for (const auto &[u, d] : documents) {
+      if (u != self && d->include_contexts.contains(path) && (!out || u < *out)) out = u;
+    }
+    return out;
+  }
+
+  // What a references or rename request in `d` needs of the script that
+  // includes it, when one is open; its outline is read in the job.
+  struct Script_sources {
+    Request_sources sources;
+    std::string uri;
+    std::string included_path;
+    std::string included_uri;
+  };
+  std::optional<Script_sources> script_of(Open_document *d) {
+    if (d == nullptr || d->includer_uri.empty()) return std::nullopt;
+    const auto it = documents.find(d->includer_uri);
+    if (it == documents.end()) return std::nullopt;
+    return Script_sources{sources(*it->second), it->first, d->path, d->uri};
+  }
+
+  // The script's Including_script, its outline fresh; in a job.
+  std::optional<Including_script> including(std::optional<Script_sources> &script) {
+    if (!script) return std::nullopt;
+    auto &src = script->sources;
+    src.catalogs.document = document_outline(src.snapshot, src.outline, true);
+    return Including_script{src.snapshot, script->uri, src.catalogs, script->included_path,
+                            script->included_uri};
   }
 
   // The schema in use before the document's first statement, for its
@@ -2101,10 +2137,12 @@ struct Server::Impl {
     // A fresh outline: references across SOURCE includes search the text it
     // was folded from.
     position_request(id, d, params, true,
-                     [this, uri, include](Json_writer &w, const Snapshot &s, Position pos,
-                                          const Catalog_sources &c, Parser_cache &cache) {
+                     [this, uri, include, script = script_of(d)](
+                         Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
+                         Parser_cache &cache) mutable {
+                       const auto in = including(script);
                        references(w, s, uri, pos, include, c, *parse_pool, cache,
-                                  k_priority_request);
+                                  k_priority_request, in ? &*in : nullptr);
                      });
   }
 
@@ -2116,11 +2154,16 @@ struct Server::Impl {
 
   void on_prepare_rename(const std::string &id, Open_document *d, const Json &params) {
     // A fresh outline, as rename uses: both must agree on what can be renamed.
+    const std::string uri = d != nullptr ? d->uri : std::string();
     position_request(id, d, params, true,
-                     [](Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
-                        Parser_cache &cache) {
+                     [this, uri, script = script_of(d)](Json_writer &w, const Snapshot &s,
+                                                        Position pos, const Catalog_sources &c,
+                                                        Parser_cache &cache) mutable {
+                       const auto in = including(script);
                        std::string error;
-                       if (!prepare_rename(w, s, pos, c, cache, &error)) throw Request_failed(error);
+                       if (!prepare_rename(w, s, uri, pos, c, cache, &error, in ? &*in : nullptr)) {
+                         throw Request_failed(error);
+                       }
                      });
   }
 
@@ -2129,11 +2172,13 @@ struct Server::Impl {
     if (!name) return reply_error(id, k_invalid_params, "newName expected");
     const std::string uri = d != nullptr ? d->uri : std::string();
     position_request(id, d, params, true,
-                     [this, uri, name = *name](Json_writer &w, const Snapshot &s, Position pos,
-                                               const Catalog_sources &c, Parser_cache &cache) {
+                     [this, uri, name = *name, script = script_of(d)](
+                         Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
+                         Parser_cache &cache) mutable {
+                       const auto in = including(script);
                        std::string error;
                        if (!rename(w, s, uri, pos, name, c, *parse_pool, cache, k_priority_request,
-                                   &error)) {
+                                   &error, in ? &*in : nullptr)) {
                          throw Request_failed(error);
                        }
                      });

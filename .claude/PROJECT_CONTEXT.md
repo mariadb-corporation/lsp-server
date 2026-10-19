@@ -71,6 +71,7 @@ MariaDB LSP Server (`lsp-server`): a C++ language server for MariaDB SQL, plus a
     - Hover names the defining file.
     - In a SOURCE path, completion lists folders and `.sql` files; `/` is a trigger, answering an empty list outside SOURCE paths.
     - References and rename search `Outline::expanded` (the expanded text and its index, kept by `build_outline`) and map hits back per file. They need a fresh outline, so references use one too.
+    - From an included file, they run in the open script that includes it (`Ref_scope`, `Including_script`; `Open_document::includer_uri`): the position moves into the script's expanded text when the include's text equals the file's current text, else the file is searched alone.
     - An open file that an open script includes takes the script's state where it is included (`Source_context`: schema, `sql_mode`, delimiter; `apply_include_contexts`), below anything the client set. `Outline_options::schema` (from that, or from `currentSchema`) is the outline's initial schema.
     - `schema_in_use` skips comments after `USE`: MSM writes `USE /*<msm:schema_prefix>*/x/*<msm:schema_postfix>*/`, and so does the fixture.
   - **Measured:** on MariaDB Shell's REST project `mariadb_rest_service_next.sql`, 168 objects, no diagnostics, 35 ms for the first `documentSymbol`.
@@ -88,7 +89,7 @@ MariaDB LSP Server (`lsp-server`): a C++ language server for MariaDB SQL, plus a
 6. Incremental caches when they show in profiles: per-statement semantic tokens and DDL trees carried through `Index_splice`; `Sql_mode_tracker` checkpoints (a mysqldump saves/restores sql_mode around every routine, so an edit near the end replays thousands of statements); splice `Statement_index` in place when `use_count()==1`; keep statement verdicts when the splitter reports an error instead of rebuilding everything; diagnostics message/range built once in `apply_checks` rather than in every `publish()`; catalog name lookups via hash maps (O(N²) today); `USE` positions in `Statement_index` so `schema_in_use` stops scanning back.
 7. Export only the public symbols on macOS and Windows (today `WINDOWS_EXPORT_ALL_SYMBOLS` and no `-exported_symbols_list`; the Linux version script is `src/libmariadbparser.map`); make `mdbp_once` an out-of-line function so `mdbp_once.h` stops pulling `<windows.h>`.
 8. P6 rest (in `vscode-extension`): a `mariadb.lsp.indentation` setting (`editor`/`tab`/`2 spaces`/`4 spaces`) passed on as the server's `indentation`; download `mariadb-lsp` when it is missing; the gutter's statement markers from the server instead of the TypeScript scanner; an n:m case in the GUI tests (the shared `uitest` schema has none); drop the client's semantic-token middleware and the ANSI_QUOTES provider once step 2 classifies identifiers and quoted names. P7 (hardening, packaging).
-9. SOURCE (P9) open items: references and rename requested from an included file opened on its own cover that file only (they could run in the context of the script that includes it); check the vscode-extension once it reads `mariadb/outline` (`source` positions are in other files).
+9. SOURCE (P9): when the vscode-extension starts reading `mariadb/outline`, it must take `source` positions as positions in the included files.
 
 ## Gotchas / things not to repeat
 

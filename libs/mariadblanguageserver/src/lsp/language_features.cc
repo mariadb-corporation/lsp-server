@@ -142,29 +142,20 @@ struct Located_reference {
   bool defining = false;
 };
 
-// Where references of `source` are: the URI and the text and line map
-// their ranges are in; no URI for a source that is not there.
-struct Reference_file {
-  std::string uri;
-  std::string_view text;
-  const Line_map *lines = nullptr;
-};
-Reference_file reference_file(const Snapshot &s, const std::string &uri, const Outline *document,
-                              uint32_t source) {
-  if (source == 0) return {uri, *s.text, s.lines.get()};
-  if (document == nullptr || source > document->includes.size()) return {};
-  const auto &inc = document->includes[source - 1];
-  return {path_to_file_uri(inc.path), inc.text, &inc.lines};
-}
-
 std::vector<Located_reference> references_of(const Snapshot &s, const At &at,
                                              const Catalog_sources &c, Parser_pool &pool,
-                                             Parser_cache &cache, int priority) {
+                                             Parser_cache &cache, int priority,
+                                             bool expanded = false) {
   std::vector<Located_reference> out;
   if (at.resolution.statement_local()) {
     for (const auto &r : statement_references(*s.text, *s.index, at.statement, at.resolution.id,
                                               at.view, cache, s.version_id)) {
-      out.push_back({0, r.range, r.defining});
+      if (expanded) {
+        const auto m = c.document->map(r.range);
+        out.push_back({m.source, m.range, r.defining});
+      } else {
+        out.push_back({0, r.range, r.defining});
+      }
     }
     return out;
   }
@@ -193,6 +184,108 @@ std::vector<Located_reference> references_of(const Snapshot &s, const At &at,
       out.push_back({m.source, m.range, r.defining});
     }
   }
+  return out;
+}
+
+// Where references of a source are: the URI, and the text and line map
+// their ranges are in; no line map for a source that is not there.
+struct Reference_file {
+  std::string uri;
+  std::string_view text;
+  const Line_map *lines = nullptr;
+};
+
+// Where a references or rename request runs.  For a document: its own
+// text, or its expanded text when it has SOURCE directives.  For a file an
+// open script includes (`script`): the script's expanded text, the request
+// moved there, so the name is resolved in the script's context and found
+// in the script and every file it includes.
+struct Ref_scope {
+  std::shared_ptr<const Snapshot> searched;  // the text searched
+  Catalog_sources catalogs;
+  bool expanded = false;  // `searched` is catalogs.document->expanded
+  At at;
+  // Source 0's file, and each include's URI.
+  std::string uri;
+  std::shared_ptr<const Snapshot> snapshot;
+  std::vector<std::string> include_uris;
+
+  std::vector<Located_reference> references(Parser_pool &pool, Parser_cache &cache,
+                                            int priority) const {
+    return references_of(*searched, at, catalogs, pool, cache, priority, expanded);
+  }
+  // Where a range of the searched text is.
+  Source_expansion::Located_range locate(Range r) const {
+    return expanded ? catalogs.document->map(r) : Source_expansion::Located_range{0, r};
+  }
+  Reference_file file(uint32_t source) const {
+    if (source == 0) return {uri, *snapshot->text, snapshot->lines.get()};
+    const Outline *doc = catalogs.document.get();
+    if (doc == nullptr || source > doc->includes.size()) return {};
+    const auto &inc = doc->includes[source - 1];
+    return {include_uris[source - 1], inc.text, &inc.lines};
+  }
+};
+
+std::vector<std::string> include_uris(const Outline *doc, const Including_script *script) {
+  std::vector<std::string> out;
+  if (doc == nullptr) return out;
+  for (const auto &inc : doc->includes) {
+    // The requesting document under the URI its client gave.
+    const bool self = script != nullptr && canonical_path(inc.path) == script->included_path;
+    out.push_back(self ? script->included_uri : path_to_file_uri(inc.path));
+  }
+  return out;
+}
+
+std::optional<Ref_scope> ref_scope(const Snapshot &s, const std::string &uri, Position pos,
+                                   const Catalog_sources &c, Parser_cache &cache,
+                                   const Including_script *script) {
+  if (script != nullptr && script->catalogs.document && script->catalogs.document->expanded) {
+    const auto &doc = script->catalogs.document;
+    const auto &e = *doc->expanded;
+    const uint32_t offset = s.lines->offset(*s.text, pos);
+    // The first segment of this file, as its text is now, holding `offset`.
+    for (size_t k = 0; k < e.segments.size(); ++k) {
+      const auto &seg = e.segments[k];
+      if (seg.source == 0) continue;
+      const auto &inc = doc->includes[seg.source - 1];
+      const uint32_t length =
+          (k + 1 < e.segments.size() ? e.segments[k + 1].begin
+                                     : static_cast<uint32_t>(e.text.size())) - seg.begin;
+      if (offset < seg.source_begin || offset > seg.source_begin + length) continue;
+      if (inc.text != *s.text || canonical_path(inc.path) != script->included_path) continue;
+      auto searched = std::make_shared<Snapshot>();
+      searched->text = std::shared_ptr<const std::string>(doc, &e.text);
+      searched->index = e.index;
+      searched->lines = std::make_shared<Line_map>(e.text);
+      searched->version_id = script->snapshot->version_id;
+      searched->index_options = script->snapshot->index_options;
+      const uint32_t at = seg.begin + (offset - seg.source_begin);
+      auto resolved = resolve_at(*searched, searched->lines->position(e.text, at),
+                                 script->catalogs, cache);
+      if (!resolved) break;
+      Ref_scope out;
+      out.searched = std::move(searched);
+      out.catalogs = script->catalogs;
+      out.expanded = true;
+      out.at = std::move(*resolved);
+      out.uri = script->uri;
+      out.snapshot = script->snapshot;
+      out.include_uris = include_uris(doc.get(), script);
+      return out;
+    }
+  }
+  // The document itself, with what it includes.
+  auto resolved = resolve_at(s, pos, c, cache);
+  if (!resolved) return std::nullopt;
+  Ref_scope out;
+  out.searched = std::shared_ptr<const Snapshot>(std::shared_ptr<const Snapshot>(), &s);
+  out.catalogs = c;
+  out.at = std::move(*resolved);
+  out.uri = uri;
+  out.snapshot = out.searched;
+  out.include_uris = include_uris(c.document.get(), nullptr);
   return out;
 }
 
@@ -423,13 +516,13 @@ void definition(Json_writer &w, const Snapshot &s, const std::string &uri, Posit
 
 void references(Json_writer &w, const Snapshot &s, const std::string &uri, Position pos,
                 bool include_declaration, const Catalog_sources &c, Parser_pool &pool,
-                Parser_cache &cache, int priority) {
-  const auto at = resolve_at(s, pos, c, cache);
+                Parser_cache &cache, int priority, const Including_script *script) {
+  const auto scope = ref_scope(s, uri, pos, c, cache, script);
   w.StartArray();
-  if (at && at->resolution.found()) {
-    for (const auto &ref : references_of(s, *at, c, pool, cache, priority)) {
+  if (scope && scope->at.resolution.found()) {
+    for (const auto &ref : scope->references(pool, cache, priority)) {
       if (ref.defining && !include_declaration) continue;
-      const auto f = reference_file(s, uri, c.document.get(), ref.source);
+      const auto f = scope->file(ref.source);
       if (f.lines != nullptr) location(w, f.uri, f.text, *f.lines, ref.range);
     }
   }
@@ -454,18 +547,26 @@ void document_highlight(Json_writer &w, const Snapshot &s, Position pos, const C
   w.EndArray();
 }
 
-bool prepare_rename(Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
-                    Parser_cache &cache, std::string *error) {
-  const auto at = resolve_at(s, pos, c, cache);
-  if (!at) {
+bool prepare_rename(Json_writer &w, const Snapshot &s, const std::string &uri, Position pos,
+                    const Catalog_sources &c, Parser_cache &cache, std::string *error,
+                    const Including_script *script) {
+  const auto scope = ref_scope(s, uri, pos, c, cache, script);
+  if (!scope) {
     *error = "there is no name here to rename";
     return false;
   }
-  if (!renamable(at->resolution, error)) return false;
-  const auto &ref = at->resolution.ref;
+  if (!renamable(scope->at.resolution, error)) return false;
+  const auto &ref = scope->at.resolution.ref;
+  // In the requesting document's own text.
+  const auto at = scope->locate(ref.range);
+  const auto f = scope->file(at.source);
+  if (f.lines == nullptr || f.uri != uri) {
+    *error = "there is no name here to rename";
+    return false;
+  }
   w.StartObject();
   w.Key("range");
-  write_range(w, s, ref.range.begin, ref.range.end);
+  write_range(w, f.text, *f.lines, at.range.begin, at.range.end);
   str(w, "placeholder", ref.name);
   w.EndObject();
   return true;
@@ -473,32 +574,31 @@ bool prepare_rename(Json_writer &w, const Snapshot &s, Position pos, const Catal
 
 bool rename(Json_writer &w, const Snapshot &s, const std::string &uri, Position pos,
             const std::string &new_name, const Catalog_sources &c, Parser_pool &pool,
-            Parser_cache &cache, int priority, std::string *error) {
+            Parser_cache &cache, int priority, std::string *error,
+            const Including_script *script) {
   const std::string name = unquote_name(new_name);
   if (name.empty()) {
     *error = "the new name is empty";
     return false;
   }
-  const auto at = resolve_at(s, pos, c, cache);
-  if (!at) {
+  const auto scope = ref_scope(s, uri, pos, c, cache, script);
+  if (!scope) {
     *error = "there is no name here to rename";
     return false;
   }
-  if (!renamable(at->resolution, error)) return false;
+  if (!renamable(scope->at.resolution, error)) return false;
   const std::string text = quote_identifier(name);
-  // The edits by file: the document's, and those of the files it includes.
-  const auto refs = references_of(s, *at, c, pool, cache, priority);
-  std::map<uint32_t, std::vector<Range>> by_source;
-  by_source[0];
-  for (const auto &ref : refs) by_source[ref.source].push_back(ref.range);
+  // The edits by file: the document's, and those of the files it includes
+  // or of the script that includes it.
   std::map<std::string, std::vector<Range>> by_uri;
   std::map<std::string, Reference_file> files;
-  for (const auto &[source, ranges] : by_source) {
-    const auto f = reference_file(s, uri, c.document.get(), source);
+  by_uri[uri];
+  files.emplace(uri, Reference_file{uri, *s.text, s.lines.get()});
+  for (const auto &ref : scope->references(pool, cache, priority)) {
+    const auto f = scope->file(ref.source);
     if (f.lines == nullptr) continue;
-    auto &all = by_uri[f.uri];
-    all.insert(all.end(), ranges.begin(), ranges.end());
-    files.emplace(f.uri, f);
+    by_uri[f.uri].push_back(ref.range);
+    files.insert_or_assign(f.uri, f);
   }
   w.StartObject();
   w.Key("changes");

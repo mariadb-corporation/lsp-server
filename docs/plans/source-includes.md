@@ -196,7 +196,13 @@ every segment maps 1:1.
 
 They came with 2 more unit tests and 3 more e2e tests (`test_path_completion`, `test_included_file_takes_the_script_context`, and references, rename and hover in `test_navigation_into_an_include`). On the REST project, every section with objects lists them under `mariadb_rest_service` once the script is open.
 
-Still open: references and rename requested from an included file opened on its own cover that file only.
+Also done: references and rename requested from an included file run in the open script that includes it (`Including_script`, `Ref_scope` in `language_features.cc`):
+
+- The request's position moves into the script's expanded text, once the include's text is checked to be the file's current one.
+- The results come back per file, the requesting one under its client's URI. Otherwise the request falls back to the file alone.
+- e2e `test_navigation_from_an_included_file`.
+
+The vscode-extension needed no code: it does not read `mariadb/outline`, and links, the `/` trigger and the file watcher registration come through the language client library. Its notes, changelog and an LSP UI test cover SOURCE (branch `wip/lsp-indentation`).
 
 **Done (2026-10-19): steps 1 to 7.** Step 6's fixture and tests came with steps 2 and 4. Step 7 documents SOURCE in `docs/language-server.md` (a "SOURCE includes" section, the capability rows, the `source` diagnostic code), `docs/outline-format.md` (`includes`, `source`) and the README. Open items are in §5, plus checking the vscode-extension against the `source` field once it reads `mariadb/outline`, and `db.execute_sql_script` in the MCP plugin, which should expand SOURCE too (a prompt for that work was handed over; nothing is implemented yet).
 

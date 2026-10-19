@@ -249,6 +249,47 @@ class Source_includes(unittest.TestCase):
             lambda p: p["uri"] == helpers_uri and any(
                 d.get("code") == "syntax-error" for d in p["diagnostics"]), 20, mark)
 
+    def test_navigation_from_an_included_file(self):
+        tables = self.dev / "sections" / "140_tables.sql"
+        tables_uri = tables.as_uri()
+        text = tables.read_text()
+        self.client.open(tables_uri, text)
+        at = {"textDocument": {"uri": tables_uri},
+              "position": position_of(text, "customer (", 2)}
+
+        def files_of(refs):
+            out = {}
+            for r in refs:
+                out.setdefault(pathlib.Path(r["uri"][len("file://"):]).name, []).append(
+                    r["range"]["start"]["line"])
+            return out
+
+        # On its own: this file only.
+        refs = self.client.request("textDocument/references",
+                                   {**at, "context": {"includeDeclaration": True}})
+        self.assertEqual(files_of(refs), {"140_tables.sql": [2, 6, 10]})
+
+        # With the script that includes it open: the script and its files.
+        self.client.open(self.uri, self.text)
+        deadline = time.monotonic() + 20
+        while True:
+            refs = self.client.request("textDocument/references",
+                                       {**at, "context": {"includeDeclaration": True}})
+            if len(files_of(refs)) > 1 or time.monotonic() > deadline:
+                break
+            time.sleep(0.1)
+        self.assertEqual(files_of(refs), {"140_tables.sql": [2, 6, 10], "150_routines.sql": [9],
+                                          "170_roles.sql": [0], "shop_next.sql": [16]})
+        # This file's locations under the URI the client gave it.
+        self.assertIn(tables_uri, [r["uri"] for r in refs])
+
+        prepared = self.client.request("textDocument/prepareRename", at)
+        self.assertEqual(prepared["range"]["start"], {"line": 2, "character": 13})
+        edits = self.client.request("textDocument/rename", {**at, "newName": "client"})["changes"]
+        self.assertEqual(len(edits[tables_uri]), 3)
+        self.assertEqual(len(edits[self.uri]), 1)
+        self.assertEqual(len(edits[(self.dev / "sections" / "150_routines.sql").as_uri()]), 1)
+
     def test_document_links(self):
         self.client.open(self.uri, self.text)
         links = self.client.request("textDocument/documentLink",

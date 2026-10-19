@@ -83,10 +83,23 @@ void hover(Json_writer &w, const Snapshot &s, Position pos, const Catalog_source
 void definition(Json_writer &w, const Snapshot &s, const std::string &uri, Position pos,
                 const Catalog_sources &c, Parser_cache &cache);
 
-// Location[] of every reference in the document.
+// The open script that includes a document (SOURCE), for references and
+// rename requested in the included one: they run in the script's context
+// and cover the script and every file it includes.
+struct Including_script {
+  std::shared_ptr<const Snapshot> snapshot;  // the script's
+  std::string uri;                           // the script's
+  Catalog_sources catalogs;                  // the script's; `document` its fresh outline
+  std::string included_path;                 // the included document's canonical path
+  std::string included_uri;                  // and its URI
+};
+
+// Location[] of every reference in the document, and in the files it
+// includes (or, with `script`, in the script that includes it and its
+// files).
 void references(Json_writer &w, const Snapshot &s, const std::string &uri, Position pos,
                 bool include_declaration, const Catalog_sources &c, Parser_pool &pool,
-                Parser_cache &cache, int priority);
+                Parser_cache &cache, int priority, const Including_script *script = nullptr);
 
 // DocumentHighlight[] within the statement at `pos`.
 void document_highlight(Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
@@ -95,13 +108,15 @@ void document_highlight(Json_writer &w, const Snapshot &s, Position pos, const C
 // prepareRename: {range, placeholder}; false with `error` when the name at
 // `pos` cannot be renamed (only aliases, CTEs, variables and the objects
 // the document itself defines can).
-bool prepare_rename(Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
-                    Parser_cache &cache, std::string *error);
+bool prepare_rename(Json_writer &w, const Snapshot &s, const std::string &uri, Position pos,
+                    const Catalog_sources &c, Parser_cache &cache, std::string *error,
+                    const Including_script *script = nullptr);
 
 // rename: a WorkspaceEdit for this document; false with `error` as above.
 bool rename(Json_writer &w, const Snapshot &s, const std::string &uri, Position pos,
             const std::string &new_name, const Catalog_sources &c, Parser_pool &pool,
-            Parser_cache &cache, int priority, std::string *error);
+            Parser_cache &cache, int priority, std::string *error,
+            const Including_script *script = nullptr);
 
 void signature_help(Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
                     Parser_cache &cache, Details_pass &pass);
