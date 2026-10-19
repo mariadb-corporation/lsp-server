@@ -20,6 +20,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -64,6 +65,18 @@ struct Source_slice {
 };
 Source_slice slice_source(std::string_view text, std::string_view start, std::string_view end);
 
+// The state of the including script where an included text begins: what
+// a file opened on its own is read with when an open script includes it.
+// Inside a statement (a routine body) the delimiter is ";".
+struct Source_context {
+  bool known = false;
+  std::string schema;  // in use; "" for none
+  std::string sql_mode;
+  std::string delimiter;
+
+  bool operator==(const Source_context &) const = default;
+};
+
 // The file one directive includes.
 struct Source_include {
   Source_directive directive;  // in the including text
@@ -76,6 +89,7 @@ struct Source_include {
   // Directives in the selected text, offsets in `text`: msm expands one
   // level only, so they stay as they are.
   std::vector<Source_directive> nested;
+  Source_context context;  // set by build_outline()
 };
 
 // The folder of a document's path, which its relative SOURCE paths are
@@ -85,6 +99,28 @@ std::string source_folder(const std::string &document_path);
 // "140_tables.sql:12": the file name and the line (1-based) of `offset` in
 // an include's text.
 std::string source_location(const Source_include &include, uint32_t offset);
+
+// The path being typed in a SOURCE directive: `offset` is on a line that
+// starts with `SOURCE` and a quote, after the quote, with no closing quote
+// before it.  `typed` is the path up to `offset`, `segment` where its last
+// part (after the last '/') begins.
+struct Source_path_at {
+  uint32_t path = 0;
+  uint32_t segment = 0;
+  std::string typed;
+};
+std::optional<Source_path_at> source_path_at(std::string_view text, uint32_t offset);
+
+// What may follow `typed` in a SOURCE path: the folders and .sql files of
+// the folder its part up to the last '/' names, relative to `base_dir`.
+// Names starting with '.' only when the last part does.  Folders first.
+struct Source_path_candidate {
+  std::string name;
+  bool folder = false;
+};
+std::vector<Source_path_candidate> source_path_candidates(const std::string &base_dir,
+                                                          std::string_view typed,
+                                                          size_t max = 500);
 
 // Reads a file as UTF-8; false when it cannot be read.
 using Source_reader = std::function<bool(const std::string &path, std::string *text)>;
@@ -120,6 +156,13 @@ struct Source_expansion {
   // the end of the selected text when it starts in an include.
   Located_range map(Range range) const;
 };
+
+// Source_expansion::map() over segments and includes kept apart.
+Source_expansion::Location map_source(const std::vector<Source_expansion::Segment> &segments,
+                                      uint32_t offset);
+Source_expansion::Located_range map_source(
+    const std::vector<Source_expansion::Segment> &segments,
+    const std::vector<Source_include> &includes, Range range);
 
 // Something wrong with a directive, in the including text: a file that
 // cannot be read (on the path), a malformed slice (on the slice), nothing

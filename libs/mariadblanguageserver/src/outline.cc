@@ -24,6 +24,7 @@
 #include <optional>
 
 #include "mdbls/lsp/json_position.h"
+#include "mdbls/navigation.h"
 #include "mdbparse.h"
 
 namespace mdbls {
@@ -31,6 +32,7 @@ namespace mdbls {
 Outline build_outline(std::string_view text, const Statement_index &index, Parser_pool &pool,
                       const Outline_options &options) {
   Outline out;
+  out.catalog.set_current_schema(options.schema);
   fold_outline(out, text, index, pool, options, 0);
   return out;
 }
@@ -95,13 +97,15 @@ void fold_outline(Outline &out, std::string_view text, const Statement_index &in
             [](const auto &a, const auto &b) { return a.first < b.first; });
 }
 
-void fold_outline(Outline &out, const Source_expansion &e, Parser_pool &pool,
-                  const Index_options &index_options, const Outline_options &options,
-                  uint32_t source, const std::vector<uint32_t> &include_sources) {
+namespace {
+
+// fold_outline() of an expanded text, with its index.
+void fold_expanded(Outline &out, const Source_expansion &e, const Statement_index &index,
+                   Parser_pool &pool, const Outline_options &options, uint32_t source,
+                   const std::vector<uint32_t> &include_sources) {
   // Origins of this fold are marked, then mapped back.
   constexpr uint32_t k_pending = UINT32_MAX;
   const size_t first_note = out.notes.size();
-  const auto index = Statement_index::build_parallel(e.text, index_options, 0);
   fold_outline(out, e.text, index, pool, options, k_pending);
 
   auto to_source = [&](uint32_t s) { return s == 0 ? source : include_sources[s - 1]; };
@@ -137,12 +141,53 @@ void fold_outline(Outline &out, const Source_expansion &e, Parser_pool &pool,
                    [](const auto &a, const auto &b) { return a.first < b.first; });
 }
 
+// The including script's state where each include begins.
+void set_contexts(Source_expansion &e, const Statement_index &index, const std::string &schema) {
+  const auto &st = index.statements();
+  if (st.empty()) return;
+  const auto schemas = schemas_in_use(e.text, index, schema);
+  for (const auto &seg : e.segments) {
+    if (seg.source == 0) continue;
+    auto &ctx = e.includes[seg.source - 1].context;
+    if (ctx.known) continue;
+    // The statement the included text begins in, else the first after it.
+    const auto it = std::lower_bound(st.begin(), st.end(), seg.begin,
+                                     [](const Statement &s, uint32_t o) { return s.end <= o; });
+    const size_t i = it == st.end() ? st.size() - 1 : static_cast<size_t>(it - st.begin());
+    const Statement &s = st[i];
+    ctx.known = true;
+    ctx.schema = schemas[i];
+    ctx.sql_mode = index.modes()[s.mode].mode;
+    const bool inside = s.begin < seg.begin && s.kind == Statement_kind::sql;
+    const std::string &d = index.delimiters()[s.active_delimiter];
+    ctx.delimiter = inside || d.empty() ? ";" : d;
+  }
+}
+
+}  // namespace
+
+void fold_outline(Outline &out, const Source_expansion &e, Parser_pool &pool,
+                  const Index_options &index_options, const Outline_options &options,
+                  uint32_t source, const std::vector<uint32_t> &include_sources) {
+  const auto index = Statement_index::build_parallel(e.text, index_options, 0);
+  fold_expanded(out, e, index, pool, options, source, include_sources);
+}
+
 Outline build_outline(Source_expansion expansion, Parser_pool &pool,
                       const Index_options &index_options, const Outline_options &options) {
   Outline out;
+  out.catalog.set_current_schema(options.schema);
   std::vector<uint32_t> sources(expansion.includes.size());
   for (size_t k = 0; k < sources.size(); ++k) sources[k] = static_cast<uint32_t>(k + 1);
-  fold_outline(out, expansion, pool, index_options, options, 0, sources);
+  auto index = std::make_shared<const Statement_index>(
+      Statement_index::build_parallel(expansion.text, index_options, 0));
+  fold_expanded(out, expansion, *index, pool, options, 0, sources);
+  set_contexts(expansion, *index, options.schema);
+  auto expanded = std::make_shared<Outline::Expanded>();
+  expanded->text = std::move(expansion.text);
+  expanded->segments = std::move(expansion.segments);
+  expanded->index = std::move(index);
+  out.expanded = std::move(expanded);
   out.includes = std::move(expansion.includes);
   return out;
 }

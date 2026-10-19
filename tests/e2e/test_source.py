@@ -25,7 +25,7 @@ import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
-from lsp_client import Client, Lsp_error  # noqa: E402
+from lsp_client import Client  # noqa: E402
 from test_lsp import BINARY, FIXTURES  # noqa: E402
 
 # A reference to an included table, so navigation has a name to start from.
@@ -154,14 +154,100 @@ class Source_includes(unittest.TestCase):
         self.assertEqual(len(locs), 1)
         self.assertEqual(locs[0]["uri"], (self.dev / "sections" / "140_tables.sql").as_uri())
         self.assertEqual(locs[0]["range"]["start"], {"line": 2, "character": 13})
-        # Its name is the included file's to change.
-        with self.assertRaises(Lsp_error) as e:
-            self.client.request("textDocument/prepareRename", at)
-        self.assertIn("140_tables.sql:3", str(e.exception))
+        # The hover says which file defines it.
+        hover = self.client.request("textDocument/hover", at)
+        self.assertIn("Defined in `140_tables.sql:3`, which this document includes.",
+                      hover["contents"]["value"])
+        # References and rename cover the files the script includes, the
+        # procedure body's too.
+        refs = self.client.request("textDocument/references",
+                                   {**at, "context": {"includeDeclaration": True}})
+        lines = {}
+        for r in refs:
+            lines.setdefault(pathlib.Path(r["uri"][len("file://"):]).name, []).append(
+                r["range"]["start"]["line"])
+        self.assertEqual(lines, {"140_tables.sql": [2, 6, 10], "150_routines.sql": [9],
+                                 "170_roles.sql": [0], "shop_next.sql": [16]})
+        self.client.request("textDocument/prepareRename", at)
+        edits = self.client.request("textDocument/rename", {**at, "newName": "client"})["changes"]
+        tables = edits[(self.dev / "sections" / "140_tables.sql").as_uri()]
+        self.assertEqual([e["range"]["start"] for e in tables],
+                         [{"line": 2, "character": 13}, {"line": 6, "character": 12},
+                          {"line": 10, "character": 39}])
+        self.assertEqual({e["newText"] for e in tables}, {"client"})
+        self.assertEqual(len(edits[self.uri]), 1)
         # Workspace symbols point into the included file too.
         found = self.client.request("workspace/symbol", {"query": "customer_orders"})
         self.assertEqual([s["location"]["uri"] for s in found],
                          [(self.dev / "sections" / "150_routines.sql").as_uri()])
+
+    def test_path_completion(self):
+        def complete(text, trigger=None):
+            uri = (self.dev / "new_next.sql").as_uri()
+            self.client.open(uri, text)
+            line = text.count("\n")
+            params = {"textDocument": {"uri": uri},
+                      "position": {"line": line, "character": len(text) - text.rfind("\n") - 1}}
+            if trigger:
+                params["context"] = {"triggerKind": 2, "triggerCharacter": trigger}
+            items = self.client.request("textDocument/completion", params)["items"]
+            self.client.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
+            return items
+
+        items = complete("USE shop;\nSOURCE './")
+        self.assertIn("sections/", [i["label"] for i in items])
+        folder = next(i for i in items if i["label"] == "sections/")
+        self.assertEqual(folder["kind"], 19)
+        self.assertEqual(folder["command"]["command"], "editor.action.triggerSuggest")
+        items = complete("SOURCE './sections/1", "/")
+        self.assertEqual([i["label"] for i in items],
+                         ["140_tables.sql", "150_routines.sql", "170_roles.sql", "180_extra.sql"])
+        # The typed part of the name is what the item replaces.
+        self.assertEqual(items[0]["textEdit"]["range"]["start"], {"line": 0, "character": 19})
+        self.assertEqual(items[0]["textEdit"]["range"]["end"], {"line": 0, "character": 20})
+        # Elsewhere '/' is a division: nothing.
+        self.assertEqual(complete("SELECT 1 /", "/"), [])
+
+    def test_included_file_takes_the_script_context(self):
+        # A section included in a DELIMITER $$ region, after a USE.
+        (self.dev / "sections" / "190_helpers.sql").write_text(
+            "CREATE PROCEDURE helper()\nBEGIN\n  SELECT 1;\nEND$$\n"
+            "CREATE TABLE helped (id INT)$$\n")
+        script = self.dev / "helpers_next.sql"
+        script.write_text("USE shop;\nDELIMITER $$\nSOURCE './sections/190_helpers.sql';\n"
+                          "DELIMITER ;\n")
+        helpers_uri = (self.dev / "sections" / "190_helpers.sql").as_uri()
+        helpers = (self.dev / "sections" / "190_helpers.sql").read_text()
+
+        # On its own: ';' ends the procedure early.
+        mark = self.client.mark()
+        self.client.open(helpers_uri, helpers)
+        diags = self.client.diagnostics(helpers_uri, after=mark)
+        self.assertTrue(any(d.get("code") == "syntax-error" for d in diags))
+
+        # With the script open: '$$' and the schema shop.
+        mark = self.client.mark()
+        self.client.open(script.as_uri(), script.read_text())
+        self.client.wait_notification(
+            "textDocument/publishDiagnostics",
+            lambda p: p["uri"] == helpers_uri and not p["diagnostics"], 20, mark)
+        deadline = time.monotonic() + 20
+        while True:
+            symbols = self.symbols(helpers_uri)
+            if find_symbol(symbols, "shop") or time.monotonic() > deadline:
+                break
+            time.sleep(0.1)
+        shop = find_symbol(symbols, "shop")
+        self.assertIsNotNone(shop)
+        self.assertEqual(sorted(c["name"] for c in shop["children"]), ["helped", "helper"])
+
+        # The script closed: its own context again.
+        mark = self.client.mark()
+        self.client.notify("textDocument/didClose", {"textDocument": {"uri": script.as_uri()}})
+        self.client.wait_notification(
+            "textDocument/publishDiagnostics",
+            lambda p: p["uri"] == helpers_uri and any(
+                d.get("code") == "syntax-error" for d in p["diagnostics"]), 20, mark)
 
     def test_document_links(self):
         self.client.open(self.uri, self.text)

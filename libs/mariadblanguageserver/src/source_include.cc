@@ -18,6 +18,7 @@
 #include "mdbls/source_include.h"
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <optional>
 
@@ -217,26 +218,89 @@ Source_slice slice_source(std::string_view text, std::string_view start, std::st
   return out;
 }
 
-Source_expansion::Location Source_expansion::map(uint32_t offset) const {
+Source_expansion::Location map_source(const std::vector<Source_expansion::Segment> &segments,
+                                      uint32_t offset) {
   if (segments.empty()) return {0, offset};
   auto it = std::upper_bound(segments.begin(), segments.end(), offset,
-                             [](uint32_t o, const Segment &s) { return o < s.begin; });
+                             [](uint32_t o, const Source_expansion::Segment &s) { return o < s.begin; });
   if (it != segments.begin()) --it;
   return {it->source, it->source_begin + (offset - it->begin)};
 }
 
-Source_expansion::Located_range Source_expansion::map(Range range) const {
-  const Location b = map(range.begin);
+Source_expansion::Located_range map_source(
+    const std::vector<Source_expansion::Segment> &segments,
+    const std::vector<Source_include> &includes, Range range) {
+  const auto b = map_source(segments, range.begin);
   if (range.end <= range.begin) return {b.source, {b.offset, b.offset}};
-  const Location e = map(range.end - 1);
+  const auto e = map_source(segments, range.end - 1);
   if (e.source == b.source) return {b.source, {b.offset, e.offset + 1}};
   if (b.source > 0) return {b.source, {b.offset, includes[b.source - 1].selected.end}};
   // From the including text into an include: up to that include's directive.
   auto it = std::upper_bound(segments.begin(), segments.end(), range.begin,
-                             [](uint32_t o, const Segment &s) { return o < s.begin; });
+                             [](uint32_t o, const Source_expansion::Segment &s) { return o < s.begin; });
   while (it != segments.end() && it->source == 0) ++it;
-  const uint32_t stop = it == segments.end() ? b.offset : includes[it->source - 1].directive.statement.end;
+  const uint32_t stop =
+      it == segments.end() ? b.offset : includes[it->source - 1].directive.statement.end;
   return {0, {b.offset, std::max(b.offset, stop)}};
+}
+
+Source_expansion::Location Source_expansion::map(uint32_t offset) const {
+  return map_source(segments, offset);
+}
+
+Source_expansion::Located_range Source_expansion::map(Range range) const {
+  return map_source(segments, includes, range);
+}
+
+std::optional<Source_path_at> source_path_at(std::string_view t, uint32_t offset) {
+  if (offset > t.size()) return std::nullopt;
+  size_t line = offset;
+  while (line > 0 && t[line - 1] != '\n' && t[line - 1] != '\r') --line;
+  size_t p = line;
+  while (p < offset && (t[p] == ' ' || t[p] == '\t')) ++p;
+  if (t.substr(p, 6) != "SOURCE") return std::nullopt;
+  p += 6;
+  const size_t after = p;
+  while (p < offset && (t[p] == ' ' || t[p] == '\t')) ++p;
+  if (p == after || p >= offset || (t[p] != '\'' && t[p] != '"')) return std::nullopt;
+  const char quote = t[p];
+  const size_t path = p + 1;
+  const std::string_view typed = t.substr(path, offset - path);
+  if (typed.find(quote) != std::string_view::npos) return std::nullopt;
+  Source_path_at out;
+  out.path = static_cast<uint32_t>(path);
+  const size_t slash = typed.find_last_of('/');
+  out.segment = static_cast<uint32_t>(path + (slash == std::string_view::npos ? 0 : slash + 1));
+  out.typed = typed;
+  return out;
+}
+
+std::vector<Source_path_candidate> source_path_candidates(const std::string &base_dir,
+                                                          std::string_view typed, size_t max) {
+  std::vector<Source_path_candidate> out;
+  const size_t slash = typed.find_last_of('/');
+  const std::string folder = slash == std::string_view::npos ? "." : std::string(typed.substr(0, slash + 1));
+  const std::string last(slash == std::string_view::npos ? typed : typed.substr(slash + 1));
+  const std::string dir = resolve_source_path(base_dir, folder);
+  if (dir.empty()) return out;
+  std::error_code ec;
+  for (fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end;
+       !ec && it != end && out.size() < max; it.increment(ec)) {
+    const std::string name = it->path().filename().string();
+    if (name.starts_with('.') && !last.starts_with('.')) continue;
+    std::error_code e2;
+    if (it->is_directory(e2)) {
+      out.push_back({name, true});
+    } else if (it->is_regular_file(e2)) {
+      std::string ext = it->path().extension().string();
+      for (auto &ch : ext) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+      if (ext == ".sql") out.push_back({name, false});
+    }
+  }
+  std::sort(out.begin(), out.end(), [](const auto &a, const auto &b) {
+    return a.folder != b.folder ? a.folder : a.name < b.name;
+  });
+  return out;
 }
 
 std::string source_folder(const std::string &document_path) {

@@ -50,6 +50,12 @@ struct Catalog_sources {
   std::string schema_hint;  // documentContext's currentSchema
 };
 
+// When `pos` is in the path of a SOURCE directive: writes a CompletionList
+// of the folders and .sql files there (`folder` is the document's, for
+// relative paths) and returns true.
+bool source_path_completion(Json_writer &w, const Snapshot &s, Position pos,
+                            const std::string &folder);
+
 // The catalogs as one view, the current schema the one in use at `offset`.
 Catalog_view catalog_view(const Snapshot &s, const Catalog_sources &c, uint32_t offset);
 

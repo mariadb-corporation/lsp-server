@@ -1,6 +1,6 @@
 -- An MSM development script: its sections are in sections/, included with
 -- SOURCE as msm_plugin's prepare_release expands it.
-USE shop;
+USE /*<msm:schema_prefix>*/shop/*<msm:schema_postfix>*/;
 
 SOURCE './sections/140_tables.sql'[ln3:ln-2]; -- Remove header and footer
 

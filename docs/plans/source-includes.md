@@ -187,6 +187,17 @@ every segment maps 1:1.
 
 ## Status
 
+**The four open items of §5 are done (2026-10-19):**
+
+- **Hover** names the file and line of an object a file the document includes defines.
+- **Path completion** in `SOURCE '...'`: folders and `.sql` files, with `/` as a trigger that answers an empty list outside a SOURCE path (`source_path_at`, `source_path_candidates`).
+- **Context for an included file opened on its own:** `build_outline` records for each include the script's schema, `sql_mode` and delimiter where it begins (`Source_context`; `;` inside a routine body). The server applies them, below anything the client set, to an open file an open script includes (`apply_include_contexts`, the first script by URI), and drops them when no script includes it any more. `Outline_options::schema` gives a document's outline its initial schema, from that context or from the client's `currentSchema`. This needed `schema_in_use` to skip comments after `USE`: MSM writes `USE /*<msm:schema_prefix>*/name/*<msm:schema_postfix>*/`.
+- **References and rename across includes:** the outline keeps the expanded text and its index (`Outline::expanded`, `Outline::map`). References search that text and map each hit back to its file, a file included twice listed once. Rename writes edits per file and no longer refuses included objects; references now use a fresh outline, as rename does.
+
+They came with 2 more unit tests and 3 more e2e tests (`test_path_completion`, `test_included_file_takes_the_script_context`, and references, rename and hover in `test_navigation_into_an_include`). On the REST project, every section with objects lists them under `mariadb_rest_service` once the script is open.
+
+Still open: references and rename requested from an included file opened on its own cover that file only.
+
 **Done (2026-10-19): steps 1 to 7.** Step 6's fixture and tests came with steps 2 and 4. Step 7 documents SOURCE in `docs/language-server.md` (a "SOURCE includes" section, the capability rows, the `source` diagnostic code), `docs/outline-format.md` (`includes`, `source`) and the README. Open items are in §5, plus checking the vscode-extension against the `source` field once it reads `mariadb/outline`, and `db.execute_sql_script` in the MCP plugin, which should expand SOURCE too (a prompt for that work was handed over; nothing is implemented yet).
 
 Step 1 is done (2026-10-19). `source_include.{h,cc}` provides

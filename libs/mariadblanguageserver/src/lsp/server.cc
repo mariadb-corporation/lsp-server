@@ -218,6 +218,7 @@ struct Outline_cache {
   // One more each time a file the document includes changed: an outline
   // folded before is not kept.
   uint64_t epoch = 0;
+  std::string schema;  // in use before the first statement (schema_hint)
 };
 
 // The texts of the open documents that open documents include (SOURCE),
@@ -265,6 +266,11 @@ struct Open_document {
   std::string path;
   std::set<std::string> includes;
   std::vector<Source_problem> source_problems;
+  // The script's state where each file it includes begins, by path; and
+  // the state this document takes from an open script that includes it.
+  std::map<std::string, Source_context> include_contexts;
+  std::optional<Source_context> includer_context;
+  bool explicit_schema = false;  // documentContext gave currentSchema
 
   Open_document(std::string u, std::string text, int64_t version, Index_options o)
       : uri(std::move(u)), doc(std::move(text), version, std::move(o)) {
@@ -744,6 +750,7 @@ struct Server::Impl {
       w.StartArray();
       w.String(".");
       w.String("`");
+      w.String("/");
       w.EndArray();
       w.Key("resolveProvider");
       w.Bool(false);
@@ -942,7 +949,10 @@ struct Server::Impl {
       set_options(ref, o, false);
     }
     documents[*uri] = std::move(d);
-    if (included(ref.path)) sync_include_texts();
+    if (included(ref.path)) {
+      sync_include_texts();
+      apply_include_contexts();
+    }
     log("open " + *uri + " (" + std::to_string(bytes) + " bytes, " +
         std::to_string(ref.doc.index().statements().size()) + " statements)");
     start_checks(ref);
@@ -984,8 +994,10 @@ struct Server::Impl {
     end_progress(*d);
     documents.erase(uri);
     // What it included is not needed any more; if it is included, the
-    // others read it from the disk again.
+    // others read it from the disk again.  The files it included lose its
+    // context.
     sync_include_texts();
+    apply_include_contexts();
     notify("textDocument/publishDiagnostics", [&](Json_writer &w) {
       w.StartObject();
       w.Key("uri");
@@ -1011,7 +1023,10 @@ struct Server::Impl {
         d->live.reset();
       }
     }
-    if (const auto schema = string_at(params, {"currentSchema"})) d->schema_hint = *schema;
+    if (const auto schema = string_at(params, {"currentSchema"})) {
+      d->explicit_schema = true;
+      set_schema(*d, *schema);
+    }
     Index_options o = d->doc.options();
     read_index_options(params, o);
     apply_server_options(*d, o);
@@ -1029,11 +1044,17 @@ struct Server::Impl {
   // The sql_mode and version of the document's connection, where the
   // client did not set them; the defaults when it has no connection, or
   // none read yet (so a connection taken away takes its settings along).
+  // An open script that includes the document comes before the connection:
+  // its sql_mode and delimiter where the included text begins.
   void apply_server_options(const Open_document &d, Index_options &o) {
     const auto snap = d.live ? d.live->snapshot() : nullptr;
+    const auto &ctx = d.includer_context;
     if (!d.explicit_mode) {
-      o.sql_mode = snap ? normalize_sql_mode(snap->server.sql_mode) : options.defaults.sql_mode;
+      o.sql_mode = ctx                  ? ctx->sql_mode
+                   : snap ? normalize_sql_mode(snap->server.sql_mode)
+                          : options.defaults.sql_mode;
     }
+    if (!d.explicit_delimiter) o.delimiter = ctx ? ctx->delimiter : options.defaults.delimiter;
     if (!d.explicit_version) {
       const bool known = snap && snap->server.version_id != 0 &&
                          version_id_supported(snap->server.version_id);
@@ -1698,6 +1719,10 @@ struct Server::Impl {
     Outline_options o;
     o.version_id = s.version_id;
     o.priority = k_priority_request;
+    {
+      std::lock_guard lock(cache.mutex);
+      o.schema = cache.schema;
+    }
     auto expansion =
         expand_sources(*s.text, source_folder(file_uri_to_path(cache.uri)), include_reader());
     auto outline = std::make_shared<const Outline>(
@@ -1711,12 +1736,18 @@ struct Server::Impl {
       }
     }
     std::set<std::string> paths;
+    std::map<std::string, Source_context> contexts;
     for (const auto &inc : outline->includes) {
-      if (!inc.path.empty()) paths.insert(canonical_path(inc.path));
+      if (inc.path.empty()) continue;
+      const std::string path = canonical_path(inc.path);
+      paths.insert(path);
+      if (inc.context.known) contexts.emplace(path, inc.context);  // the first include
     }
     inbox->post([this, uri = cache.uri, generation = s.generation, paths = std::move(paths),
-                 problems = source_problems(outline->includes)]() mutable {
-      on_outline_includes(uri, generation, std::move(paths), std::move(problems));
+                 problems = source_problems(outline->includes),
+                 contexts = std::move(contexts)]() mutable {
+      on_outline_includes(uri, generation, std::move(paths), std::move(problems),
+                          std::move(contexts));
     });
     return outline;
   }
@@ -1751,7 +1782,8 @@ struct Server::Impl {
   // What an outline of the snapshot of `generation` found: the files the
   // document includes, and what is wrong with its directives.
   void on_outline_includes(const std::string &uri, uint64_t generation, std::set<std::string> paths,
-                           std::vector<Source_problem> problems) {
+                           std::vector<Source_problem> problems,
+                           std::map<std::string, Source_context> contexts) {
     const auto it = documents.find(uri);
     if (it == documents.end()) return;
     Open_document &d = *it->second;
@@ -1764,6 +1796,53 @@ struct Server::Impl {
       d.source_problems = std::move(problems);
       publish(d);
     }
+    if (d.include_contexts != contexts) {
+      d.include_contexts = std::move(contexts);
+      apply_include_contexts();
+    }
+  }
+
+  // Each open document that an open script includes is read in that
+  // script's state where it is included (its sql_mode, delimiter and
+  // schema, where the client set none); the first such script by URI.
+  // One no script includes any more goes back to its own.
+  void apply_include_contexts() {
+    for (auto &[uri, x] : documents) {
+      std::optional<Source_context> ctx;
+      if (!x->path.empty()) {
+        const std::string *by = nullptr;
+        for (const auto &[u, d] : documents) {
+          if (u == uri) continue;
+          const auto it = d->include_contexts.find(x->path);
+          if (it != d->include_contexts.end() && (by == nullptr || u < *by)) {
+            by = &u;
+            ctx = it->second;
+          }
+        }
+        if (ctx && ctx != x->includer_context) {
+          log(uri + ": read as " + *by + " includes it (schema " +
+              (ctx->schema.empty() ? "none" : ctx->schema) + ", delimiter " + ctx->delimiter + ")");
+        }
+      }
+      if (ctx == x->includer_context) continue;
+      x->includer_context = ctx;
+      Index_options o = x->doc.options();
+      apply_server_options(*x, o);
+      set_options(*x, o, true);
+      if (!x->explicit_schema) set_schema(*x, ctx ? ctx->schema : "");
+    }
+  }
+
+  // The schema in use before the document's first statement, for its
+  // catalog views and its outline.
+  void set_schema(Open_document &d, const std::string &schema) {
+    if (d.schema_hint == schema) return;
+    d.schema_hint = schema;
+    {
+      std::lock_guard lock(d.outline->mutex);
+      d.outline->schema = schema;
+    }
+    invalidate_outline(d);
   }
 
   // Keeps include_texts to the open documents that open documents include,
@@ -1826,7 +1905,7 @@ struct Server::Impl {
         (void)outline_of(*snap, *cache);
       } else if (had) {
         inbox->post([this, uri = cache->uri, generation = snap->generation] {
-          on_outline_includes(uri, generation, {}, {});
+          on_outline_includes(uri, generation, {}, {}, {});
         });
       }
     });
@@ -1978,9 +2057,24 @@ struct Server::Impl {
     o.snippets = snippets;
     o.line_width = line_width;
     o.indent = indent;
+    // '/' is a trigger for SOURCE paths only; elsewhere it is a division.
+    const bool slash = string_at(params, {"context", "triggerCharacter"}).value_or("") == "/";
+    const std::string folder = d != nullptr ? source_folder(file_uri_to_path(d->uri)) : "";
     detail_request(id, d, params,
-                   [o](Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
-                       Parser_cache &cache, Details_pass &pass) {
+                   [o, slash, folder](Json_writer &w, const Snapshot &s, Position pos,
+                                      const Catalog_sources &c, Parser_cache &cache,
+                                      Details_pass &pass) {
+                     if (source_path_completion(w, s, pos, folder)) return;
+                     if (slash) {
+                       w.StartObject();
+                       w.Key("isIncomplete");
+                       w.Bool(false);
+                       w.Key("items");
+                       w.StartArray();
+                       w.EndArray();
+                       w.EndObject();
+                       return;
+                     }
                      Completion_options co = o;
                      co.version_id = s.version_id;
                      completion(w, s, pos, c, cache, co, pass);
@@ -2004,7 +2098,9 @@ struct Server::Impl {
     const std::string uri = d != nullptr ? d->uri : std::string();
     const Json *decl = path(params, {"context", "includeDeclaration"});
     const bool include = decl == nullptr || !decl->IsBool() || decl->GetBool();
-    position_request(id, d, params, false,
+    // A fresh outline: references across SOURCE includes search the text it
+    // was folded from.
+    position_request(id, d, params, true,
                      [this, uri, include](Json_writer &w, const Snapshot &s, Position pos,
                                           const Catalog_sources &c, Parser_cache &cache) {
                        references(w, s, uri, pos, include, c, *parse_pool, cache,

@@ -445,4 +445,62 @@ TEST(Source_include, problems) {
             problems[4].message);
 }
 
+TEST(Source_include, path_being_typed) {
+  const std::string text = "USE s;\n  SOURCE './sections/14";
+  const auto at = source_path_at(text, static_cast<uint32_t>(text.size()));
+  ASSERT_TRUE(at);
+  EXPECT_EQ("./sections/14", at->typed);
+  EXPECT_EQ(text.find("./"), at->path);
+  EXPECT_EQ(text.find("14"), at->segment);
+  // Not after the closing quote, not before the opening one, not elsewhere.
+  const std::string closed = "SOURCE 'a.sql' ";
+  EXPECT_FALSE(source_path_at(closed, static_cast<uint32_t>(closed.size())));
+  EXPECT_FALSE(source_path_at("SOURCE ", 7));
+  EXPECT_FALSE(source_path_at("SELECT './x", 11));
+  EXPECT_FALSE(source_path_at("source './x", 11));
+
+  const auto files = source_path_candidates(k_msm_dir, "./sections/1");
+  std::vector<std::string> names;
+  for (const auto &c : files) names.push_back(c.name);
+  EXPECT_EQ((std::vector<std::string>{"140_tables.sql", "150_routines.sql", "170_roles.sql",
+                                      "180_extra.sql"}),
+            names);
+  const auto top = source_path_candidates(k_msm_dir, "");
+  ASSERT_FALSE(top.empty());
+  EXPECT_EQ("sections", top[0].name);  // folders first
+  EXPECT_TRUE(top[0].folder);
+  EXPECT_TRUE(source_path_candidates("", "sections/").empty());  // relative, no folder
+}
+
+TEST(Source_include, contexts_where_includes_begin) {
+  const std::string text = test::read_fixture("msm/development/shop_next.sql");
+  Outline_options oo;
+  oo.schema = "start";
+  const auto outline = build_outline(expand_sources(text, k_msm_dir), pool(), Index_options{}, oo);
+  ASSERT_EQ(4u, outline.includes.size());
+  const auto &tables = outline.includes[0].context;
+  EXPECT_TRUE(tables.known);
+  EXPECT_EQ("shop", tables.schema);
+  EXPECT_EQ(";", tables.delimiter);
+  // In the procedure body, under DELIMITER %%: its statements end with ';'.
+  const auto &roles = outline.includes[2].context;
+  EXPECT_TRUE(roles.known);
+  EXPECT_EQ(";", roles.delimiter);
+  EXPECT_EQ("shop", roles.schema);
+  // The expanded text is kept, and maps back.
+  ASSERT_TRUE(outline.expanded);
+  const auto at = static_cast<uint32_t>(outline.expanded->text.find("CREATE TABLE customer"));
+  const auto m = outline.map(Range{at, at + 12});
+  EXPECT_EQ(1u, m.source);
+  EXPECT_EQ("CREATE TABLE", cut(outline.includes[0].text, m.range));
+
+  // Without a USE, the schema given is the one in use.
+  const auto plain = build_outline(expand_sources("SOURCE 'a.sql';\n", "/d",
+                                                  files({{"/d/a.sql", "CREATE TABLE t (a INT);\n"}})),
+                                   pool(), Index_options{}, oo);
+  EXPECT_EQ("start", plain.includes[0].context.schema);
+  ASSERT_NE(nullptr, plain.catalog.find("start"));
+  EXPECT_EQ(1u, plain.catalog.find("start")->tables.size());
+}
+
 }  // namespace mdbls

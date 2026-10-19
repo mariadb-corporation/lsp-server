@@ -329,7 +329,22 @@ std::string schema_in_use(std::string_view text, const Statement_index &index, s
     std::string_view s = index.text_of(text, st[k]);
     if (!starts_with_word(s, "USE")) continue;
     s.remove_prefix(3);
-    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.remove_prefix(1);
+    // Blanks and comments before the name, such as MSM's placeholders in
+    // `USE /*<msm:schema_prefix>*/name/*<msm:schema_postfix>*/`.  A
+    // versioned comment (/*!...) holds code and stops the skipping.
+    for (;;) {
+      while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.remove_prefix(1);
+      if (s.starts_with("/*") && !s.starts_with("/*!")) {
+        const size_t close = s.find("*/", 2);
+        s.remove_prefix(close == std::string_view::npos ? s.size() : close + 2);
+      } else if (s.starts_with("#") || s.starts_with("-- ") || s.starts_with("--\t") ||
+                 s.starts_with("--\n")) {
+        const size_t eol = s.find('\n');
+        s.remove_prefix(eol == std::string_view::npos ? s.size() : eol + 1);
+      } else {
+        break;
+      }
+    }
     size_t n = 0;
     if (!s.empty() && (s.front() == '`' || s.front() == '"')) {
       const char q = s.front();

@@ -18,11 +18,15 @@
 #include "lsp/language_features.h"
 
 #include <algorithm>
+#include <map>
 #include <optional>
+#include <set>
+#include <tuple>
 
 #include "lsp/features.h"
 #include "mdbls/keywords.h"
 #include "mdbls/navigation.h"
+#include "mdbls/source_include.h"
 #include "mdbls/sql_names.h"
 #include "text_util.h"
 
@@ -109,9 +113,9 @@ const Origin *origin_of(const Resolution &r) {
   }
 }
 
-// Whether a rename of the resolved name may be done in this document,
-// whose outline is `document`.
-bool renamable(const Resolution &r, const Outline *document, std::string *error) {
+// Whether a rename of the resolved name may be done from this document.
+// An object a file it includes defines is renamed in that file too.
+bool renamable(const Resolution &r, std::string *error) {
   if (!r.found()) {
     *error = "there is no name here to rename";
     return false;
@@ -127,29 +131,69 @@ bool renamable(const Resolution &r, const Outline *document, std::string *error)
     *error = "only names this document defines can be renamed";
     return false;
   }
-  // Defined in a file a SOURCE directive includes: not this document's.
-  if (const Origin *o = origin_of(r); o != nullptr && o->source > 0 && document != nullptr &&
-                                      o->source <= document->includes.size()) {
-    const auto &inc = document->includes[o->source - 1];
-    *error = "`" + r.ref.name + "` is defined in " + source_location(inc, o->statement.begin) +
-             ", which this document includes: rename it there";
-    return false;
-  }
   return true;
 }
 
-std::vector<Reference> references_of(const Snapshot &s, const At &at, const Catalog_sources &c,
-                                     Parser_pool &pool, Parser_cache &cache, int priority) {
+// A reference in the document (source 0) or in a file it includes (source
+// k: c.document->includes[k - 1]).
+struct Located_reference {
+  uint32_t source = 0;
+  Range range;
+  bool defining = false;
+};
+
+// Where references of `source` are: the URI and the text and line map
+// their ranges are in; no URI for a source that is not there.
+struct Reference_file {
+  std::string uri;
+  std::string_view text;
+  const Line_map *lines = nullptr;
+};
+Reference_file reference_file(const Snapshot &s, const std::string &uri, const Outline *document,
+                              uint32_t source) {
+  if (source == 0) return {uri, *s.text, s.lines.get()};
+  if (document == nullptr || source > document->includes.size()) return {};
+  const auto &inc = document->includes[source - 1];
+  return {path_to_file_uri(inc.path), inc.text, &inc.lines};
+}
+
+std::vector<Located_reference> references_of(const Snapshot &s, const At &at,
+                                             const Catalog_sources &c, Parser_pool &pool,
+                                             Parser_cache &cache, int priority) {
+  std::vector<Located_reference> out;
   if (at.resolution.statement_local()) {
-    return statement_references(*s.text, *s.index, at.statement, at.resolution.id, at.view, cache,
-                                s.version_id);
+    for (const auto &r : statement_references(*s.text, *s.index, at.statement, at.resolution.id,
+                                              at.view, cache, s.version_id)) {
+      out.push_back({0, r.range, r.defining});
+    }
+    return out;
   }
   Reference_options o;
   o.version_id = s.version_id;
   o.priority = priority;
   o.initial_schema = c.schema_hint;
   if (o.initial_schema.empty() && c.live) o.initial_schema = c.live->server.current_schema;
-  return find_references(*s.text, *s.index, at.resolution.id, at.statement, at.view, pool, o);
+  const Outline *doc = c.document.get();
+  if (doc == nullptr || !doc->expanded) {
+    for (const auto &r : find_references(*s.text, *s.index, at.resolution.id, at.statement,
+                                         at.view, pool, o)) {
+      out.push_back({0, r.range, r.defining});
+    }
+    return out;
+  }
+  // A script with SOURCE directives: the text it was folded from, with the
+  // files it includes, each reference mapped back to its file.  A file
+  // included twice is listed once.
+  const auto &e = *doc->expanded;
+  std::set<std::tuple<std::string, uint32_t, uint32_t>> seen;
+  for (const auto &r : find_references(e.text, *e.index, at.resolution.id, 0, at.view, pool, o)) {
+    const auto m = doc->map(r.range);
+    const std::string path = m.source == 0 ? std::string() : doc->includes[m.source - 1].path;
+    if (seen.insert({path, m.range.begin, m.range.end}).second) {
+      out.push_back({m.source, m.range, r.defining});
+    }
+  }
+  return out;
 }
 
 int symbol_kind_of_routine(const Routine &r) { return r.kind == "function" ? 12 : 6; }
@@ -196,6 +240,43 @@ Catalog_view catalog_view(const Snapshot &s, const Catalog_sources &c, uint32_t 
   if (schema.empty()) schema = c.schema_hint;
   v.set_current_schema(schema);
   return v;
+}
+
+bool source_path_completion(Json_writer &w, const Snapshot &s, Position pos,
+                            const std::string &folder) {
+  const uint32_t offset = s.lines->offset(*s.text, pos);
+  const auto at = source_path_at(*s.text, offset);
+  if (!at) return false;
+  w.StartObject();
+  w.Key("isIncomplete");
+  w.Bool(false);
+  w.Key("items");
+  w.StartArray();
+  for (const auto &c : source_path_candidates(folder, at->typed)) {
+    w.StartObject();
+    str(w, "label", c.folder ? c.name + "/" : c.name);
+    w.Key("kind");
+    w.Int(c.folder ? 19 : 17);  // Folder : File
+    str(w, "sortText", (c.folder ? "0" : "1") + c.name);
+    w.Key("textEdit");
+    w.StartObject();
+    w.Key("range");
+    write_range(w, s, at->segment, offset);
+    str(w, "newText", c.folder ? c.name + "/" : c.name);
+    w.EndObject();
+    if (c.folder) {
+      // On into the folder.
+      w.Key("command");
+      w.StartObject();
+      str(w, "title", "");
+      str(w, "command", "editor.action.triggerSuggest");
+      w.EndObject();
+    }
+    w.EndObject();
+  }
+  w.EndArray();
+  w.EndObject();
+  return true;
 }
 
 void completion(Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
@@ -260,7 +341,21 @@ void hover(Json_writer &w, const Snapshot &s, Position pos, const Catalog_source
            Parser_cache &cache, Details_pass &pass) {
   const auto at = resolve_at(s, pos, c, cache);
   if (at && wants_details(c, at->view, pass)) return;
-  const std::string text = at ? hover_markdown(at->resolution) : std::string();
+  std::string text = at ? hover_markdown(at->resolution) : std::string();
+  // From a file a SOURCE directive includes: which one, and where.
+  if (const Origin *o = at ? origin_of(at->resolution) : nullptr;
+      o != nullptr && o->source > 0 && c.document && o->source <= c.document->includes.size() &&
+      at->resolution.layer != nullptr && at->resolution.layer->kind == Layer_kind::document) {
+    constexpr std::string_view k_here = "Defined in this document.";
+    const std::string there = "Defined in `" +
+                              source_location(c.document->includes[o->source - 1], o->statement.begin) +
+                              "`, which this document includes.";
+    if (const auto at_here = text.find(k_here); at_here != std::string::npos) {
+      text.replace(at_here, k_here.size(), there);
+    } else {
+      text += "\n\n" + there;
+    }
+  }
   if (text.empty()) {
     w.Null();
     return;
@@ -334,7 +429,8 @@ void references(Json_writer &w, const Snapshot &s, const std::string &uri, Posit
   if (at && at->resolution.found()) {
     for (const auto &ref : references_of(s, *at, c, pool, cache, priority)) {
       if (ref.defining && !include_declaration) continue;
-      location(w, uri, *s.text, *s.lines, ref.range);
+      const auto f = reference_file(s, uri, c.document.get(), ref.source);
+      if (f.lines != nullptr) location(w, f.uri, f.text, *f.lines, ref.range);
     }
   }
   w.EndArray();
@@ -365,7 +461,7 @@ bool prepare_rename(Json_writer &w, const Snapshot &s, Position pos, const Catal
     *error = "there is no name here to rename";
     return false;
   }
-  if (!renamable(at->resolution, c.document.get(), error)) return false;
+  if (!renamable(at->resolution, error)) return false;
   const auto &ref = at->resolution.ref;
   w.StartObject();
   w.Key("range");
@@ -388,21 +484,38 @@ bool rename(Json_writer &w, const Snapshot &s, const std::string &uri, Position 
     *error = "there is no name here to rename";
     return false;
   }
-  if (!renamable(at->resolution, c.document.get(), error)) return false;
+  if (!renamable(at->resolution, error)) return false;
   const std::string text = quote_identifier(name);
+  // The edits by file: the document's, and those of the files it includes.
+  const auto refs = references_of(s, *at, c, pool, cache, priority);
+  std::map<uint32_t, std::vector<Range>> by_source;
+  by_source[0];
+  for (const auto &ref : refs) by_source[ref.source].push_back(ref.range);
+  std::map<std::string, std::vector<Range>> by_uri;
+  std::map<std::string, Reference_file> files;
+  for (const auto &[source, ranges] : by_source) {
+    const auto f = reference_file(s, uri, c.document.get(), source);
+    if (f.lines == nullptr) continue;
+    auto &all = by_uri[f.uri];
+    all.insert(all.end(), ranges.begin(), ranges.end());
+    files.emplace(f.uri, f);
+  }
   w.StartObject();
   w.Key("changes");
   w.StartObject();
-  w.Key(uri.c_str(), static_cast<rapidjson::SizeType>(uri.size()));
-  w.StartArray();
-  for (const auto &ref : references_of(s, *at, c, pool, cache, priority)) {
-    w.StartObject();
-    w.Key("range");
-    write_range(w, s, ref.range.begin, ref.range.end);
-    str(w, "newText", text);
-    w.EndObject();
+  for (const auto &[file_uri, ranges] : by_uri) {
+    const auto &f = files.at(file_uri);
+    w.Key(file_uri.c_str(), static_cast<rapidjson::SizeType>(file_uri.size()));
+    w.StartArray();
+    for (const auto &r : ranges) {
+      w.StartObject();
+      w.Key("range");
+      write_range(w, f.text, *f.lines, r.begin, r.end);
+      str(w, "newText", text);
+      w.EndObject();
+    }
+    w.EndArray();
   }
-  w.EndArray();
   w.EndObject();
   w.EndObject();
   return true;

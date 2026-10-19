@@ -213,6 +213,8 @@ class Catalog {
 
   // The source index new origins get (see Origin); 0 by default.
   void set_source(uint32_t source) { m_source = source; }
+  // The schema in use before the first statement.
+  void set_current_schema(std::string schema) { m_current = std::move(schema); }
   // Calls `f` on every origin in the catalog, for moving the offsets of an
   // expanded text back to their files.
   void for_each_origin(const std::function<void(Origin &)> &f);

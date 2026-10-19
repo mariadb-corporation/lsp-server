@@ -29,12 +29,12 @@ connections through the client instead of connecting itself, see [MCP mode](#mcp
 | `textDocument/foldingRange` | statements over several lines, runs of comment lines, `BEGIN ... END` and the other compound blocks of routines |
 | `textDocument/selectionRange` | the syntax nodes around a position, then its statement, then the document |
 | `textDocument/semanticTokens/full`, `full/delta`, `range` | keywords, strings, numbers, comments, variables, operators, functions, parameters; `full` and `full/delta` answer `null` for documents above the limit below, and the client then asks for the visible range |
-| `textDocument/completion` | the keywords the parser can take at the cursor, and the names that fit there (see [Completion](#completion)); trigger characters `.` and `` ` `` |
-| `textDocument/hover` | Markdown for tables and views (columns, keys), columns (type, default, comment), routines (signature), built-in functions (call forms and summary from the server's help tables), aliases, CTEs, variables, schemas |
+| `textDocument/completion` | the keywords the parser can take at the cursor, and the names that fit there (see [Completion](#completion)); in the path of a SOURCE directive, its folders and `.sql` files; trigger characters `.`, `` ` `` and `/` (the last for SOURCE paths only: elsewhere it answers an empty list) |
+| `textDocument/hover` | Markdown for tables and views (columns, keys), columns (type, default, comment), routines (signature), built-in functions (call forms and summary from the server's help tables), aliases, CTEs, variables, schemas; for an object a file the document includes defines, that file and line |
 | `textDocument/definition` | where a table, view, column, routine or schema is created: in the document, in a file it includes, or in a workspace catalog file; an alias, CTE or variable where its statement defines it; `null` for objects only the connected server knows |
-| `textDocument/references` | every name in the document that refers to the same object, resolved statement by statement with the schema in use there; aliases, CTEs and variables within their statement |
+| `textDocument/references` | every name in the document, and in the files it includes, that refers to the same object, resolved statement by statement with the schema in use there; aliases, CTEs and variables within their statement |
 | `textDocument/documentHighlight` | the references within the statement at the cursor; the defining one is a write |
-| `textDocument/prepareRename`, `rename` | aliases, CTEs, variables, and tables, views, columns and routines the document itself defines (not those of a file it includes: the error names that file); the edits cover the document, and the new name is quoted when it has to be |
+| `textDocument/prepareRename`, `rename` | aliases, CTEs, variables, and tables, views, columns and routines the document or a file it includes defines; the edits cover the document and the files it includes, and the new name is quoted when it has to be |
 | `textDocument/signatureHelp` | the call forms of a built-in function, or a stored function's or procedure's parameters, with the active parameter; trigger characters `(` and `,` |
 | `textDocument/formatting`, `rangeFormatting` | lays out queries (see [Formatting](#formatting)): the whole document, or the statements the range touches; one edit per statement that changes |
 | `workspace/symbol` | tables, views, routines, triggers, events, sequences and schemas of the open documents (with the files they include) and the workspace catalog whose name contains the query; columns too when the query is not empty |
@@ -268,6 +268,19 @@ context: a section without a `USE` gets the script's schema.
   nothing or an empty file (warning), a directive in the included text that msm does not
   expand (warning). They come from the document's outline, folded in the background after
   each check; after an edit their positions may be off by it until the next one.
+- Navigation spans the includes: definition goes into the included file, hover names it,
+  and references and rename cover the document and every file it includes (each file
+  once, also when it is included twice), searched in the expanded text so each name is
+  resolved in the script's context. Requested from an included file opened on its own,
+  they cover that file only.
+- An included file opened on its own takes the state of an open script that includes it,
+  where the included text begins: its `sql_mode`, delimiter (`;` inside a routine body)
+  and schema in use, unless the client set them through `mariadb/documentContext`. With
+  several such scripts, the first by URI. A section with no `USE` then has its objects in
+  the script's schema, and one included under `DELIMITER $$` is split at `$$`. When no
+  open script includes it any more, it goes back to its own.
+- In a directive's path, completion lists the folders and `.sql` files there, folders
+  first, and goes on into a folder that is chosen.
 - `mariadb/outline` lists the includes and gives objects from them a `source` and
   positions in their file ([outline-format.md](outline-format.md)). `mariadb-lsp check` and
   `outline` expand directives too; `--no-source` reads them as SQL.

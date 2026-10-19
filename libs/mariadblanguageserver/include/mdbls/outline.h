@@ -19,6 +19,7 @@
 #define MDBLS_OUTLINE_H_
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -41,11 +42,25 @@ struct Outline {
   // The SOURCE directives of a document's outline: an origin with source k
   // points into the text of includes[k - 1].
   std::vector<Source_include> includes;
+  // The expanded text it was folded from, with the way back (map()), when
+  // there were directives: what references across the includes search.
+  struct Expanded {
+    std::string text;
+    std::vector<Source_expansion::Segment> segments;
+    std::shared_ptr<const Statement_index> index;
+  };
+  std::shared_ptr<const Expanded> expanded;
+
+  Source_expansion::Located_range map(Range range) const {
+    return expanded ? map_source(expanded->segments, includes, range)
+                    : Source_expansion::Located_range{0, range};
+  }
 };
 
 struct Outline_options {
   unsigned long version_id = k_default_version_id;
   int priority = 0;
+  std::string schema;  // in use before the first statement (build_outline)
 };
 
 // Parses the statements of `index` that may change the catalog (CREATE,
