@@ -1084,6 +1084,12 @@ subpartitions too, table options filling the line (the user's choice,
 the original relative indentation of line breaks inside other constructs (they all
 continue one level deeper), `onTypeFormatting`.
 
+### P9 — SOURCE includes (added 2026-10-19)
+
+MSM's `SOURCE '<path>'[<start>:<end>];` directives: the outline, diagnostics and navigation
+of a script take in the files it includes. Plan, decisions and status in
+[`source-includes.md`](source-includes.md).
+
 Estimated total: about four months of one engineer's work to the end of P6, with P0–P2
 being the part that de-risks everything else and should be done first in exactly that
 order.
