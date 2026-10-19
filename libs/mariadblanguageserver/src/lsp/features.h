@@ -38,6 +38,10 @@ void write_range(Json_writer &w, const Snapshot &s, uint32_t begin, uint32_t end
 // table > column, index, ...
 void document_symbols(Json_writer &w, const Snapshot &s, const Outline &outline);
 
+// DocumentLink[]: the path of each MSM SOURCE directive, to its file.
+// `uri` is the document's, for relative paths.
+void document_links(Json_writer &w, const Snapshot &s, const std::string &uri);
+
 // textDocument/foldingRange: every statement and run of comment lines over
 // more than one line, and the compound blocks inside routines.
 void folding_ranges(Json_writer &w, const Snapshot &s, Parser_cache &cache);

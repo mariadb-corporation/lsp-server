@@ -57,6 +57,7 @@
 #include "mdbls/outline.h"
 #include "mdbls/parser_pool.h"
 #include "mdbls/semantic_tokens.h"
+#include "mdbls/source_include.h"
 #include "mdbls/sql_mode.h"
 #include "mdbls/syntax_check.h"
 
@@ -209,10 +210,21 @@ struct Token_cache {
 };
 
 struct Outline_cache {
+  std::string uri;  // the document's
   std::mutex mutex;
   uint64_t generation = 0;
   std::shared_ptr<const Outline> outline;
   bool rebuilding = false;  // a job is folding a newer snapshot
+  // One more each time a file the document includes changed: an outline
+  // folded before is not kept.
+  uint64_t epoch = 0;
+};
+
+// The texts of the open documents that open documents include (SOURCE),
+// by canonical path: what outline jobs read instead of the disk's.
+struct Include_texts {
+  std::mutex mutex;
+  std::map<std::string, std::shared_ptr<const std::string>> open;
 };
 
 // Documents larger than this get their first outline in the background:
@@ -247,8 +259,18 @@ struct Open_document {
   bool explicit_version = false;
   bool explicit_delimiter = false;
 
+  // SOURCE: the document's canonical path ("" when it is not a file), the
+  // files its directives include, and what is wrong with them, all from
+  // its last outline.
+  std::string path;
+  std::set<std::string> includes;
+  std::vector<Source_problem> source_problems;
+
   Open_document(std::string u, std::string text, int64_t version, Index_options o)
-      : uri(std::move(u)), doc(std::move(text), version, std::move(o)) {}
+      : uri(std::move(u)), doc(std::move(text), version, std::move(o)) {
+    outline->uri = uri;
+    if (const auto p = file_uri_to_path(uri); !p.empty()) path = canonical_path(p);
+  }
 };
 
 // The messages received, and the reader thread's state, shared with the
@@ -309,6 +331,8 @@ struct Server::Impl {
   bool shutdown = false;
   bool exit = false;
   bool client_progress = false;  // window.workDoneProgress
+  bool watch_files = false;      // the client registers file watchers for us
+  std::shared_ptr<Include_texts> include_texts = std::make_shared<Include_texts>();
   uint64_t next_request = 1;     // ids of our requests to the client
 
   // Catalogs (loop thread).
@@ -599,7 +623,8 @@ struct Server::Impl {
     if (shutdown && request) return reply_error(id, k_invalid_request, "shutting down");
 
     try {
-      if (*method == "initialized") return;
+      if (*method == "initialized") return on_initialized();
+      if (*method == "workspace/didChangeWatchedFiles") return on_did_change_watched_files(params);
       if (*method == "textDocument/didOpen") return on_did_open(params);
       if (*method == "textDocument/didSave") return on_did_save(params);
       if (*method == "workspace/didChangeConfiguration") return on_did_change_configuration(params);
@@ -621,6 +646,7 @@ struct Server::Impl {
 
       Open_document *d = document(params);
       if (*method == "textDocument/documentSymbol") return on_document_symbol(id, d);
+      if (*method == "textDocument/documentLink") return on_document_link(id, d);
       if (*method == "mariadb/outline") return on_outline(id, d);
       if (*method == "textDocument/foldingRange") return on_folding_range(id, d);
       if (*method == "textDocument/selectionRange") return on_selection_range(id, d, params);
@@ -658,6 +684,10 @@ struct Server::Impl {
     if (initialized) return reply_error(id, k_invalid_request, "initialize sent twice");
     if (const Json *p = path(params, {"capabilities", "window", "workDoneProgress"})) {
       client_progress = p->IsBool() && p->GetBool();
+    }
+    if (const Json *p = path(params, {"capabilities", "workspace", "didChangeWatchedFiles",
+                                      "dynamicRegistration"})) {
+      watch_files = p->IsBool() && p->GetBool();
     }
     if (const Json *p = path(params, {"capabilities", "textDocument", "completion",
                                       "completionItem", "snippetSupport"})) {
@@ -699,6 +729,11 @@ struct Server::Impl {
       w.EndObject();
       w.Key("documentSymbolProvider");
       w.Bool(true);
+      w.Key("documentLinkProvider");
+      w.StartObject();
+      w.Key("resolveProvider");
+      w.Bool(false);
+      w.EndObject();
       w.Key("foldingRangeProvider");
       w.Bool(true);
       w.Key("selectionRangeProvider");
@@ -907,6 +942,7 @@ struct Server::Impl {
       set_options(ref, o, false);
     }
     documents[*uri] = std::move(d);
+    if (included(ref.path)) sync_include_texts();
     log("open " + *uri + " (" + std::to_string(bytes) + " bytes, " +
         std::to_string(ref.doc.index().statements().size()) + " statements)");
     start_checks(ref);
@@ -936,6 +972,8 @@ struct Server::Impl {
       d->doc.set_version(v->GetInt64());
     }
     schedule_checks(*d);
+    // A file other documents include: their outlines read this text now.
+    if (included(d->path)) sync_include_texts();
   }
 
   void on_did_close(const Json &params) {
@@ -945,6 +983,9 @@ struct Server::Impl {
     const std::string uri = d->uri;
     end_progress(*d);
     documents.erase(uri);
+    // What it included is not needed any more; if it is included, the
+    // others read it from the disk again.
+    sync_include_texts();
     notify("textDocument/publishDiagnostics", [&](Json_writer &w) {
       w.StartObject();
       w.Key("uri");
@@ -1471,6 +1512,7 @@ struct Server::Impl {
     if (d.passes.empty()) {
       publish(d);
       end_progress(d);
+      schedule_include_scan(d);
       // Statements dropped because an edit replaced them while they were
       // checked are taken by the pass the edit scheduled.
       return;
@@ -1543,6 +1585,13 @@ struct Server::Impl {
                    "unterminated");
       }
       for (const auto &e : index.errors()) diagnostic(0, 0, 2, e, "splitter");
+      // SOURCE directives, from the last outline: after an edit, until the
+      // next one, the ranges may be off by it.
+      const auto size = static_cast<uint32_t>(text.size());
+      for (const auto &p : d.source_problems) {
+        diagnostic(std::min(p.range.begin, size), std::min(p.range.end, size), p.error ? 1 : 2,
+                   p.message, "source");
+      }
       w.EndArray();
       w.EndObject();
     });
@@ -1637,21 +1686,191 @@ struct Server::Impl {
 
   // ---- requests
 
+  // Folds the document's outline, its SOURCE directives expanded, and
+  // tells the loop thread what it includes (on_outline_includes).
   std::shared_ptr<const Outline> outline_of(const Snapshot &s, Outline_cache &cache) {
+    uint64_t epoch;
     {
       std::lock_guard lock(cache.mutex);
       if (cache.outline && cache.generation == s.generation) return cache.outline;
+      epoch = cache.epoch;
     }
     Outline_options o;
     o.version_id = s.version_id;
     o.priority = k_priority_request;
-    auto outline = std::make_shared<const Outline>(build_outline(*s.text, *s.index, *parse_pool, o));
-    std::lock_guard lock(cache.mutex);
-    if (cache.generation <= s.generation) {
-      cache.generation = s.generation;
-      cache.outline = outline;
+    auto expansion =
+        expand_sources(*s.text, source_folder(file_uri_to_path(cache.uri)), include_reader());
+    auto outline = std::make_shared<const Outline>(
+        expansion.empty() ? build_outline(*s.text, *s.index, *parse_pool, o)
+                          : build_outline(std::move(expansion), *parse_pool, s.index_options, o));
+    {
+      std::lock_guard lock(cache.mutex);
+      if (cache.epoch == epoch && cache.generation <= s.generation) {
+        cache.generation = s.generation;
+        cache.outline = outline;
+      }
     }
+    std::set<std::string> paths;
+    for (const auto &inc : outline->includes) {
+      if (!inc.path.empty()) paths.insert(canonical_path(inc.path));
+    }
+    inbox->post([this, uri = cache.uri, generation = s.generation, paths = std::move(paths),
+                 problems = source_problems(outline->includes)]() mutable {
+      on_outline_includes(uri, generation, std::move(paths), std::move(problems));
+    });
     return outline;
+  }
+
+  // ---- SOURCE includes
+
+  // Reads an included file: the editor's text when it is open (and some
+  // document includes it), else the disk's.  Any thread.
+  Source_reader include_reader() {
+    return [texts = include_texts](const std::string &path, std::string *text) {
+      const std::string key = canonical_path(path);
+      {
+        std::lock_guard lock(texts->mutex);
+        if (const auto it = texts->open.find(key); it != texts->open.end()) {
+          *text = *it->second;
+          return true;
+        }
+      }
+      return read_sql_file(path, text);
+    };
+  }
+
+  // Whether an open document includes the file at canonical `path`.
+  bool included(const std::string &path) const {
+    if (path.empty()) return false;
+    for (const auto &[uri, d] : documents) {
+      if (d->includes.contains(path)) return true;
+    }
+    return false;
+  }
+
+  // What an outline of the snapshot of `generation` found: the files the
+  // document includes, and what is wrong with its directives.
+  void on_outline_includes(const std::string &uri, uint64_t generation, std::set<std::string> paths,
+                           std::vector<Source_problem> problems) {
+    const auto it = documents.find(uri);
+    if (it == documents.end()) return;
+    Open_document &d = *it->second;
+    if (d.doc.snapshot()->generation != generation) return;  // a newer one comes
+    if (d.includes != paths) {
+      d.includes = std::move(paths);
+      sync_include_texts();
+    }
+    if (d.source_problems != problems) {
+      d.source_problems = std::move(problems);
+      publish(d);
+    }
+  }
+
+  // Keeps include_texts to the open documents that open documents include,
+  // at their current text; the outlines that read a text that changed, or
+  // that is read from the disk again, are folded anew.
+  void sync_include_texts() {
+    std::set<std::string> needed;
+    for (const auto &[uri, d] : documents) needed.insert(d->includes.begin(), d->includes.end());
+    std::map<std::string, std::shared_ptr<const std::string>> now;
+    for (auto &[uri, d] : documents) {
+      if (needed.contains(d->path)) now[d->path] = d->doc.snapshot()->text;
+    }
+    std::set<std::string> changed;
+    {
+      std::lock_guard lock(include_texts->mutex);
+      auto &open = include_texts->open;
+      for (auto it = open.begin(); it != open.end();) {
+        if (now.contains(it->first)) {
+          ++it;
+        } else {
+          changed.insert(it->first);
+          it = open.erase(it);
+        }
+      }
+      for (auto &[path, text] : now) {
+        auto &slot = open[path];
+        if (slot != text) {
+          changed.insert(path);
+          slot = text;
+        }
+      }
+    }
+    for (auto &[uri, d] : documents) {
+      for (const auto &p : changed) {
+        if (d->includes.contains(p)) {
+          invalidate_outline(*d);
+          break;
+        }
+      }
+    }
+  }
+
+  // A file `d` includes changed: its outline is folded anew.
+  void invalidate_outline(Open_document &d) {
+    {
+      std::lock_guard lock(d.outline->mutex);
+      ++d.outline->epoch;
+      d.outline->outline.reset();
+    }
+    schedule_include_scan(d);
+  }
+
+  // Folds the outline in the background when the document has SOURCE
+  // directives, for their diagnostics; clears those when it has none now.
+  void schedule_include_scan(Open_document &d) {
+    const bool had = !d.includes.empty() || !d.source_problems.empty();
+    request_pool->submit(k_priority_cold, [this, snap = d.doc.snapshot(), cache = d.outline,
+                                           had](Parser_cache &) {
+      if (!find_source_directives(*snap->text).empty()) {
+        (void)outline_of(*snap, *cache);
+      } else if (had) {
+        inbox->post([this, uri = cache->uri, generation = snap->generation] {
+          on_outline_includes(uri, generation, {}, {});
+        });
+      }
+    });
+  }
+
+  void on_initialized() {
+    // Changes on disk of the files SOURCE directives include, and of the
+    // catalog files.
+    if (!watch_files) return;
+    (void)client_request(
+        "client/registerCapability",
+        R"({"registrations":[{"id":"mariadb-sql-files","method":"workspace/didChangeWatchedFiles",)"
+        R"("registerOptions":{"watchers":[{"globPattern":"**/*.sql"}]}}]})");
+  }
+
+  void on_did_change_watched_files(const Json &params) {
+    const Json *changes = member(params, "changes");
+    if (changes == nullptr || !changes->IsArray()) return;
+    std::set<std::string> paths;
+    bool catalog_file = false;
+    for (const auto &c : changes->GetArray()) {
+      const auto uri = string_at(c, {"uri"});
+      if (!uri) continue;
+      if (workspace && workspace->file(*uri) != nullptr) catalog_file = true;
+      if (const auto p = file_uri_to_path(*uri); !p.empty()) paths.insert(canonical_path(p));
+    }
+    if (catalog_file) rebuild_workspace();
+    // An open file's text is the editor's: only the others are read again.
+    for (const auto &[uri, d] : documents) paths.erase(d->path);
+    for (auto &[uri, d] : documents) {
+      for (const auto &p : paths) {
+        if (d->includes.contains(p)) {
+          invalidate_outline(*d);
+          break;
+        }
+      }
+    }
+  }
+
+  void on_document_link(const std::string &id, Open_document *d) {
+    if (d == nullptr) return reply_null(id);
+    run_request(id, [snap = d->doc.snapshot(), uri = d->uri](Json_writer &w, Parser_cache &) {
+      document_links(w, *snap, uri);
+    });
   }
 
   void on_document_symbol(const std::string &id, Open_document *d) {

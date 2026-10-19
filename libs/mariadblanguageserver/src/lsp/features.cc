@@ -22,6 +22,8 @@
 #include <string>
 
 #include "mdbls/semantic_tokens.h"
+#include "mdbls/source_include.h"
+#include "mdbls/workspace_catalog.h"
 #include "mdbls/syntax_tree.h"
 #include "mdbparse.h"
 #include "text_util.h"
@@ -50,16 +52,32 @@ enum Symbol_kind : int {
 struct Symbols {
   Json_writer &w;
   const Snapshot &s;
+  const Outline &outline;
+
+  // Where an object is in this document: one from an included file is at
+  // the directive that includes it, `where` then naming the file and line.
+  Origin local(const Origin &o, std::string *where = nullptr) const {
+    if (o.source == 0 || o.source > outline.includes.size()) return o;
+    const auto &inc = outline.includes[o.source - 1];
+    if (where != nullptr) *where = source_location(inc, o.statement.begin);
+    Origin out;
+    out.statement = out.name = inc.directive.statement;
+    return out;
+  }
 
   // One DocumentSymbol; `children` writes the children's array content.
-  void symbol(const std::string &name, const std::string &detail, int kind, const Origin &o,
+  void symbol(const std::string &name, const std::string &detail, int kind, const Origin &origin,
               const std::function<void()> &children = {}) {
+    std::string where;
+    const Origin o = local(origin, &where);
+    const std::string shown =
+        where.empty() ? detail : detail.empty() ? where : detail + " \xC2\xB7 " + where;
     w.StartObject();
     w.Key("name");
     w.String(name.empty() ? "(unnamed)" : name.c_str());
-    if (!detail.empty()) {
+    if (!shown.empty()) {
       w.Key("detail");
-      w.String(detail.c_str());
+      w.String(shown.c_str());
     }
     w.Key("kind");
     w.Int(kind);
@@ -83,9 +101,10 @@ struct Symbols {
 };
 
 // The range covering a schema's own statement and everything in it.
-Origin schema_origin(const Schema &schema) {
+Origin schema_origin(const Schema &schema, const Symbols &symbols) {
   uint32_t lo = UINT32_MAX, hi = 0;
-  auto take = [&](const Origin &o) {
+  auto take = [&](const Origin &origin) {
+    const Origin o = symbols.local(origin);
     if (o.statement.end <= o.statement.begin) return;
     lo = std::min(lo, o.statement.begin);
     hi = std::max(hi, o.statement.end);
@@ -100,7 +119,7 @@ Origin schema_origin(const Schema &schema) {
   if (lo == UINT32_MAX) return {};
   Origin o;
   o.statement = {lo, hi};
-  o.name = schema.declared ? schema.origin.name : Range{lo, lo};
+  o.name = schema.declared ? symbols.local(schema.origin).name : Range{lo, lo};
   return o;
 }
 
@@ -132,13 +151,13 @@ void write_range(Json_writer &w, const Snapshot &s, uint32_t begin, uint32_t end
 }
 
 void document_symbols(Json_writer &w, const Snapshot &s, const Outline &outline) {
-  Symbols out{w, s};
+  Symbols out{w, s, outline};
   const Catalog &c = outline.catalog;
   w.StartArray();
   for (const auto &schema : c.schemas()) {
     if (schema.empty() && !schema.declared) continue;
     out.symbol(schema.name.empty() ? "(no schema)" : schema.name, "schema", k_namespace,
-               schema_origin(schema), [&] {
+               schema_origin(schema, out), [&] {
                  for (const auto &t : schema.tables) {
                    out.symbol(t.name, t.temporary ? "temporary table" : "table", k_class, t.origin,
                               [&] {
@@ -194,6 +213,26 @@ void document_symbols(Json_writer &w, const Snapshot &s, const Outline &outline)
   for (const auto &a : c.rest_auth_apps()) out.symbol(a.name, "REST auth app", k_object, a.origin);
   for (const auto &r : c.rest_roles()) out.symbol(r.name, "REST role", k_object, r.origin);
   for (const auto &u : c.rest_users()) out.symbol(u.name, "REST user", k_object, u.origin);
+  w.EndArray();
+}
+
+void document_links(Json_writer &w, const Snapshot &s, const std::string &uri) {
+  const std::string dir = source_folder(file_uri_to_path(uri));
+  w.StartArray();
+  for (const auto &d : find_source_directives(*s.text)) {
+    const std::string target = resolve_source_path(dir, d.file);
+    if (target.empty()) continue;
+    w.StartObject();
+    w.Key("range");
+    write_range(w, s, d.path.begin, d.path.end);
+    w.Key("target");
+    const std::string target_uri = path_to_file_uri(target);
+    w.String(target_uri.c_str());
+    w.Key("tooltip");
+    const std::string tip = "Open " + target;
+    w.String(tip.c_str());
+    w.EndObject();
+  }
   w.EndArray();
 }
 

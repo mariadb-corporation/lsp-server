@@ -114,12 +114,6 @@ void fold_outline(Outline &out, const Source_expansion &e, Parser_pool &pool,
     o.source = to_source(statement.source);
   });
 
-  // "140_tables.sql:12" for an offset in include k.
-  auto where = [&](const Source_include &inc, uint32_t offset) {
-    const auto slash = inc.path.find_last_of('/');
-    return inc.path.substr(slash == std::string::npos ? 0 : slash + 1) + ":" +
-           std::to_string(inc.lines.position(inc.text, offset).line + 1);
-  };
   for (size_t k = first_note; k < out.notes.size(); ++k) {
     auto &[at, message] = out.notes[k];
     const auto loc = e.map(at);
@@ -128,14 +122,14 @@ void fold_outline(Outline &out, const Source_expansion &e, Parser_pool &pool,
     } else {
       const auto &inc = e.includes[loc.source - 1];
       at = inc.directive.statement.begin;
-      message = where(inc, loc.offset) + ": " + message;
+      message = source_location(inc, loc.offset) + ": " + message;
     }
   }
   for (const auto &inc : e.includes) {
     const uint32_t at = inc.directive.statement.begin;
     if (!inc.error.empty()) out.notes.push_back({at, "not read: " + inc.error});
     for (const auto &n : inc.nested) {
-      out.notes.push_back({at, where(inc, n.statement.begin) + ": SOURCE '" + n.file +
+      out.notes.push_back({at, source_location(inc, n.statement.begin) + ": SOURCE '" + n.file +
                                    "' not expanded: msm expands one level only"});
     }
   }

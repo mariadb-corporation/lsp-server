@@ -109,8 +109,9 @@ const Origin *origin_of(const Resolution &r) {
   }
 }
 
-// Whether a rename of the resolved name may be done in this document.
-bool renamable(const Resolution &r, std::string *error) {
+// Whether a rename of the resolved name may be done in this document,
+// whose outline is `document`.
+bool renamable(const Resolution &r, const Outline *document, std::string *error) {
   if (!r.found()) {
     *error = "there is no name here to rename";
     return false;
@@ -124,6 +125,14 @@ bool renamable(const Resolution &r, std::string *error) {
                       r.id.kind == Target_kind::column || r.id.kind == Target_kind::routine;
   if (!object || r.layer == nullptr || r.layer->kind != Layer_kind::document) {
     *error = "only names this document defines can be renamed";
+    return false;
+  }
+  // Defined in a file a SOURCE directive includes: not this document's.
+  if (const Origin *o = origin_of(r); o != nullptr && o->source > 0 && document != nullptr &&
+                                      o->source <= document->includes.size()) {
+    const auto &inc = document->includes[o->source - 1];
+    *error = "`" + r.ref.name + "` is defined in " + source_location(inc, o->statement.begin) +
+             ", which this document includes: rename it there";
     return false;
   }
   return true;
@@ -275,6 +284,7 @@ void definition(Json_writer &w, const Snapshot &s, const std::string &uri, Posit
   // Where to point: the statement's own definition, else the catalog's, in
   // this document or a workspace file.
   const std::string *where_uri = nullptr;
+  std::string include_uri;
   std::string_view where_text;
   const Line_map *where_lines = nullptr;
   Range where;
@@ -284,7 +294,16 @@ void definition(Json_writer &w, const Snapshot &s, const std::string &uri, Posit
     where_uri = &uri;
   } else if (o != nullptr && r.layer != nullptr && o->name.end > o->name.begin) {
     where = o->name;
-    if (r.layer->kind == Layer_kind::document) {
+    if (r.layer->kind == Layer_kind::document && o->source > 0) {
+      // In a file a SOURCE directive includes.
+      if (c.document && o->source <= c.document->includes.size()) {
+        const auto &inc = c.document->includes[o->source - 1];
+        include_uri = path_to_file_uri(inc.path);
+        where_uri = &include_uri;
+        where_text = inc.text;
+        where_lines = &inc.lines;
+      }
+    } else if (r.layer->kind == Layer_kind::document) {
       where_uri = &uri;
     } else if (r.layer->kind == Layer_kind::workspace && c.workspace &&
                o->source < c.workspace->files.size()) {
@@ -346,7 +365,7 @@ bool prepare_rename(Json_writer &w, const Snapshot &s, Position pos, const Catal
     *error = "there is no name here to rename";
     return false;
   }
-  if (!renamable(at->resolution, error)) return false;
+  if (!renamable(at->resolution, c.document.get(), error)) return false;
   const auto &ref = at->resolution.ref;
   w.StartObject();
   w.Key("range");
@@ -369,7 +388,7 @@ bool rename(Json_writer &w, const Snapshot &s, const std::string &uri, Position 
     *error = "there is no name here to rename";
     return false;
   }
-  if (!renamable(at->resolution, error)) return false;
+  if (!renamable(at->resolution, c.document.get(), error)) return false;
   const std::string text = quote_identifier(name);
   w.StartObject();
   w.Key("changes");
@@ -478,7 +497,15 @@ void workspace_symbols(Json_writer &w, std::string_view query,
   for (const auto &d : documents) {
     if (!d.outline || !d.snapshot) continue;
     const File f{&d.uri, *d.snapshot->text, d.snapshot->lines.get()};
-    list(d.outline->catalog, [&](uint32_t) { return f; });
+    // Objects from files the document's SOURCE directives include.
+    const auto &includes = d.outline->includes;
+    std::vector<std::string> uris;
+    for (const auto &inc : includes) uris.push_back(path_to_file_uri(inc.path));
+    list(d.outline->catalog, [&](uint32_t source) {
+      if (source == 0) return f;
+      if (source > includes.size()) return File{};
+      return File{&uris[source - 1], includes[source - 1].text, &includes[source - 1].lines};
+    });
   }
   if (workspace != nullptr) {
     // A workspace file that is open is listed from its document already;

@@ -44,6 +44,8 @@ std::string catalog_path(const fs::path &p) {
 
 }  // namespace
 
+std::string canonical_path(const std::string &path) { return catalog_path(fs::path(path)); }
+
 std::string file_uri_to_path(std::string_view uri) {
   constexpr std::string_view k_scheme = "file://";
   if (uri.size() < k_scheme.size() || !iequals(uri.substr(0, k_scheme.size()), k_scheme)) return {};

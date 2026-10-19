@@ -193,12 +193,25 @@ with 8 unit tests (`source_include_t.cc`). On the REST project's development scr
 `expand_sources` gives the same 292,661 bytes as msm's own expansion (without msm's
 indentation).
 
+Step 4 is done (2026-10-19). The server:
+
+- **Outline:** `outline_of` expands the document's directives, relative to its folder. An included file is read from the editor's text when it is open, else from disk (`Include_texts`, kept by the loop thread to the open documents that some document includes).
+- **Bookkeeping:** after each outline the loop thread learns which files the document includes and what is wrong with its directives (`on_outline_includes`). It publishes these problems as diagnostics with code `source`.
+- **Background rebuilds:** after each check pass, a background job folds the outline of a document that has directives. An edit to an open included file, closing it, or a `workspace/didChangeWatchedFiles` for an included file marks the includers' outlines stale (`Outline_cache::epoch`) and folds them anew. The server registers a `**/*.sql` watcher when the client allows dynamic registration.
+- **LSP features:**
+  - Document symbols put an included object on its directive, with `· file:line` in the detail.
+  - Definition goes into the included file, and workspace symbols list included objects there.
+  - Rename refuses an included object, naming its file and line.
+  - New: `textDocument/documentLink` on every directive's path.
+
+6 e2e tests (`tests/e2e/test_source.py`) cover these. On the REST project script the server lists 168 objects under `mariadb_rest_service` (35 ms for the first `documentSymbol`), publishes no diagnostics, and gives 11 links.
+
 Step 3 is done (2026-10-19), for the library and the CLI:
 
 - `Check_status::source_directive`: a statement that is a directive is not parsed. A statement with directive lines in it is parsed with them blanked. `find_source_directives(text, from, to)` limits the search to one statement, so checking a dump stays linear.
 - `source_problems(expansion)` lists the errors (unreadable file on the path, malformed slice on the slice) and the warnings (nothing selected, a nested directive).
 - `mariadb-lsp check` reports these problems: errors in `errors`, warnings in `warnings` and as `warning:` lines. `--no-source` checks directives as SQL.
-- The server already gets the new check status. Its `publishDiagnostics` adds the problems in step 4, which brings the server's expansion and reader.
+- The server already gets the new check status; step 4 adds the problems to its diagnostics.
 - 3 more unit tests. The REST project's development script checks without a diagnostic (exit 0).
 
 Step 2 is done (2026-10-19). Three pieces:

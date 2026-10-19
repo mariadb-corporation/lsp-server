@@ -35,6 +35,10 @@ std::string file_uri_to_path(std::string_view uri);
 // The file URI of an absolute path, percent-encoded as VS Code writes it.
 std::string path_to_file_uri(std::string_view path);
 
+// A path as catalogs and includes compare them: links resolved as far as
+// the path exists, forward slashes.
+std::string canonical_path(const std::string &path);
+
 // Reads a SQL file as UTF-8: as is when it is valid UTF-8, converted from
 // latin1 otherwise.  False when it cannot be read.
 bool read_sql_file(const std::string &path, std::string *text);

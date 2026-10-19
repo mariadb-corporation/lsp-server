@@ -239,9 +239,26 @@ Source_expansion::Located_range Source_expansion::map(Range range) const {
   return {0, {b.offset, std::max(b.offset, stop)}};
 }
 
-std::vector<Source_problem> source_problems(const Source_expansion &e) {
+std::string source_folder(const std::string &document_path) {
+  if (document_path.empty()) return {};
+  return fs::path(document_path).parent_path().generic_string();
+}
+
+std::string source_location(const Source_include &inc, uint32_t offset) {
+  const auto slash = inc.path.find_last_of('/');
+  return inc.path.substr(slash == std::string::npos ? 0 : slash + 1) + ":" +
+         std::to_string(inc.lines.position(inc.text, offset).line + 1);
+}
+
+std::string resolve_source_path(const std::string &base_dir, const std::string &file) {
+  const fs::path p(file);
+  if (p.is_relative() && base_dir.empty()) return {};
+  return (fs::path(base_dir) / p).lexically_normal().generic_string();
+}
+
+std::vector<Source_problem> source_problems(const std::vector<Source_include> &includes) {
   std::vector<Source_problem> out;
-  for (const auto &inc : e.includes) {
+  for (const auto &inc : includes) {
     const auto &d = inc.directive;
     const bool has_slice = d.slice.end > d.slice.begin;
     const Range slice = has_slice ? d.slice : d.statement;
@@ -280,11 +297,10 @@ Source_expansion expand_sources(std::string_view text, const std::string &base_d
     append(0, text, pos, d.line.begin);
     pos = d.line.end;
     Source_include inc;
-    const fs::path file(d.file);
-    if (file.is_relative() && base_dir.empty()) {
+    inc.path = resolve_source_path(base_dir, d.file);
+    if (inc.path.empty()) {
       inc.error = "the path is relative, and the document is not in a folder";
     } else {
-      inc.path = (fs::path(base_dir) / file).lexically_normal().generic_string();
       inc.read = read ? read(inc.path, &inc.text) : read_sql_file(inc.path, &inc.text);
       if (!inc.read) {
         inc.text.clear();

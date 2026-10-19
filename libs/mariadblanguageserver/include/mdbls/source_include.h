@@ -78,6 +78,14 @@ struct Source_include {
   std::vector<Source_directive> nested;
 };
 
+// The folder of a document's path, which its relative SOURCE paths are
+// relative to; "" for "" (a document that is not a file).
+std::string source_folder(const std::string &document_path);
+
+// "140_tables.sql:12": the file name and the line (1-based) of `offset` in
+// an include's text.
+std::string source_location(const Source_include &include, uint32_t offset);
+
 // Reads a file as UTF-8; false when it cannot be read.
 using Source_reader = std::function<bool(const std::string &path, std::string *text)>;
 
@@ -120,8 +128,20 @@ struct Source_problem {
   Range range;
   bool error = true;  // else a warning
   std::string message;
+
+  bool operator==(const Source_problem &o) const {
+    return range.begin == o.range.begin && range.end == o.range.end && error == o.error &&
+           message == o.message;
+  }
 };
-std::vector<Source_problem> source_problems(const Source_expansion &expansion);
+std::vector<Source_problem> source_problems(const std::vector<Source_include> &includes);
+inline std::vector<Source_problem> source_problems(const Source_expansion &expansion) {
+  return source_problems(expansion.includes);
+}
+
+// The path a directive's `file` names: relative to `base_dir`, normalized,
+// with forward slashes; "" for a relative path when `base_dir` is empty.
+std::string resolve_source_path(const std::string &base_dir, const std::string &file);
 
 // Expands the directives of `text`, whose relative paths are relative to
 // `base_dir` (none when it is empty).  `read` gives the files' texts; by

@@ -140,6 +140,7 @@ std::shared_ptr<const Snapshot> Document::snapshot() {
     s->index = m_index;
     s->lines = m_lines;
     s->version_id = m_options.version_id;
+    s->index_options = m_options;
     m_snapshot = std::move(s);
   }
   return m_snapshot;

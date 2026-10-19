@@ -42,6 +42,7 @@ struct Snapshot {
   std::shared_ptr<const Statement_index> index;
   std::shared_ptr<const Line_map> lines;
   unsigned long version_id = k_default_version_id;  // for versioned comments and the parser
+  Index_options index_options;  // what `index` was built with
 };
 
 // The result of checking one statement of the snapshot of `generation`;
