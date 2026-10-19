@@ -364,7 +364,12 @@ extern int mdbp_charlen(CHARSET_INFO *cs, const uchar *s, const uchar *e);
 #define my_ci_charlen(cs, s, e) mdbp_charlen((cs), (s), (e))
 
 #define DBUG_ASSERT(x) ((void) 0)
+#if defined(_MSC_VER) && !defined(__clang__)
+/* MSVC reads x = x as a use of x (C4700); MariaDB's FORCE_INIT_OF_VARS form. */
+#define UNINIT_VAR(x) x = 0
+#else
 #define UNINIT_VAR(x) x = x
+#endif
 #define MYF(v) (v)
 #define MY_WME 0
 #define STRING_WITH_LEN(X) (X), ((size_t) (sizeof(X) - 1))

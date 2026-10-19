@@ -310,7 +310,7 @@ void run_tokens(const Options &o, const std::string &text, const mdbls::Line_map
     const auto stmt = index.text_of(text, s);
     // nullptr when the parser refuses the sql_mode.
     mdbp_parser *p = cache.get(index.modes()[s.mode].mode, o.index.version_id);
-    mdbp_result r;
+    mdbp_result r{};
     const mdbp_status st =
         p ? mdbp_lex_sql(p, stmt.data(), stmt.size(), &r) : MDBP_UNSUPPORTED;
     if (o.json) {
