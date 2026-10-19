@@ -79,6 +79,11 @@ target_link_libraries(mariadbparser_objects PUBLIC Threads::Threads)
 add_library(mariadbparser STATIC $<TARGET_OBJECTS:mariadbparser_objects>)
 target_include_directories(mariadbparser PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(mariadbparser PUBLIC Threads::Threads)
+# On Windows the DLL's import library is mariadbparser.lib, the name the
+# static library would get.
+if(WIN32)
+  set_target_properties(mariadbparser PROPERTIES OUTPUT_NAME mariadbparser_static)
+endif()
 
 add_library(mariadbparser_shared SHARED $<TARGET_OBJECTS:mariadbparser_objects>)
 target_include_directories(mariadbparser_shared PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
