@@ -1056,6 +1056,14 @@ gutter's statements from the server.
   with the generated fixtures, static analysis as `cmake/static_analysis.cmake`.
 - `cpack` packages per platform; install into the shell's `bin/`; release workflow.
 
+Status (2026-10-19): `cmake/packaging.cmake` adds install rules and a CPack ZIP package
+(`cmake --build <dir> --target package`): `bin/mariadb-lsp`, `LICENSE`, `README.md`,
+`docs/language-server.md`, `docs/outline-format.md`, named
+`mariadb-lsp-<version>-<platform>.zip` as MariaDB Shell names its packages. Built on macOS 26
+(arm64; the binary links only system libraries); Linux and Windows not tried yet, and the
+macOS binary is neither signed nor notarized. Open: installing into the shell's `bin/`, a
+release workflow, signing.
+
 ### P8 — Formatting (added 2026-10-18)
 
 `textDocument/formatting` and `rangeFormatting`, and `mariadb-lsp format FILE`. The

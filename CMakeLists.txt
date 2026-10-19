@@ -100,3 +100,6 @@ add_subdirectory(src/mariadb-lsp)
 if(WITH_TESTS)
   add_subdirectory(unittest)
 endif()
+
+# cmake --install and cpack: bin/mariadb-lsp and its documents, as a zip.
+include(packaging)
