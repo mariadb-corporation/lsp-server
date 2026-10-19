@@ -18,7 +18,9 @@ navigation and links take in the files a script includes."""
 
 import os
 import pathlib
+import json
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -351,6 +353,78 @@ class Source_includes(unittest.TestCase):
         self.client.notify("workspace/didChangeWatchedFiles",
                            {"changes": [{"uri": extra.as_uri(), "type": 2}]})
         self.assertIsNotNone(find_symbol(self.symbols_until("audit"), "audit"))
+
+
+class Source_dir_cli(unittest.TestCase):
+    """mariadb-lsp check, outline and format with --source-dir: the folder
+    relative SOURCE paths are taken from, for stdin above all."""
+
+    DEV = FIXTURES / "msm" / "development"
+    SCRIPT = DEV / "shop_next.sql"
+
+    def run_cli(self, *args, stdin=None):
+        return subprocess.run([BINARY, *args], input=stdin, capture_output=True, text=True,
+                              timeout=60)
+
+    def test_check_from_stdin(self):
+        text = self.SCRIPT.read_text()
+        # Without it, stdin has no folder: every relative path is refused.
+        r = self.run_cli("check", "-", stdin=text)
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stdout.count("the path is relative, and the document is not in a folder"), 4)
+        # With it, the includes are read: the nested directive's warning names
+        # the file and line, as for a file.
+        r = self.run_cli("check", "--source-dir", str(self.DEV), "-", stdin=text)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.splitlines(),
+                         ["-:16:1: warning: ./sections/180_extra.sql line 2 has SOURCE "
+                          "'./deeper.sql', which msm does not expand: it expands one level only"])
+        # --no-source still wins: the directives are SQL, and errors.
+        r = self.run_cli("check", "--no-source", "--source-dir", str(self.DEV), "-", stdin=text)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("syntax error near 'SOURCE'", r.stdout)
+
+    def test_outline_from_stdin(self):
+        r = self.run_cli("outline", "--source-dir", str(self.DEV), "-",
+                         stdin=self.SCRIPT.read_text())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        o = json.loads(r.stdout)
+        self.assertEqual([pathlib.Path(i["file"]).name for i in o["includes"]],
+                         ["140_tables.sql", "150_routines.sql", "170_roles.sql", "180_extra.sql"])
+        self.assertNotIn("error", o["includes"][0])
+        tables = {t["name"]: t for t in o["schemas"][0]["tables"]}
+        self.assertEqual(tables["customer"]["source"], 0)
+        self.assertEqual([n["message"].split(": ")[0] for n in o["notes"]],
+                         ["140_tables.sql:13", "180_extra.sql:2"])
+
+    def test_a_file_without_it_is_read_as_before(self):
+        stdin = self.run_cli("outline", "--source-dir", str(self.DEV), "-",
+                             stdin=self.SCRIPT.read_text())
+        file = self.run_cli("outline", str(self.SCRIPT))
+        self.assertEqual(file.returncode, 0, file.stderr)
+        a, b = json.loads(stdin.stdout), json.loads(file.stdout)
+        del a["file"], b["file"]
+        self.assertEqual(a, b)
+        r = self.run_cli("check", str(self.SCRIPT))
+        self.assertEqual(r.returncode, 0, r.stdout)
+        # With it, it takes the place of the file's own folder.
+        r = self.run_cli("check", "--source-dir", str(FIXTURES), str(self.SCRIPT))
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stdout.count("cannot read"), 4)
+
+    def test_usage_errors(self):
+        r = self.run_cli("check", "--source-dir", str(self.DEV / "no-such-folder"), "-", stdin="")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("not a folder", r.stderr)
+        r = self.run_cli("check", "--source-dir", str(self.SCRIPT), "-", stdin="")
+        self.assertEqual(r.returncode, 2)
+        r = self.run_cli("split", "--source-dir", str(self.DEV), "-", stdin="")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("goes with check, outline and format", r.stderr)
+        # format takes it and reads no includes.
+        r = self.run_cli("format", "--source-dir", str(self.DEV), "-", stdin="select 1;\n")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "SELECT 1;\n")
 
 
 if __name__ == "__main__":

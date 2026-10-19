@@ -139,6 +139,10 @@ const char *const k_usage =
     "  --no-source        check, outline: take MSM SOURCE directives for SQL: do\n"
     "                     not read the files they include (check: report them as\n"
     "                     errors)\n"
+    "  --source-dir DIR   check, outline, format: the folder relative SOURCE paths\n"
+    "                     are taken from: for stdin (-), which has none, and\n"
+    "                     instead of a FILE's own folder (format reads no\n"
+    "                     includes and only checks DIR)\n"
     "  --log FILE         lsp: write a log to FILE\n"
     "  --stdio            lsp: talk on stdin and stdout (the only transport)\n"
     "  --mcp              lsp: read connections' catalogs through the client, which\n"
@@ -175,6 +179,7 @@ struct Options {
   mdbls::Format_options format;
   std::string indent;  // --indent; "": not given
   bool source = true;  // expand MSM SOURCE directives (--no-source: not)
+  std::string source_dir;  // --source-dir, absolute; "": the file's folder
 };
 
 // The --connection server's catalog, read once.
@@ -380,8 +385,10 @@ struct Check_summary {
   size_t errors = 0;
 };
 
-// The folder relative SOURCE paths of `file` are relative to; "" for stdin.
-std::string source_dir(const std::string &file) {
+// The folder relative SOURCE paths of `file` are relative to: --source-dir,
+// else the file's own; "" for stdin without --source-dir.
+std::string source_dir(const Options &o, const std::string &file) {
+  if (!o.source_dir.empty()) return o.source_dir;
   if (file == "-") return {};
   std::error_code ec;
   const auto abs = std::filesystem::absolute(file, ec);
@@ -421,7 +428,7 @@ Check_summary run_check(const Options &o, const std::string &file, const std::st
   std::vector<mdbls::Source_problem> source_errors;
   std::vector<mdbls::Name_issue> issues;  // warnings
   if (o.source) {
-    for (auto &p : mdbls::source_problems(mdbls::expand_sources(text, source_dir(file)))) {
+    for (auto &p : mdbls::source_problems(mdbls::expand_sources(text, source_dir(o, file)))) {
       if (p.error) {
         ++sum.errors;
         source_errors.push_back(std::move(p));
@@ -806,6 +813,14 @@ std::optional<Options> parse_args(int argc, char **argv) {
       o.threads = static_cast<unsigned>(*n);
     } else if (arg == "--no-source") {
       o.source = false;
+    } else if (arg == "--source-dir") {
+      const auto v = value();
+      if (!v) return std::nullopt;
+      if (v->empty()) {
+        std::cerr << "mariadb-lsp: --source-dir needs a folder\n";
+        return std::nullopt;
+      }
+      o.source_dir = *v;
     } else if (arg == "--max-errors") {
       const auto n = number();
       if (!n) return std::nullopt;
@@ -872,6 +887,20 @@ std::optional<Options> parse_args(int argc, char **argv) {
                                     : "mariadb-lsp: unknown command " + o.command + "\n")
               << k_usage;
     return std::nullopt;
+  }
+  if (!o.source_dir.empty()) {
+    if (o.command != "check" && o.command != "outline" && o.command != "format") {
+      std::cerr << "mariadb-lsp: --source-dir goes with check, outline and format\n";
+      return std::nullopt;
+    }
+    std::error_code ec;
+    if (!std::filesystem::is_directory(o.source_dir, ec)) {
+      std::cerr << "mariadb-lsp: --source-dir " << o.source_dir << ": not a folder\n";
+      return std::nullopt;
+    }
+    // Absolute and folded, as a FILE's folder is.
+    const auto abs = std::filesystem::absolute(o.source_dir, ec);
+    o.source_dir = (ec ? std::filesystem::path(o.source_dir) : abs).lexically_normal().generic_string();
   }
   if (o.ask_password && o.connection.empty()) {
     std::cerr << "mariadb-lsp: -p goes with --connection\n";
@@ -1155,7 +1184,7 @@ int main(int argc, char **argv) {
     } else if (o->command == "outline") {
       mdbls::Outline_options oo;
       oo.version_id = o->index.version_id;
-      auto expansion = o->source ? mdbls::expand_sources(text, source_dir(file))
+      auto expansion = o->source ? mdbls::expand_sources(text, source_dir(*o, file))
                                  : mdbls::Source_expansion{};
       const auto outline = expansion.empty()
                                ? mdbls::build_outline(text, index, *pool, oo)
