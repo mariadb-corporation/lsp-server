@@ -395,11 +395,15 @@ class Builder {
   // before it.  A comment on a line of its own breaks the line before it; a
   // line comment that ended the line of the token before stays there
   // (trailing); each comment that ended its line breaks the line after it.
-  // With a kept layout (Sep::keep) every one of those breaks goes one level
-  // deeper, so a comment and the token after it land on the same level.
+  // With a kept layout (Sep::keep) and inside a clause (Sep::space) every
+  // one of those breaks goes one level deeper, so a comment and the token
+  // after it land on the same level, under the clause's keyword:
+  // `SELECT -- c` puts the items on the next line, indented.
   Doc separator(uint32_t j, Sep kind) const {
     const Gap &g = gaps_[j];
-    auto line_break = [&] { return kind == Sep::keep ? nest(o_.indent, hardline()) : hardline(); };
+    auto line_break = [&] {
+      return kind == Sep::keep || kind == Sep::space ? nest(o_.indent, hardline()) : hardline();
+    };
     if (g.comments.empty()) {
       switch (kind) {
         case Sep::keep:
@@ -645,7 +649,8 @@ class Builder {
       if (tail.empty()) continue;
       if (has_on) {
         Piece on = build(kids[k]);
-        // A comment ending the ON line breaks it at the ON's level.
+        // The condition is ON's clause: after a comment ending the ON line
+        // it goes one level deeper than ON.
         joined.push_back(group(concat({nest(o_.indent, separator(on.first, Sep::line)), std::move(on.doc),
                                        nest(o_.indent, separator(tail.first, Sep::space)), std::move(tail.doc)})));
       } else {

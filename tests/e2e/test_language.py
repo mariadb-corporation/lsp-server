@@ -202,6 +202,39 @@ class Formatting(Lsp_test):
         self.assertEqual([e["newText"] for e in edits], ["SELECT 1"])
 
 
+    def test_the_indentation_setting_wins_over_the_editor_s(self):
+        text = self.QUERY
+        joined = "JOIN customer c ON c.id = o.customer_id\n"
+        edits = self.format("textDocument/formatting", text, {"indentation": "tab"})
+        self.assertIn("\n\t" + joined, edits[0]["newText"])
+        c = self.client
+        for setting, unit in (("2 spaces", "  "), ("4 spaces", "    "), ("editor", "    ")):
+            c.notify("workspace/didChangeConfiguration",
+                     {"settings": {"mariadb": {"indentation": setting}}})
+            # The editor's tabSize is 2 here: "editor" follows it.
+            edits = c.request("textDocument/formatting", {
+                "textDocument": {"uri": URI},
+                "options": {"tabSize": 2 if setting == "editor" else 8, "insertSpaces": True}})
+            want = "  " if setting == "editor" else unit
+            self.assertIn("\n" + want + joined, edits[0]["newText"], setting)
+
+    def test_cli_indent(self):
+        self.client.initialize()  # shut down by tearDown
+        with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False) as f:
+            f.write(self.QUERY)
+        try:
+            for arg, unit in (("tab", "\t"), ("4", "    "), ("2", "  ")):
+                r = subprocess.run([BINARY, "format", "--indent", arg, f.name],
+                                   capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertIn("\n" + unit + "JOIN customer c", r.stdout)
+            r = subprocess.run([BINARY, "format", "--indent", "3", f.name], capture_output=True,
+                               text=True)
+            self.assertEqual(r.returncode, 2)
+        finally:
+            os.unlink(f.name)
+
+
 class Navigation(Language_test):
     def test_hover(self):
         text, pos = self.open_at("SELECT o.total, c.na|me FROM orders o JOIN customer c "

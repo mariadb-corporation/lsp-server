@@ -169,9 +169,10 @@ uint32_t line_end(std::string_view text, uint32_t offset) {
   return offset;
 }
 
-// One level of indentation deeper than `indent`: a tab when it has tabs,
-// else two spaces.
-std::string_view indent_unit(std::string_view indent) {
+// One level of indentation deeper than `indent`: `setting` when the
+// client chose one, else a tab when `indent` has tabs, else two spaces.
+std::string_view indent_unit(std::string_view indent, std::string_view setting) {
+  if (!setting.empty()) return setting;
   return indent.find('\t') != std::string_view::npos ? "\t" : "  ";
 }
 
@@ -187,10 +188,10 @@ struct Added_clause {
 // spans lines already or the line would grow past `width` characters (0:
 // no limit); `extra` is what the item's other edits add to that line.
 // Then each clause starts a line of its own at `indent`, and an ON that
-// would pass the width goes on the next line, one level deeper.
+// would pass the width goes on the next line, `unit` deeper.
 std::string place_clauses(std::string_view text, uint32_t begin, uint32_t body_end, uint32_t at,
                           std::string_view indent, const std::vector<Added_clause> &clauses,
-                          int64_t extra, size_t width) {
+                          int64_t extra, size_t width, std::string_view unit) {
   std::string flat;
   for (const auto &c : clauses) {
     flat += " " + c.head;
@@ -210,7 +211,6 @@ std::string place_clauses(std::string_view text, uint32_t begin, uint32_t body_e
   const size_t nl = text.find('\n', body_end);
   const std::string_view lines = text.substr(begin, (nl == std::string_view::npos ? text.size() : nl + 1) - begin);
   const std::string_view eol = lines.find('\n') != std::string_view::npos ? eol_of(lines) : eol_of(text);
-  const std::string_view unit = indent_unit(indent);
   std::string out;
   for (const auto &c : clauses) {
     const std::string line = std::string(indent) + c.head;
@@ -708,7 +708,8 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
                       static_cast<int64_t>(char_count(text.substr(qual_begin, out.replace_end - qual_begin)));
             }
             edits.push_back(
-                {at, at, place_clauses(text, begin, body_end, at, indent, clauses, extra, options.line_width)});
+                {at, at, place_clauses(text, begin, body_end, at, indent, clauses, extra, options.line_width,
+                                          indent_unit(indent, options.indent))});
             return edits;
           };
           auto joined = [&](const std::string &table, const std::string &as, const std::string &on) {
@@ -734,7 +735,7 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
           std::string join_indent;
           if (line_begin(text, from_begin) == line_begin(text, at_end)) {
             const std::string_view from_indent = indentation(text, from_begin);
-            join_indent = std::string(from_indent) + std::string(indent_unit(from_indent));
+            join_indent = std::string(from_indent) + std::string(indent_unit(from_indent, options.indent));
           } else {
             join_indent = std::string(indentation(text, at_end));
           }

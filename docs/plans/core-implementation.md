@@ -1068,7 +1068,9 @@ FROM and JOIN follow the same rules, so the two agree.
 Built on the parse tree and the gaps between its tokens: a small Wadler/Prettier-style
 printer (texts, lines that break or not, groups, nests, aligns, fills) and a builder that
 maps the grammar's clause nodes onto it (`src/formatter.cc`). Comments are kept before
-the token after them; versioned comments, routine bodies and every non-query statement
+the token after them, and a line comment ending a clause keyword's line puts what
+follows one level deeper than the keyword; versioned comments, routine bodies and every
+non-query statement
 are left alone. Each layout is checked: the same tokens and comments, and it parses.
 
 **Status 2026-10-18: queries done** (SELECT, WITH, UNION, SELECT ... INTO), see

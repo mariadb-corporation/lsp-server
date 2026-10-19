@@ -72,7 +72,8 @@ struct Result {
 
 // Completes at the '|' in `sql`, which follows the schema above.
 Result complete_at(const std::string &sql, bool with_schema = true, size_t max_items = 2000,
-                   bool snippets = false, size_t line_width = 80, bool upper_case_keywords = true) {
+                   bool snippets = false, size_t line_width = 80, bool upper_case_keywords = true,
+                   const std::string &indent = "") {
   static Parser_pool pool(2);
   Result r;
   r.text = (with_schema ? std::string(k_schema) : std::string()) + sql;
@@ -92,6 +93,7 @@ Result complete_at(const std::string &sql, bool with_schema = true, size_t max_i
   o.snippets = snippets;
   o.line_width = line_width;
   o.upper_case_keywords = upper_case_keywords;
+  o.indent = indent;
   r.list = complete(r.text, index, r.cursor, view, cache, o);
   return r;
 }
@@ -605,6 +607,17 @@ TEST(Completion, a_statement_on_several_lines_gets_its_clauses_on_lines_of_their
   EXPECT_EQ(pick(k, "t1_id"),
             "SELECT t.id, t2.t1_id\nFROM test_schema.t1 AS t\n    CROSS JOIN test_schema.t3 AS z\n"
             "    LEFT OUTER JOIN test_schema.t2 AS t2 ON t2.t1_id = t.id;");
+}
+
+TEST(Completion, the_indentation_setting_sets_one_level) {
+  const std::string sql = std::string(k_fk_schema) + "SELECT t.id,\n  test_schema.t2.|\nFROM test_schema.t1 AS t;";
+  const std::string joined = "LEFT OUTER JOIN test_schema.t2 AS t2 ON t2.t1_id = t.id;";
+  EXPECT_EQ(pick(complete_at(sql, false, 2000, false, 80, true, "\t"), "t1_id"),
+            "SELECT t.id,\n  t2.t1_id\nFROM test_schema.t1 AS t\n\t" + joined);
+  EXPECT_EQ(pick(complete_at(sql, false, 2000, false, 80, true, "    "), "t1_id"),
+            "SELECT t.id,\n  t2.t1_id\nFROM test_schema.t1 AS t\n    " + joined);
+  // None: a tab when the line has tabs, else two spaces.
+  EXPECT_EQ(pick(complete_at(sql, false), "t1_id"), "SELECT t.id,\n  t2.t1_id\nFROM test_schema.t1 AS t\n  " + joined);
 }
 
 TEST(Completion, a_query_in_a_routine_body_keeps_its_indentation) {

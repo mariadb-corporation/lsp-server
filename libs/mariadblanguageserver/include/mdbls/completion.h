@@ -90,6 +90,9 @@ struct Completion_options {
   // Lines a completion lays out (the FROM or JOIN a column brings) stay
   // within this many characters; 0: no limit.
   size_t line_width = 80;
+  // One level of indentation in those lines ("\t", "  ", "    "); empty:
+  // a tab when the line's indentation has tabs, else two spaces.
+  std::string indent;
   size_t max_items = 500;
 };
 

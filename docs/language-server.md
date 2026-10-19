@@ -66,6 +66,7 @@ first statement of each run in that mode.
 | `credentialStoreHelper` | the shell's | the secret store helper's name (`keychain`, `login-path`, `windows-credential`, `plaintext`) |
 | `catalogRefreshSeconds` | `0` | read a connection's catalog again this often; 0 reads it on demand only |
 | `keywordCase` | `"upper"` | `"lower"` completes keywords and built-in functions in lower case, and writes the FROM and JOIN a column brings in lower case |
+| `indentation` | `"editor"` | one level of indentation for formatting and for the lines completion adds: `"tab"`, `"2 spaces"` or `"4 spaces"`; `"editor"` takes the formatting request's `tabSize`/`insertSpaces`, and for completion a tab when the line's indentation has tabs, else two spaces |
 | `lineWidth` | `80` | characters; the FROM and JOIN a column brings start lines of their own when the line would grow past this, and formatting keeps lines within it where a break can; 0 = no limit |
 
 The client's `textDocument.completion.completionItem.snippetSupport` makes function
@@ -148,8 +149,8 @@ being inserted counts, taken at the table's longest column name). Then each clau
 a line of its own: `FROM` at the indentation of the line holding the query's `SELECT`,
 a JOIN one level deeper than the FROM line, or at the indentation of the last line of the
 tables when its joins are on lines of their own; each JOIN of an n:m pair gets its own line, and an `ON` that would pass
-the width goes on the next line one level deeper (two spaces, a tab when the indentation
-has tabs). Lines end in `\r\n` when the statement's do. The keywords follow `keywordCase`.
+the width goes on the next line one level deeper (`indentation`; by default two spaces, a
+tab when the indentation has tabs). Lines end in `\r\n` when the statement's do. The keywords follow `keywordCase`.
 Only the inserted text is placed; text after the insert point (`;`, ` WHERE ...`) stays
 where it is, after the last inserted line. Moving existing text is formatting.
 
@@ -171,8 +172,10 @@ with `SELECT` or `WITH` (or a parenthesized query) and parse whole. Every other
 statement, and any statement that holds a versioned comment (`/*!NNNNN`), is left as it
 is, so DDL, routines and mysqldump files keep their own layout. A range formats each
 statement it touches, whole. `keywordCase` sets the keywords' case, `lineWidth` the
-width, and the request's `tabSize`/`insertSpaces` one level of indentation (a tab when
-`insertSpaces` is false).
+width, and `indentation` one level of indentation, by default the request's
+`tabSize`/`insertSpaces` (a tab when `insertSpaces` is false). A line comment that ends
+a clause keyword's line puts what follows one level deeper than the keyword
+(`SELECT -- c`, then the items indented on the next line).
 
 ```sql
 SELECT f.title, c.name AS category, count(r.rental_id) AS rentals,

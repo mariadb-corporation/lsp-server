@@ -32,14 +32,17 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <iterator>
 #include <stdexcept>
 #include <set>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <tuple>
 #include <type_traits>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "lsp/features.h"
@@ -320,6 +323,7 @@ struct Server::Impl {
   bool snippets = false;                     // the client takes snippets
   bool upper_keywords = true;
   size_t line_width = 80;                    // lineWidth
+  std::string indent;                        // indentation; "": the editor's
 
   // Destroyed first: their running jobs may still post and send.
   std::unique_ptr<Parser_pool> parse_pool;
@@ -794,6 +798,13 @@ struct Server::Impl {
     if (const auto v = string_at(o, {"shellBinDir"}); v && !v->empty()) secrets.shell_bin_dir = *v;
     if (const auto v = string_at(o, {"credentialStoreHelper"})) secrets.helper = *v;
     if (const auto v = string_at(o, {"keywordCase"})) upper_keywords = *v != "lower";
+    if (const auto v = string_at(o, {"indentation"})) {
+      static constexpr std::pair<std::string_view, std::string_view> k_units[] = {
+          {"editor", ""}, {"tab", "\t"}, {"2 spaces", "  "}, {"4 spaces", "    "}};
+      const auto *unit = std::ranges::find(k_units, *v, &std::pair<std::string_view, std::string_view>::first);
+      if (unit == std::end(k_units)) log("indentation \"" + *v + "\" is not editor, tab, 2 spaces or 4 spaces");
+      indent = unit == std::end(k_units) ? "" : unit->second;
+    }
   }
 
   // Sends a request to the client; its answer comes through the future.
@@ -1747,6 +1758,7 @@ struct Server::Impl {
     o.upper_case_keywords = upper_keywords;
     o.snippets = snippets;
     o.line_width = line_width;
+    o.indent = indent;
     detail_request(id, d, params,
                    [o](Json_writer &w, const Snapshot &s, Position pos, const Catalog_sources &c,
                        Parser_cache &cache, Details_pass &pass) {
@@ -1812,8 +1824,9 @@ struct Server::Impl {
                      });
   }
 
-  // The indentation unit from the request's FormattingOptions (tabSize,
-  // insertSpaces), the keyword case and width from the settings.
+  // The indentation unit from the indentation setting, else from the
+  // request's FormattingOptions (tabSize, insertSpaces); the keyword case
+  // and width from the settings.
   void on_formatting(const std::string &id, Open_document *d, const Json &params, bool range) {
     if (d == nullptr) return reply_null(id);
     Position from{}, to{};
@@ -1829,7 +1842,9 @@ struct Server::Impl {
     o.line_width = line_width;
     const Json *spaces = path(params, {"options", "insertSpaces"});
     const Json *size = path(params, {"options", "tabSize"});
-    if (spaces != nullptr && spaces->IsBool() && !spaces->GetBool()) {
+    if (!indent.empty()) {
+      o.indent = indent;
+    } else if (spaces != nullptr && spaces->IsBool() && !spaces->GetBool()) {
       o.indent = "\t";
     } else if (size != nullptr && size->IsUint() && size->GetUint() > 0 && size->GetUint() <= 16) {
       o.indent = std::string(size->GetUint(), ' ');

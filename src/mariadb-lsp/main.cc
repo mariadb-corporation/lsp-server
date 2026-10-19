@@ -117,6 +117,9 @@ const char *const k_usage =
     "                     0 = no limit)\n"
     "  --keyword-case upper|lower\n"
     "                     format: the case of keywords (default upper)\n"
+    "  --indent tab|2|4   format, complete: one level of indentation, a tab or 2\n"
+    "                     or 4 spaces (format: default 2; complete: default a tab\n"
+    "                     when the line has tabs, else 2)\n"
     "  --connection URI   check, outline, complete: read the sql_mode, the version\n"
     "                     and the catalog from this server (its password from the\n"
     "                     shell's secret store); check then also reports tables and\n"
@@ -163,6 +166,7 @@ struct Options {
   bool sql_mode_given = false;
   bool version_given = false;
   mdbls::Format_options format;
+  std::string indent;  // --indent; "": not given
 };
 
 // The --connection server's catalog, read once.
@@ -608,6 +612,7 @@ void run_complete(const Options &o, const std::string &text, const mdbls::Line_m
   mdbls::Parser_cache cache;
   mdbls::Completion_options co;
   co.version_id = o.index.version_id;
+  co.indent = o.indent;
   auto t0 = Clock::now();
   const auto list = mdbls::complete(text, index, offset, view, cache, co);
   const double first_ms = ms_since(t0);
@@ -784,6 +789,13 @@ std::optional<Options> parse_args(int argc, char **argv) {
         return std::nullopt;
       }
       o.format.upper_case_keywords = *v == "upper";
+    } else if (arg == "--indent") {
+      const auto v = value();
+      if (!v || (*v != "tab" && *v != "2" && *v != "4")) {
+        std::cerr << "mariadb-lsp: --indent is tab, 2 or 4\n";
+        return std::nullopt;
+      }
+      o.indent = *v == "tab" ? "\t" : std::string(*v == "2" ? 2 : 4, ' ');
     } else if (arg == "--stdio") {
       // The default and only transport.
     } else if (arg == "--mcp") {
@@ -1055,6 +1067,7 @@ int main(int argc, char **argv) {
       mdbls::Parser_cache cache;
       mdbls::Format_options fo = o->format;
       fo.version_id = o->index.version_id;
+      if (!o->indent.empty()) fo.indent = o->indent;
       const std::string out = mdbls::apply_edits(
           text, mdbls::format_sql(text, index, 0, static_cast<uint32_t>(text.size()), cache, fo));
       // In the file's own character set.

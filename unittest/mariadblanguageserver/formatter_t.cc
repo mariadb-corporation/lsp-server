@@ -161,9 +161,18 @@ TEST(Formatter, comments_stay_before_the_token_after_them) {
             "    AND eeeeeeeeeeeee = fffffffffff\n    AND ggggggggggggg = hhhhh /* d */\n);");
   EXPECT_EQ(layout("SELECT * FROM t WHERE x IN (/* c */ SELECT 1 /* d */);"),
             "SELECT * FROM t WHERE x IN ( /* c */ SELECT 1 /* d */);");
-  // A comment ending the ON line: the condition stays at the ON's level.
+  // A comment ending a clause's keyword line: what follows goes one level
+  // deeper than the keyword, and a list stays aligned with its first item.
+  EXPECT_EQ(layout("SELECT -- c\na, b FROM t;"), "SELECT -- c\n  a, b\nFROM t;");
+  EXPECT_EQ(layout("SELECT -- c\nfilm_id, title, description, release_year, language_id, rental_duration, "
+                   "rental_rate, length FROM film;"),
+            "SELECT -- c\n  film_id, title, description, release_year, language_id, rental_duration,\n"
+            "  rental_rate, length\nFROM film;");
+  EXPECT_EQ(layout("SELECT a FROM t WHERE -- why\nx = 1;"), "SELECT a\nFROM t\nWHERE -- why\n  x = 1;");
+  EXPECT_EQ(layout("SELECT * FROM (SELECT -- inner\na FROM t) AS d;"),
+            "SELECT *\nFROM (\n  SELECT -- inner\n    a\n  FROM t\n) AS d;");
   EXPECT_EQ(layout("SELECT a FROM t JOIN u ON -- c\nt.a = u.a;"),
-            "SELECT a\nFROM t\n  JOIN u\n    ON -- c\n    t.a = u.a;");
+            "SELECT a\nFROM t\n  JOIN u\n    ON -- c\n      t.a = u.a;");
   // Any blank after "--" makes a comment, before the query too.
   EXPECT_EQ(layout("--\tlead\nselect a,b from t;"), "--\tlead\nSELECT a, b FROM t;");
 }
