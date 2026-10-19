@@ -207,7 +207,9 @@ LIMIT 20;
   join as a FROM clause's do.
 - **Tables:** `CREATE TABLE` puts each column, key and constraint on a line of its own
   one level deeper, whatever its length, and the closing parenthesis and the table
-  options on the next line (`) ENGINE=InnoDB`), the partitioning on a line after that.
+  options on the next line (`) ENGINE=InnoDB`), filling it up to the width and continuing
+  one level deeper; the partitioning on a line after that, its partitions (and their
+  subpartitions) one per line like the columns.
   `ALTER TABLE` with several changes puts each on a line one level deeper; a single
   change stays on the statement's line. Inside a column the words keep their spacing.
 - **Lists** of select items, GROUP BY and ORDER BY items, `SET` and `ON DUPLICATE KEY

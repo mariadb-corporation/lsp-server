@@ -287,6 +287,10 @@ struct Symbols {
   int opt_create_select = grammar::symbol("opt_create_select");
   int alter_commands = grammar::symbol("alter_commands");
   int alter_list = grammar::symbol("alter_list");
+  int part_defs = grammar::symbol("part_defs");
+  int opt_sub_partition = grammar::symbol("opt_sub_partition");
+  int create_table_options = grammar::symbol("create_table_options");
+  int opt_create_table_options = grammar::symbol("opt_create_table_options");
   int from = grammar::symbol("FROM");
   int using_ = grammar::symbol("USING");
   int opt_insert_update = grammar::symbol("opt_insert_update");
@@ -313,6 +317,7 @@ struct Symbols {
       query_specification_start, insert, replace, update, delete_, create, alter, insert_field_spec,
       single_multi, grammar::symbol("delete_part2"), grammar::symbol("delete_single_table"), opt_insert_update,
       opt_returning, delete_limit_clause, view_check_option, create_body, alter_commands,
+      grammar::symbol("partition"), grammar::symbol("part_definition"),
   };
   // Clauses of those statements, as {clause, the statement part it is a
   // clause of}: each starts a line of its own when the statement breaks.
@@ -613,7 +618,13 @@ class Builder {
       return list(n);
     }
     if (sym == s_.join_table) return joins(n);
-    if (sym == s_.create_field_list_parens) return table_elements(n);
+    if (sym == s_.create_field_list_parens || sym == s_.part_defs || sym == s_.opt_sub_partition) {
+      return rows_in_parentheses(n);
+    }
+    if (sym == s_.create_table_options && t_.node(n).parent != npos &&
+        symbol(t_.node(n).parent) == s_.opt_create_table_options) {
+      return table_options(n);
+    }
     if (sym == s_.alter) {
       if (const uint32_t changes = several_changes(n); changes != npos) return alter_table(n, changes);
     }
@@ -741,9 +752,10 @@ class Builder {
     return nest(o_.indent, concat(std::move(lines)));
   }
 
-  // The ( columns, keys, constraints ) of CREATE TABLE: one per line, the
-  // parenthesis closing on a line of its own.
-  Piece table_elements(uint32_t n) {
+  // The ( columns, keys, constraints ) of CREATE TABLE, its ( partitions )
+  // and their ( subpartitions ): one per line, the parenthesis closing on a
+  // line of its own.
+  Piece rows_in_parentheses(uint32_t n) {
     const auto kids = t_.children(n);
     if (kids.size() != 3) return children(n);
     Piece lp = build(kids[0]);
@@ -753,6 +765,25 @@ class Builder {
     out.first = lp.first;
     out.doc = concat({std::move(lp.doc), one_per_line(items(kids[1])), separator(rp.first, Sep::close),
                       std::move(rp.doc)});
+    return out;
+  }
+
+  // ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ...: the options fill the line,
+  // then continue one level deeper.  (The list is right-recursive: option
+  // [','] options.)
+  Piece table_options(uint32_t n) {
+    std::vector<Piece> options;
+    for (uint32_t at = n; at != npos;) {
+      const auto kids = t_.children(at);
+      if (kids.empty()) break;
+      const bool comma = kids.size() == 3;
+      std::vector<Piece> parts{build(kids[0])};
+      if (comma) parts.push_back(build(kids[1]));
+      options.push_back(join(std::move(parts), [](size_t) { return Sep::none; }));
+      at = kids.size() > 1 && symbol(kids.back()) == s_.create_table_options ? kids.back() : npos;
+    }
+    Piece out = join(std::move(options), [](size_t) { return Sep::line; });
+    out.doc = nest(o_.indent, fill(std::move(out.doc.parts)));
     return out;
   }
 
@@ -916,11 +947,12 @@ std::string without_blanks(std::string_view s) {
 
 // The first `max` words of a statement outside parentheses, lowercased, to
 // `f` until it returns true: a parenthesis as "(" and the first word inside
-// it ("(select"), quoted strings and names as "", other characters left
-// out.  It ends at a versioned comment, which keeps the statement as it is
+// it ("(select"), quoted strings and names as "", a qualified name as one
+// word ("db.value", "db."), other characters left out.  A backslash escapes
+// in strings unless `backslash_escapes` is false (NO_BACKSLASH_ESCAPES).  It ends at a versioned comment, which keeps the statement as it is
 // anyway.  Cheap, so the INSERT ... VALUES of a dump is never parsed.
 template <typename F>
-void leading_words(std::string_view s, size_t max, F f) {
+void leading_words(std::string_view s, size_t max, bool backslash_escapes, F f) {
   size_t count = 0;
   auto add = [&](std::string w) {
     ++count;
@@ -946,20 +978,33 @@ void leading_words(std::string_view s, size_t max, F f) {
     return true;
   };
   auto is_word = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '$'; };
+  auto is_quote = [](char c) { return c == '\'' || c == '"' || c == '`'; };
   auto word = [&] {
     const size_t b = i;
     while (i < s.size() && is_word(s[i])) ++i;
     return lower(s.substr(b, i - b));
   };
+  // A word, or a quoted string or name as "".
+  auto part = [&] {
+    if (!is_quote(s[i])) return word();
+    const char q = s[i];
+    // Doubled quotes need no care: they only end it later.
+    for (++i; i < s.size() && s[i] != q; ++i) {
+      if (s[i] == '\\' && q != '`' && backslash_escapes) ++i;
+    }
+    ++i;
+    return std::string();
+  };
   while (count < max && skip() && i < s.size()) {
     const char c = s[i];
-    if (c == '\'' || c == '"' || c == '`') {
-      // Doubled quotes and backslashes need no care: they only end it later.
-      for (++i; i < s.size() && s[i] != c; ++i) {
-        if (s[i] == '\\' && c != '`') ++i;
+    if (is_quote(c) || is_word(c)) {
+      std::string w = part();
+      while (i + 1 < s.size() && s[i] == '.' && (is_quote(s[i + 1]) || is_word(s[i + 1]))) {
+        ++i;
+        w += '.';
+        w += part();
       }
-      ++i;
-      if (depth == 0 && add({})) return;
+      if (depth == 0 && add(std::move(w))) return;
     } else if (c == '(') {
       ++i;
       if (depth++ == 0) {
@@ -972,9 +1017,6 @@ void leading_words(std::string_view s, size_t max, F f) {
     } else if (c == ')') {
       ++i;
       if (depth > 0) --depth;
-    } else if (is_word(c)) {
-      std::string w = word();
-      if (depth == 0 && add(std::move(w))) return;
     } else {
       ++i;
     }
@@ -986,19 +1028,24 @@ void leading_words(std::string_view s, size_t max, F f) {
 // UPDATE, DELETE, CREATE or ALTER VIEW or TABLE.  A cheap filter before
 // the parse; `statement_node` decides on the tree, so the two take the same
 // statements.
-bool may_format(std::string_view s) {
-  enum { start, insert, create, yes, no } state = start;
-  leading_words(s, 24, [&](std::string w) {
+bool may_format(std::string_view s, bool backslash_escapes) {
+  // insert_head: before the table's name, which may be `value`.
+  enum { start, insert_head, insert, create, yes, no } state = start;
+  leading_words(s, 24, backslash_escapes, [&](std::string w) {
     if (state == start) {
       const std::string_view first = std::string_view(w).substr(w.starts_with('(') ? 1 : 0);
       if (first == "select" || first == "with" || first == "update" || first == "delete") {
         state = yes;
       } else if (first == "insert" || first == "replace") {
-        state = insert;
+        state = insert_head;
       } else if (first == "create" || first == "alter") {
         state = create;
       } else {
         state = no;
+      }
+    } else if (state == insert_head) {
+      if (w != "low_priority" && w != "delayed" && w != "high_priority" && w != "ignore" && w != "into") {
+        state = insert;
       }
     } else if (state == insert) {
       if (w == "select" || w == "with" || w == "(select" || w == "(with") state = yes;
@@ -1055,10 +1102,10 @@ bool parses(mdbp_parser *parser, std::string_view sql) {
 // `statement_node` takes, does not parse whole, holds a versioned comment,
 // or the layout would not keep its tokens and comments.
 std::optional<Text_edit> format_statement(std::string_view text, uint32_t st_begin, uint32_t st_end,
-                                          mdbp_parser *parser, const Format_options &options,
-                                          std::string_view eol) {
+                                          mdbp_parser *parser, uint32_t mode_bits,
+                                          const Format_options &options, std::string_view eol) {
   const std::string_view sql = text.substr(st_begin, st_end - st_begin);
-  if (parser == nullptr || !may_format(sql)) return std::nullopt;
+  if (parser == nullptr || !may_format(sql, (mode_bits & k_no_backslash_escapes) == 0)) return std::nullopt;
   mdbp_result r;
   if (mdbp_parse_sql(parser, sql.data(), sql.size(), &r) != MDBP_OK || !r.accepted) return std::nullopt;
   const Syntax_tree tree = Syntax_tree::build(parser, r, st_begin);
@@ -1120,8 +1167,9 @@ std::vector<Text_edit> format_sql(std::string_view text, const Statement_index &
     const Statement &st = stmts[i];
     if (st.begin >= end && !(begin == end && st.begin == end)) break;
     if (st.body_end < begin || st.kind != Statement_kind::sql) continue;
-    mdbp_parser *parser = cache.get(index.modes()[st.mode].mode, options.version_id, true);
-    if (auto edit = format_statement(text, st.begin, st.body_end, parser, options, eol)) {
+    const Statement_mode &mode = index.modes()[st.mode];
+    mdbp_parser *parser = cache.get(mode.mode, options.version_id, true);
+    if (auto edit = format_statement(text, st.begin, st.body_end, parser, mode.bits, options, eol)) {
       edits.push_back(std::move(*edit));
     }
   }

@@ -56,8 +56,10 @@ struct Format_options {
 //    t (...) and CREATE VIEW v AS, SET, ON DUPLICATE KEY UPDATE, RETURNING,
 //    WITH CHECK OPTION, an UPDATE's or DELETE's WHERE, ORDER BY, LIMIT.
 //  - CREATE TABLE puts each column, key and constraint on a line of its
-//    own, one level deeper, and the closing parenthesis on the next; ALTER
-//    TABLE does the same with several changes.
+//    own, one level deeper, and the closing parenthesis on the next; its
+//    partitions and subpartitions likewise; its options fill the line, then
+//    continue one level deeper.  ALTER TABLE puts several changes one per
+//    line.
 //  - Select, GROUP BY and ORDER BY lists continue after the comma on the
 //    same line up to the width, then on the next, aligned with the first
 //    item.

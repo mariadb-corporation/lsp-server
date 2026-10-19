@@ -1078,7 +1078,8 @@ are left alone. Each layout is checked: the same tokens and comments, and it par
 REPLACE ... SELECT, UPDATE, DELETE (single and multi-table), CREATE and ALTER VIEW, with
 the query rules for their clauses (the query on a line of its own under the header;
 `DELETE FROM t` keeps FROM on its line); CREATE TABLE and ALTER TABLE with several
-changes one item per line, one level deeper, whatever their length (the user's choice,
+changes one item per line, one level deeper, whatever their length, partitions and
+subpartitions too, table options filling the line (the user's choice,
 2026-10-19; not aligned in columns, short tables too). Open: other DDL, routine bodies,
 the original relative indentation of line breaks inside other constructs (they all
 continue one level deeper), `onTypeFormatting`.

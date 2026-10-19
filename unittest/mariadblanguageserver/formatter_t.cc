@@ -280,6 +280,19 @@ TEST(Formatter, delete_keeps_from_on_its_line_unless_tables_come_first) {
             "DELETE FROM t\nWHERE GROUP_CONCAT(a ORDER BY b) = 'x';");
 }
 
+TEST(Formatter, the_first_words_are_read_as_the_parser_reads_them) {
+  // A qualified table name is no VALUES, a quoted one no SET.
+  EXPECT_EQ(layout("INSERT INTO db.values (a) SELECT 1 FROM u\nWHERE x = 1;"),
+            "INSERT INTO db.values (a)\nSELECT 1\nFROM u\nWHERE x = 1;");
+  EXPECT_EQ(layout("INSERT LOW_PRIORITY INTO `set` SELECT 1 FROM u\nWHERE x = 1;"),
+            "INSERT LOW_PRIORITY INTO `set`\nSELECT 1\nFROM u\nWHERE x = 1;");
+  // Under NO_BACKSLASH_ESCAPES a backslash ends no string early or late.
+  EXPECT_EQ(layout("SET sql_mode = 'NO_BACKSLASH_ESCAPES';\nCREATE DEFINER='a\\'@'%' VIEW v AS SELECT a FROM t\n"
+                   "WHERE b = 1;"),
+            "SET sql_mode = 'NO_BACKSLASH_ESCAPES';\nCREATE DEFINER='a\\'@'%' VIEW v AS\nSELECT a\nFROM t\n"
+            "WHERE b = 1;");
+}
+
 TEST(Formatter, a_view_puts_its_query_under_the_header) {
   EXPECT_EQ(layout("create view v as select a from t;"), "CREATE VIEW v AS SELECT a FROM t;");
   EXPECT_EQ(layout("CREATE OR REPLACE DEFINER=`root`@`%` SQL SECURITY INVOKER VIEW v (x) AS SELECT a FROM t\n"
@@ -313,6 +326,36 @@ TEST(Formatter, create_table_puts_each_column_and_key_on_a_line) {
   for (const std::string sql : {"CREATE TABLE l LIKE t;", "CREATE TABLE s (a INT) SELECT 1 AS a;"}) {
     EXPECT_EQ(layout(sql), sql);
   }
+}
+
+TEST(Formatter, partitions_go_one_per_line_like_columns) {
+  EXPECT_EQ(layout("CREATE TABLE t (a INT, d DATE)\nPARTITION BY RANGE (YEAR(d)) SUBPARTITION BY HASH (a)\n"
+                   "(PARTITION p0 VALUES LESS THAN (2000) (SUBPARTITION s0, SUBPARTITION s1),\n"
+                   " PARTITION p1 VALUES LESS THAN MAXVALUE ENGINE = InnoDB);"),
+            "CREATE TABLE t (\n"
+            "  a INT,\n"
+            "  d DATE\n"
+            ")\n"
+            "PARTITION BY RANGE (YEAR(d)) SUBPARTITION BY HASH (a) (\n"
+            "  PARTITION p0 VALUES LESS THAN (2000) (\n"
+            "    SUBPARTITION s0,\n"
+            "    SUBPARTITION s1\n"
+            "  ),\n"
+            "  PARTITION p1 VALUES LESS THAN MAXVALUE ENGINE = InnoDB\n"
+            ");");
+  // Without definitions it stays one line.
+  EXPECT_EQ(layout("CREATE TABLE t (a INT) PARTITION BY HASH (a) PARTITIONS 4;"),
+            "CREATE TABLE t (\n  a INT\n)\nPARTITION BY HASH (a) PARTITIONS 4;");
+}
+
+TEST(Formatter, table_options_fill_the_line_then_go_one_level_deeper) {
+  EXPECT_EQ(layout("CREATE TABLE t (a INT) ENGINE=InnoDB AUTO_INCREMENT=1000 DEFAULT CHARSET=utf8mb4 "
+                   "COLLATE=utf8mb4_unicode_ci ROW_FORMAT=DYNAMIC, COMMENT='a table with a long comment';"),
+            "CREATE TABLE t (\n"
+            "  a INT\n"
+            ") ENGINE=InnoDB AUTO_INCREMENT=1000 DEFAULT CHARSET=utf8mb4\n"
+            "  COLLATE=utf8mb4_unicode_ci ROW_FORMAT=DYNAMIC,\n"
+            "  COMMENT='a table with a long comment';");
 }
 
 TEST(Formatter, alter_table_puts_several_changes_on_lines) {
@@ -363,6 +406,9 @@ TEST(Formatter, every_layout_is_its_own_layout) {
       "CREATE TABLE t (id INT NOT NULL, name VARCHAR(20) DEFAULT 'x' COMMENT 'the name', KEY k (name), CHECK (id > 0 "
       "AND id < 100)) ENGINE=InnoDB",
       "ALTER TABLE t ADD COLUMN x INT AFTER y, DROP INDEX i, ADD CONSTRAINT c CHECK (x > 0)",
+      "CREATE TABLE t (a INT, d DATE) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci "
+      "PARTITION BY RANGE (YEAR(d)) SUBPARTITION BY HASH (a) (PARTITION p0 VALUES LESS THAN (2000) "
+      "(SUBPARTITION s0, SUBPARTITION s1), PARTITION p1 VALUES LESS THAN MAXVALUE)",
   };
   for (const auto &q : queries) {
     for (const size_t width : {0, 20, 40, 80, 120}) {
