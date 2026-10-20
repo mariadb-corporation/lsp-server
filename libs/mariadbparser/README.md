@@ -43,10 +43,10 @@ the exact ownership of every pointer in a result.
 Built by the top-level CMake of this repository. Needs bison 3.7.4 or newer and a C11 and
 C++17 compiler; no Python and no server source tree. Targets: `mariadbparser` (static),
 `mariadbparser_shared` (`libmariadbparser.so.2` / `.2.dylib`), and the `mdbparse` CLI.
-Built and tested on macOS (Apple Clang); the original project built it on Linux with
-GCC. The Windows port (`src/mdbp_once.h`: `InitOnceExecuteOnce` in place of
-`pthread_once`, `win_bison`) and the Linux and Windows CI jobs in
-`.github/workflows/ci.yml` have not been run yet.
+Built and tested on macOS (Apple Clang), Linux (GCC 14, also Rocky Linux 9 with its
+bison 3.7.4) and Windows 11 ARM64 (MSVC; `src/mdbp_once.h` uses `InitOnceExecuteOnce` in
+place of `pthread_once`, and `win_bison`). CI tests it on Linux
+(`.github/workflows/ci.yml`).
 
 Tests live in `unittest/mariadbparser/` at the top level: API tests, a multi-threaded
 consistency test, and the lexer fixtures in `tests/lex-fixtures/` replayed through

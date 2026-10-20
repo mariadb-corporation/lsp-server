@@ -700,8 +700,8 @@ tests/fixtures/                sql/ (sakila schema, world, a mysqldump file, the
                                large dumps are generated, not committed
 scripts/                       gen_fixture_dump.py
 docs/                          language-server.md, outline-format.md, plans/
-.github/workflows/             ci.yml (Linux self-hosted, macOS, Windows), devtools-ci-start.yml
-.github/vcpkg-triplets/        x64-windows.cmake, the overlay triplet of the Windows job
+.github/workflows/             ci.yml (Linux, tests), devtools-ci-start.yml (unused)
+.github/vcpkg-triplets/        x64-windows.cmake, an overlay triplet for Windows builds
 ```
 
 Build conventions, copied from the shell where the shell has them:
@@ -769,13 +769,13 @@ Build conventions, copied from the shell where the shell has them:
   (`mariadb-lsp.split`, `.check-*`, `.outline`, `.tree`, ...); `tests/e2e` runs as
   `mariadb-lsp.e2e` on a generated 16 MB dump (Python 3, standard library only), and
   `-DMDBLS_LARGE_TESTS=ON` adds `mariadb-lsp.e2e-large` at 256 MB.
-- CI (`.github/workflows/ci.yml`, on pull requests and by hand): the Linux job runs on the
-  self-hosted devtools runner started by `devtools-ci-start.yml`, with ccache and the
-  server bootstrap cached, `x64-linux-dynamic`; a PR titled `[bypass-ci]` skips it and a
-  fork PR falls back to a GitHub-hosted runner. The macOS job (`arm64-osx`, Homebrew
-  bison) and the Windows job (VS 2022 toolset 14.44, winflexbison3, the overlay triplet
-  in `.github/vcpkg-triplets/`) run on GitHub-hosted runners. The workflow has not run yet
-  (§4).
+- CI (`.github/workflows/ci.yml`, on pull requests and by hand), modelled on MariaDB
+  Shell's `shell-ci.yml`: one Linux job on a GitHub-hosted runner (this repository has no
+  access to the shell's self-hosted devtools runner; `devtools-ci-start.yml`, which starts
+  it, is kept for when it does), `x64-linux-dynamic`, RelWithDebInfo, ccache, then every
+  ctest test; a failing test, or none registered, fails the job. ccache, vcpkg's binary
+  cache and the server bootstrap are kept with `actions/cache`. A PR titled `[bypass-ci]`
+  builds nothing.
 
 ---
 
