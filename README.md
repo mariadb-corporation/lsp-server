@@ -23,9 +23,12 @@ ctest --test-dir bld
 `bin/mariadb-lsp`, `LICENSE`, `README.md` and `docs/`, named as MariaDB Shell's packages are:
 `mariadb-lsp-<version>-<platform>.zip`. The platform is, for example, `macos26-arm-64bit`,
 `linux-glibc2.41-arm-64bit` or `windows-x86-64bit`, and `-DMDBLS_PLATFORM=` overrides it.
-A Debug build's zip ends in `-debug`. The binary links only system libraries, so it runs
-wherever it is copied, for example to `~/.local/bin`, where the VS Code extension looks.
-`cmake --install bld --prefix <dir>` installs the same files.
+A Debug build's zip ends in `-debug`. With a static vcpkg triplet (`arm64-osx`,
+`x64-linux`) the binary links only system libraries, so it runs wherever it is copied, for
+example to `~/.local/bin`, where the VS Code extension looks. With a `-dynamic` triplet, and
+the Windows ones, OpenSSL and zlib are shared libraries: the package holds them in `lib/`
+(on Windows beside the binary in `bin/`), where the installed binary finds them, so it runs
+from the unpacked package. `cmake --install bld --prefix <dir>` installs the same files.
 
 ## Command line
 

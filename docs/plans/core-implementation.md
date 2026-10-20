@@ -1059,8 +1059,11 @@ gutter's statements from the server.
 Status (2026-10-19): `cmake/packaging.cmake` adds install rules and a CPack ZIP package
 (`cmake --build <dir> --target package`): `bin/mariadb-lsp`, `LICENSE`, `README.md`,
 `docs/language-server.md`, `docs/outline-format.md`, named
-`mariadb-lsp-<version>-<platform>.zip` as MariaDB Shell names its packages. Built on macOS 26
-(arm64; the binary links only system libraries); Linux and Windows not tried yet, and the
+`mariadb-lsp-<version>-<platform>.zip` as MariaDB Shell names its packages; with a
+`-dynamic` vcpkg triplet it also holds, in `lib/`, the shared libraries the binary loads
+(OpenSSL, zlib; found with a `RUNTIME_DEPENDENCY_SET`), and the installed binary's RPATH
+points there (`@loader_path/../lib`, `$ORIGIN/../lib`). Built on macOS 26 (arm64, static
+and `-dynamic` triplets); Linux and Windows not tried yet, and the
 macOS binary is neither signed nor notarized. Open: installing into the shell's `bin/`, a
 release workflow, signing.
 

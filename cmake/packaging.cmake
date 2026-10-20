@@ -17,17 +17,45 @@
 #
 #   mariadb-lsp-<version>-<platform>/
 #     bin/mariadb-lsp            the CLI and language server (stripped)
+#     lib/                       the shared libraries it loads, with a
+#                                -dynamic vcpkg triplet (Windows: in bin/)
 #     LICENSE, README.md
 #     docs/language-server.md, docs/outline-format.md
 #
-# The binary links only system libraries (the client library, the parser and
-# the vcpkg dependencies are static), so it runs from wherever it is copied.
+# The client library and the parser are always static. With a static vcpkg
+# triplet (arm64-osx, x64-linux) so are OpenSSL and zlib, and the binary
+# links only system libraries; with a -dynamic one (and the Windows triplets)
+# they are shared libraries, installed beside it and found through its RPATH.
+# Either way the package runs from wherever it is unpacked.
 # The name follows MariaDB Shell's packages (its cmake/packaging.cmake):
 # <platform> is macos<major>-<arch>, windows-<arch> or
 # linux-glibc<version>-<arch>, <arch> arm-64bit or x86-64bit; pass
 # -DMDBLS_PLATFORM=... to name it otherwise.
 
-install(TARGETS mariadb-lsp RUNTIME DESTINATION bin)
+install(TARGETS mariadb-lsp RUNTIME_DEPENDENCY_SET mdbls_runtime_libraries
+        RUNTIME DESTINATION bin)
+
+# The shared libraries mariadb-lsp loads that are not the system's: vcpkg's,
+# empty with a static triplet. The build tree's RPATH points at vcpkg's lib
+# directory; the installed binary's points at the package's lib/.
+set(_mdbls_vcpkg_prefix "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}")
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  string(APPEND _mdbls_vcpkg_prefix "/debug")
+endif()
+install(RUNTIME_DEPENDENCY_SET mdbls_runtime_libraries
+        DIRECTORIES "${_mdbls_vcpkg_prefix}/lib" "${_mdbls_vcpkg_prefix}/bin"
+        PRE_EXCLUDE_REGEXES "^api-ms-" "^ext-ms-"
+        POST_EXCLUDE_REGEXES "^/usr/lib" "^/System/" "^/lib" "^/usr/local/lib"
+                             "[Ss]ystem32" "[Ww]indows"
+        RUNTIME DESTINATION bin
+        LIBRARY DESTINATION lib
+        FRAMEWORK DESTINATION lib)
+if(APPLE)
+  set_target_properties(mariadb-lsp PROPERTIES INSTALL_RPATH "@loader_path/../lib")
+elseif(UNIX)
+  set_target_properties(mariadb-lsp PROPERTIES INSTALL_RPATH "$ORIGIN/../lib")
+endif()
+
 install(FILES "${PROJECT_SOURCE_DIR}/LICENSE" "${PROJECT_SOURCE_DIR}/README.md" DESTINATION .)
 install(FILES "${PROJECT_SOURCE_DIR}/docs/language-server.md"
               "${PROJECT_SOURCE_DIR}/docs/outline-format.md"
