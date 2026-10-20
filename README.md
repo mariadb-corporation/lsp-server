@@ -15,7 +15,7 @@ ctest --test-dir bld
 ```
 
 - `-DWITH_VCPKG_TRIPLET=<triplet>` (for example `arm64-osx`, `x64-linux-dynamic`) fetches vcpkg into `../vcpkg`, or uses `VCPKG_ROOT`, and installs the dependencies in `vcpkg.json`. `-DWITH_TESTS=0` leaves GoogleTest out.
-- The MariaDB client library is built from a MariaDB server tree, as in MariaDB Shell. Without options the configure step fetches the server at the commit `libs/mariadbparser` is pinned to into `../mariadb-server-lsp` and builds only the client targets there. To use an existing server build instead, pass `-DMARIADB_SOURCE_DIR=<src> -DMARIADB_BUILD_DIR=<bld>`, with `mariadbclient mysys mysys_ssl caching_sha2_password GenError` built in it. `-DWITH_MARIADB_CLIENT=OFF` builds without the client library.
+- The MariaDB client library is built from a MariaDB server tree, as in MariaDB Shell. Without options the configure step fetches the server at the commit `libs/mariadbparser` is pinned to into `../mariadb-server-lsp` and builds only the client targets there. To use an existing server build instead, pass `-DMARIADB_SOURCE_DIR=<src> -DMARIADB_BUILD_DIR=<bld>`, with `mariadbclient mysys mysys_ssl caching_sha2_password GenError` built in it; a tree that is not at the pin gets a warning, which `-DMDBLS_CHECK_SERVER_PIN=OFF` turns off. `-DWITH_MARIADB_CLIENT=OFF` builds without the client library.
 
 ## Packaging
 
@@ -29,6 +29,17 @@ example to `~/.local/bin`, where the VS Code extension looks. With a `-dynamic` 
 the Windows ones, OpenSSL and zlib are shared libraries: the package holds them in `lib/`
 (on Windows beside the binary in `bin/`), where the installed binary finds them, so it runs
 from the unpacked package. `cmake --install bld --prefix <dir>` installs the same files.
+
+## In MariaDB Shell
+
+This repository makes no releases of its own: MariaDB Shell builds it as its
+`src/lsp-server` submodule and installs `mariadb-lsp` next to `mariadb-shell` in its
+packages, where mariadb-shell-plugins' MCP server finds it for its `sql` tools. The shell
+passes its vcpkg toolchain and triplet, its MariaDB server tree
+(`-DMDBLS_CHECK_SERVER_PIN=OFF`) and `-DWITH_TESTS=0`, and the binary uses the OpenSSL and
+zlib the shell ships. So `vcpkg.json` keeps the shell's `builtin-baseline` and its
+`openssl` and `zlib` versions, which the shell's configure step checks. The tests run here,
+in this repository's CI.
 
 ## Command line
 

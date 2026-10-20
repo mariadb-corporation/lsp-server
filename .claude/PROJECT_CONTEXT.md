@@ -39,6 +39,14 @@ MariaDB LSP Server (`lsp-server`): a C++ language server for MariaDB SQL, plus a
 - **Where the extension finds the binary:** `mariadb.lsp.path`, else the PATH, else `~/.local/bin`; a download like the shell's comes later. This replaces the plan's "next to `mariadb-shell`" (plan §5 item 4).
 - **CLI:** `mariadb-lsp check FILE` (errors or success, exit 1 if any) and `mariadb-lsp outline FILE` (schema JSON); `split`, `tokens`, `tree` for inspection.
 
+## Decisions on shipping (the user, 2026-10-19)
+
+- **No releases of its own: built and packaged inside MariaDB Shell.** The shell has this repository as its `src/lsp-server` submodule (the pin is the shell's gitlink) and builds it with `cmake/lsp_server.cmake` as a separate CMake build (`ExternalProject`; `add_subdirectory` cannot work: two vcpkg bootstraps before `project()`, the shell's global `-Werror` would reach the extracted lexer, same-named cmake modules). It passes its compiler, vcpkg toolchain and triplet, its MariaDB server tree (`-DMDBLS_CHECK_SERVER_PIN=OFF`) and `-DWITH_TESTS=0`, and bundles `bin/mariadb-lsp` next to `mariadb-shell` with `install_bundled_binaries` (RPATH to `lib/mariadb-shell`, whose OpenSSL and zlib it links). `WITH_LSP=AUTO|ON|OFF` there; releases use `ON`. Code and tests are maintained here: CI (`ci.yml`) builds and tests on Linux, and `build-release.yml` (on `release/candidate`) builds the shell's release platforms.
+- **Every change here is checked for its effect on MariaDB Shell and mariadb-shell-plugins, and changes spanning the repos land together** (a branch per repo, PRs cross-linked, merge order stated). What to check:
+  - the shell: the options it passes and their meaning, `vcpkg.json` (its `builtin-baseline` and the `openssl`/`zlib` overrides must equal the shell's; its configure step fails otherwise), what the `mariadb-lsp` target links (only libraries the shell bundles), the bison and compiler minimums (Rocky 9: bison 3.7.4, GCC 14 gcc-toolset), `VERSION`;
+  - mariadb-shell-plugins' `mcp_plugin`: the CLI contract its `sql` tools use (`--version` printing `mariadb-lsp <version>`, `check --format json` output, the outline JSON format, exit codes 0/1/2, stdin `-`, `--no-source`), the `db.*` calls and SQL of MCP mode, and its binary lookup (`lspPath` setting, next to `mariadb-shell`, PATH, `~/.local/bin`).
+- **bison 3.7.4 or newer** (Rocky 9's, winflexbison3's): its tables equal 3.8.2's but for the unused `yydefgoto[0]`, and every test passes with it.
+
 ## Decisions on SOURCE includes (the user, 2026-10-19)
 
 - **MSM `SOURCE '<path>'[<start>:<end>];` is read as msm_plugin's `prepare_release` expands it**, a text preprocessor, one level deep. The outline of a script holds the included files' objects, folded in its context.
