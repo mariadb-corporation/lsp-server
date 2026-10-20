@@ -1,0 +1,194 @@
+name: MariaDB-LSP-Server-Build-Release
+
+# Release builds of mariadb-lsp on every platform MariaDB Shell's release
+# packages cover, configured as shell-release.yml (macOS, Windows) and
+# rocky-linux.yml (Linux) configure the shell there: the same runners and
+# vcpkg triplets, a Release build without tests, the MSVC 14.44 toolset on
+# Windows, and for Linux Rocky Linux 9 with gcc-toolset-14 and the distro's
+# bison, the shell's oldest supported glibc. Each leg checks that the binary
+# starts and parses a file, and uploads it.
+#
+# Like shell-release.yml, it runs on a push to release/candidate; also by hand.
+#
+# The Linux legs run in a rockylinux:9 container on GitHub-hosted runners,
+# with the packages of the shell's docker/linux-rocky9.Dockerfile.
+
+on:
+  push:
+    branches: [ "release/candidate" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.os }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.os-runner }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # --- MACOS ---
+          - os: macos
+            arch: x64
+            os-runner: macos-15-intel
+            vcpkg-triplet: x64-osx-dynamic
+          - os: macos
+            arch: arm64
+            os-runner: macos-latest
+            vcpkg-triplet: arm64-osx-dynamic
+
+          # --- WINDOWS ---
+          - os: windows
+            arch: x64
+            os-runner: windows-2022
+            vcpkg-triplet: x64-windows
+          - os: windows
+            arch: arm64
+            os-runner: windows-11-arm
+            vcpkg-triplet: arm64-windows
+
+    env:
+      BUILD_DIR: bld
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The VS 2022 toolset (MSVC 14.44). The windows-11-arm image is VS 2026
+      # with the 14.44 ARM64 toolset beside it; unpinned, the arm64 leg would
+      # take MSVC 14.51.
+      - name: Setup Visual Studio 2022 Environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
+          toolset: '14.44'
+
+      # vcpkg runs vcvarsall itself with the newest toolset it finds; the
+      # overlay triplets pin its ports to the same 14.44 toolset.
+      - name: Pin vcpkg to the VS 2022 toolset
+        if: runner.os == 'Windows'
+        run: echo "VCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}/.github/vcpkg-triplets" >> "$GITHUB_ENV"
+        shell: bash
+
+      # Git Bash's coreutils link.exe shadows the MSVC linker.
+      - name: Remove conflicting Git link.exe
+        if: runner.os == 'Windows'
+        run: rm -f "C:/Program Files/Git/usr/bin/link.exe"
+        shell: bash
+
+      - name: Install macOS Build Dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install cmake ninja pkg-config bison
+
+      # cmake/bison.cmake looks for win_bison in c:\ProgramData\chocolatey\bin.
+      # winflexbison3's bison is 3.7.4; on arm64 its x64 binary runs emulated.
+      - name: Install Bison (Windows)
+        if: runner.os == 'Windows'
+        run: choco install winflexbison3 -y
+
+      - name: Configure
+        run: |
+          args=(-DCMAKE_BUILD_TYPE=Release -DWITH_TESTS=0
+                -DWITH_VCPKG_TRIPLET=${{ matrix.vcpkg-triplet }})
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            args+=("-DBISON_EXECUTABLE=$(brew --prefix bison)/bin/bison")
+          fi
+          cmake -S . -B "$BUILD_DIR" -G Ninja "${args[@]}"
+        shell: bash
+
+      # bash, as Configure: Windows' default shell, PowerShell, reads
+      # "$BUILD_DIR" as a PowerShell variable, which is empty.
+      - name: Build
+        run: cmake --build "$BUILD_DIR" --config Release --parallel
+        shell: bash
+
+      - name: Check the binary
+        run: |
+          set -euo pipefail
+          LSP="$BUILD_DIR/bin/mariadb-lsp"
+          "$LSP" --version
+          "$LSP" check tests/fixtures/sql/sakila-schema.sql
+          "$LSP" outline tests/fixtures/sql/sakila-schema.sql > /dev/null
+        shell: bash
+
+      - name: Upload the binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: mariadb-lsp-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            ${{ env.BUILD_DIR }}/bin/mariadb-lsp
+            ${{ env.BUILD_DIR }}/bin/mariadb-lsp.exe
+            ${{ env.BUILD_DIR }}/bin/*.dll
+          if-no-files-found: error
+
+  rocky9:
+    name: rocky9 ${{ matrix.arch }}
+    runs-on: ${{ matrix.os-runner }}
+    container: rockylinux:9
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            os-runner: ubuntu-latest
+            vcpkg-triplet: x64-linux-dynamic
+          - arch: arm64
+            os-runner: ubuntu-24.04-arm
+            vcpkg-triplet: arm64-linux-dynamic
+
+    env:
+      BUILD_DIR: bld
+
+    steps:
+      # The packages of the shell's docker/linux-rocky9.Dockerfile. Before the
+      # checkout, so that it is a git clone: the configure step fetches the
+      # MariaDB server tree for the client library with git.
+      - name: Install Build Dependencies
+        run: |
+          set -euo pipefail
+          dnf install -y epel-release dnf-plugins-core
+          crb enable
+          dnf install -y \
+            gcc-c++ git cmake ninja-build perl-core bison zip unzip tar pkgconfig \
+            ncurses-devel krb5-devel patchelf gcc-toolset-14-gcc gcc-toolset-14-gcc-c++ \
+            gcc-toolset-14-binutils diffutils
+          command -v ninja || ln -s /usr/bin/ninja-build /usr/bin/ninja
+          echo "/opt/rh/gcc-toolset-14/root/usr/bin" >> "$GITHUB_PATH"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory '*'
+          if [ "${{ matrix.arch }}" = arm64 ]; then export VCPKG_FORCE_SYSTEM_BINARIES=1; fi
+          gcc --version | head -1
+          bison --version | head -1
+          cmake -S . -B "$BUILD_DIR" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DWITH_TESTS=0 \
+            -DWITH_VCPKG_TRIPLET=${{ matrix.vcpkg-triplet }}
+
+      - name: Build
+        run: cmake --build "$BUILD_DIR" --parallel "$(nproc)"
+
+      - name: Check the binary
+        run: |
+          set -euo pipefail
+          LSP="$BUILD_DIR/bin/mariadb-lsp"
+          "$LSP" --version
+          "$LSP" check tests/fixtures/sql/sakila-schema.sql
+          "$LSP" outline tests/fixtures/sql/sakila-schema.sql > /dev/null
+          ldd "$LSP"
+
+      - name: Upload the binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: mariadb-lsp-rocky9-${{ matrix.arch }}
+          path: ${{ env.BUILD_DIR }}/bin/mariadb-lsp
+          if-no-files-found: error

@@ -24,7 +24,8 @@ MariaDB LSP Server (`lsp-server`): a C++ language server for MariaDB SQL, plus a
 | `scripts/gen_fixture_dump.py`, `scripts/gen_builtin_functions.py` | Benchmark dump generator; one-shot built-in function table generator |
 | `cmake/` | Build modules, mostly copied from mariadb-shell (`bootstrap_vcpkg`, `bison`, `bootstrap_mariadb`); own: `compiler`, `mariadb_client`, `mariadb_pin` |
 | `unittest/` | GoogleTest, one `run_unit_tests` binary (`mariadbparser/`, `sqlsplitter/`, `mariadblanguageserver/`, `client/`); `mariadblanguageserver/test_util.h` reads fixtures |
-| `.github/workflows/` | `ci.yml` (after shell-ci.yml: one Linux build and every ctest test on a GitHub-hosted runner, a failing test fails it; ccache, vcpkg binaries and the server tree in `actions/cache`), `devtools-ci-start.yml` (copied; unused until this repository may use the shell's self-hosted runner) |
+| `.github/workflows/` | `ci.yml` (after shell-ci.yml: one Linux build and every ctest test on a GitHub-hosted runner, a failing test fails it; ccache, vcpkg binaries and the server tree in `actions/cache`), `build-release.yml` (Release builds on the platforms and triplets of the shell's `shell-release.yml` and `rocky-linux.yml`: macOS x64/arm64, Windows x64/arm64, Rocky 9 x64/arm64 in a `rockylinux:9` container; each checks the binary runs and uploads it; on a push to `release/candidate`, as the shell's, or by hand), `devtools-ci-start.yml` (copied; unused until this repository may use the shell's self-hosted runner) |
+| `.github/vcpkg-triplets/` | Windows x64 and arm64 overlay triplets pinning vcpkg's ports to the MSVC 14.44 toolset |
 | `.claude/commands/` | `checkpoint`, `read-checkpoint` |
 
 ## Decisions (from the user, 2026-10-15)
