@@ -41,10 +41,18 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     add_link_options(-fprofile-arcs -ftest-coverage)
   endif()
 elseif(MSVC)
-  if(MSVC_VERSION LESS 1925)
-    message(FATAL_ERROR "Need at least Visual Studio 2019 Version 16.5")
-  endif()
   message(STATUS "Using Visual Studio version: ${MSVC_VERSION} (${MSVC_TOOLSET_VERSION})")
+  # C++23 is /std:c++23preview.  CMake's own flag for CXX_STANDARD 23 is
+  # /std:c++latest, which also enables the C++26 features MSVC has
+  # implemented, so code using them would build without being C++23.
+  include(CheckCXXCompilerFlag)
+  check_cxx_compiler_flag(/std:c++23preview MDBLS_HAVE_STD_CXX23PREVIEW)
+  if(NOT MDBLS_HAVE_STD_CXX23PREVIEW)
+    message(FATAL_ERROR "Compiler ${CMAKE_CXX_COMPILER} does not accept "
+      "/std:c++23preview (Visual Studio 2022 17.13 or newer)")
+  endif()
+  set(CMAKE_CXX23_STANDARD_COMPILE_OPTION /std:c++23preview)
+  set(CMAKE_CXX23_EXTENSION_COMPILE_OPTION /std:c++23preview)
   set(MDBLS_WARNING_FLAGS /W4 /WX)
   # getenv, strerror, sscanf and the like are standard C; their _s
   # replacements are not portable (the MariaDB server's build does the same).

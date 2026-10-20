@@ -735,7 +735,8 @@ Build conventions, copied from the shell where the shell has them:
   Python, no server tree, no provenance gate at build time. The library is built static
   and shared (`libmariadbparser.so.2`, version script on Linux, version read from
   `mdbparse.h`), plus the `mdbparse` CLI when RapidJSON is found.
-- `cmake/compiler.cmake`: C++23 and the shell's warning set (`-Werror -Wall -Wextra
+- `cmake/compiler.cmake`: C++23 (`-std=c++23`; `/std:c++23preview` on MSVC in place of
+  CMake's `/std:c++latest`) and the shell's warning set (`-Werror -Wall -Wextra
   -Wpedantic -Wshadow ...`, `/W4 /WX` on MSVC), applied per target through
   `mdbls_target_warnings()` rather than globally, because the extracted lexer in
   `libs/mariadbparser` is compiled as written; the library's own C files are held to

@@ -6,7 +6,7 @@ The implementation plan is in [docs/plans/core-implementation.md](docs/plans/cor
 
 ## Building
 
-The build follows MariaDB Shell's. It needs CMake 3.22 or newer, Ninja, bison 3.7.4 or newer (Homebrew bison on macOS), git, and a C++23 compiler.
+The build follows MariaDB Shell's. It needs CMake 3.22 or newer, Ninja, bison 3.7.4 or newer (Homebrew bison on macOS), git, and a C++23 compiler (on Windows, Visual Studio 2022 17.13 or newer: the build uses `/std:c++23preview`).
 
 ```bash
 cmake -S . -B bld -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DWITH_VCPKG_TRIPLET=<triplet>
