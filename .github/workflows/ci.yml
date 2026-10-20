@@ -26,9 +26,6 @@ jobs:
 
     env:
       BUILD_DIR: bld
-      CCACHE_DIR: ${{ github.workspace }}/../.cache/ccache
-      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/../.cache/vcpkg-archives
-      MARIADB_BOOTSTRAP_DIR: ${{ github.workspace }}/../.cache/mariadb-server-lsp
       # [bypass-ci] is the only thing that calls the build off.
       RUN_BUILD: ${{ !contains(github.event.pull_request.title, '[bypass-ci]') }}
       # A pull_request run has no inputs: it always tests. A manual run goes
@@ -51,12 +48,21 @@ jobs:
       # ========================================
       # 1. TOOLS
       # ========================================
+      # The cached directories, for the later steps (also the cache steps'
+      # `path:`). Absolute and without '..': actions/cache refuses a path
+      # with '.' or '..' in it, and then saves nothing.
       - name: Install Build Dependencies
         if: env.RUN_BUILD == 'true'
         run: |
+          CACHE_ROOT="$HOME/.cache/lsp-server-ci"
+          {
+            echo "CCACHE_DIR=$CACHE_ROOT/ccache"
+            echo "VCPKG_DEFAULT_BINARY_CACHE=$CACHE_ROOT/vcpkg-archives"
+            echo "MARIADB_BOOTSTRAP_DIR=$CACHE_ROOT/mariadb-server-lsp"
+          } >> "$GITHUB_ENV"
+          mkdir -p "$CACHE_ROOT/ccache" "$CACHE_ROOT/vcpkg-archives"
           sudo apt-get update
           sudo apt-get install -y ninja-build bison ccache
-          mkdir -p "$CCACHE_DIR" "$VCPKG_DEFAULT_BINARY_CACHE"
           cmake --version | head -1
           bison --version | head -1
 
