@@ -424,4 +424,6 @@ The live-connection tests start a throwaway server with the `mariadbd` on `PATH`
 `MDBLS_TEST_MARIADBD`), as MariaDB Shell's sandboxes do, and keep a private secret store
 through MariaDB Shell's `mariadb-secret-store-plaintext` helper, found in
 `MDBLS_SHELL_BIN_DIR` (a CMake cache variable, default `../mariadb-shell/build/bin`).
-Without either, they are skipped; so are the unit tests of the secret store.
+Without either, they are skipped; so are the unit tests of the secret store. CI runs them
+on its self-hosted runner, with the server and shell that runner keeps in `~/.cache/ci`;
+on a GitHub-hosted runner they skip.

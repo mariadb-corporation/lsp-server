@@ -3,9 +3,10 @@ name: MariaDB-LSP-Server-CI
 # Builds the language server and runs its tests, as MariaDB Shell's
 # shell-ci.yml does for the shell: one Linux build (RelWithDebInfo,
 # x64-linux-dynamic, ccache), then the tests; a failing test fails the job.
-# It runs on a GitHub-hosted runner, so what the shell's self-hosted runner
-# keeps between runs is kept with actions/cache here: ccache, vcpkg's binary
-# cache, and the MariaDB server tree the client library is built from.
+# It runs on the shell's self-hosted runner (the devtools-ci GCP VM, started
+# by devtools-ci-start.yml), or on ubuntu-latest where that VM is not used.
+# ccache, vcpkg's binary cache and the MariaDB server tree the client library
+# is built from are kept with actions/cache, so a hosted run has them too.
 #
 # A pull request titled [bypass-ci] builds nothing; the job still reports.
 
@@ -20,9 +21,26 @@ on:
         default: true
 
 jobs:
+  ensure-runner:
+    # A [bypass-ci] pull request builds nothing: no need to start the VM.
+    if: ${{ !contains(github.event.pull_request.title, '[bypass-ci]') }}
+    uses: ./.github/workflows/devtools-ci-start.yml
+    secrets: inherit
+
   build:
     name: LSP-Server-CI-Verification
-    runs-on: ubuntu-latest
+
+    needs: ensure-runner
+
+    # ensure-runner is skipped for a [bypass-ci] pull request and for a fork's
+    # (which has no access to the GCP secrets); both still run this job. Only
+    # a VM that failed to start stops it.
+    if: ${{ always() && needs.ensure-runner.result != 'failure' && needs.ensure-runner.result != 'cancelled' }}
+
+    # Both skipped cases go to a hosted runner: a job is assigned its runner
+    # before any step's `if:` is evaluated, so 'self-hosted' would sit queued
+    # for the VM nobody started until the 24h timeout.
+    runs-on: ${{ (github.event.pull_request.head.repo.fork || contains(github.event.pull_request.title, '[bypass-ci]')) && 'ubuntu-latest' || 'self-hosted' }}
 
     env:
       BUILD_DIR: bld
@@ -54,7 +72,7 @@ jobs:
       - name: Install Build Dependencies
         if: env.RUN_BUILD == 'true'
         run: |
-          CACHE_ROOT="$HOME/.cache/lsp-server-ci"
+          CACHE_ROOT="$HOME/.cache/ci/lsp-server"
           {
             echo "CCACHE_DIR=$CACHE_ROOT/ccache"
             echo "VCPKG_DEFAULT_BINARY_CACHE=$CACHE_ROOT/vcpkg-archives"
@@ -112,9 +130,53 @@ jobs:
           # Per-run counters, so the summary describes this build only.
           ccache --zero-stats
 
+      # The live-connection tests (tests/e2e Live_connection, the unit test
+      # Secret_store.plaintext_helper) need a mariadbd and MariaDB Shell's
+      # test-only mariadb-secret-store-plaintext, and skip without them. The
+      # self-hosted runner keeps both in ~/.cache/ci: the server unpacked by the
+      # shell's server-build.yml, the shell's package and the helper published
+      # by its shell-ci-publish.yml. The helper goes into the unpacked
+      # package's bin/, where its RPATH finds the package's libraries. Missing
+      # pieces are a warning, not a failure: those tests then skip, as on a
+      # hosted runner.
+      - name: Use the runner's MariaDB server and shell
+        if: env.RUN_TESTS == 'true' && runner.environment == 'self-hosted'
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          servers=(~/.cache/ci/mariadb*/bin)
+          if [ ${#servers[@]} -eq 1 ]; then
+            server=$(dirname "${servers[0]}")
+            # mariadb-install-db is in scripts/ in a server tarball.
+            echo "$server/bin" >> "$GITHUB_PATH"
+            echo "$server/scripts" >> "$GITHUB_PATH"
+            echo "MariaDB server: $server"
+          else
+            echo "::warning::Expected one ~/.cache/ci/mariadb*/bin, found ${#servers[@]}: live-connection tests will skip."
+          fi
+
+          tarballs=(~/.cache/ci/mariadb-shell*.tar.gz)
+          helper=~/.cache/ci/shell-test-helpers/mariadb-secret-store-plaintext
+          if [ ${#tarballs[@]} -eq 1 ] && [ -f "$helper" ]; then
+            dest="$RUNNER_TEMP/mariadb-shell"
+            rm -rf "$dest"
+            mkdir -p "$dest"
+            tar -xzf "${tarballs[0]}" -C "$dest"
+            roots=("$dest"/*/)
+            bin="${roots[0]%/}/bin"
+            cp "$helper" "$bin/"
+            echo "MDBLS_SHELL_BIN_DIR=$bin" >> "$GITHUB_ENV"
+            echo "MariaDB Shell: $(basename "${tarballs[0]}"), helpers in $bin"
+          else
+            echo "::warning::Expected one ~/.cache/ci/mariadb-shell*.tar.gz (found ${#tarballs[@]}) and $helper: live-connection tests will skip."
+          fi
+
       # ========================================
       # 3. CONFIGURE
       # ========================================
+      # MDBLS_SHELL_BIN_DIR is baked in at configure: the unit tests get it as
+      # a definition, the e2e tests through ctest's environment.
       - name: Configure
         id: configure
         if: env.RUN_BUILD == 'true'
@@ -122,6 +184,7 @@ jobs:
           cmake -S . -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DWITH_VCPKG_TRIPLET=x64-linux-dynamic \
             -DMARIADB_BOOTSTRAP_DIR="$MARIADB_BOOTSTRAP_DIR" \
+            ${MDBLS_SHELL_BIN_DIR:+-DMDBLS_SHELL_BIN_DIR="$MDBLS_SHELL_BIN_DIR"} \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
       # The vcpkg ports configure built (OpenSSL takes minutes), also those

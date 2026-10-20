@@ -700,7 +700,7 @@ tests/fixtures/                sql/ (sakila schema, world, a mysqldump file, the
                                large dumps are generated, not committed
 scripts/                       gen_fixture_dump.py
 docs/                          language-server.md, outline-format.md, plans/
-.github/workflows/             ci.yml (Linux, tests), devtools-ci-start.yml (unused)
+.github/workflows/             ci.yml (Linux, tests), devtools-ci-start.yml (starts the CI VM)
 .github/vcpkg-triplets/        x64-windows.cmake, an overlay triplet for Windows builds
 ```
 
@@ -771,10 +771,13 @@ Build conventions, copied from the shell where the shell has them:
   `mariadb-lsp.e2e` on a generated 16 MB dump (Python 3, standard library only), and
   `-DMDBLS_LARGE_TESTS=ON` adds `mariadb-lsp.e2e-large` at 256 MB.
 - CI (`.github/workflows/ci.yml`, on pull requests and by hand), modelled on MariaDB
-  Shell's `shell-ci.yml`: one Linux job on a GitHub-hosted runner (this repository has no
-  access to the shell's self-hosted devtools runner; `devtools-ci-start.yml`, which starts
-  it, is kept for when it does), `x64-linux-dynamic`, RelWithDebInfo, ccache, then every
-  ctest test; a failing test, or none registered, fails the job. ccache, vcpkg's binary
+  Shell's `shell-ci.yml`: one Linux job on the shell's self-hosted devtools-ci VM, which
+  `devtools-ci-start.yml` starts first (ubuntu-latest for a fork's PR or a `[bypass-ci]`
+  one), `x64-linux-dynamic`, RelWithDebInfo, ccache, then every
+  ctest test; a failing test, or none registered, fails the job. On the VM the
+  live-connection tests run too, with the server and MariaDB Shell package (plus its
+  test-only `mariadb-secret-store-plaintext`, published by the shell's
+  `shell-ci-publish.yml`) kept in `~/.cache/ci`. ccache, vcpkg's binary
   cache and the server bootstrap are kept with `actions/cache`. A PR titled `[bypass-ci]`
   builds nothing.
 
