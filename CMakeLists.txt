@@ -39,12 +39,16 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/bootstrap_vcpkg.cmake)
 # The server commit is pinned in libs/mariadbparser/UPSTREAM.md, read by
 # cmake/mariadb_pin.cmake; moving the pin there re-runs the bootstrap.
 option(WITH_MARIADB_CLIENT "Link the MariaDB client library (live connections)" ON)
+# MariaDB Shell builds this project with its own server tree, which follows
+# the server's main: the client library only, the grammar is in generated/.
+option(MDBLS_CHECK_SERVER_PIN
+  "Warn when MARIADB_SOURCE_DIR is not at the pin of libs/mariadbparser/UPSTREAM.md" ON)
 if(WITH_MARIADB_CLIENT)
   include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/mariadb_pin.cmake)
   if(NOT MARIADB_SOURCE_DIR OR
      (MDBLS_BOOTSTRAPPED_REF AND NOT MDBLS_BOOTSTRAPPED_REF STREQUAL MDBLS_MARIADB_REF))
     include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/bootstrap_mariadb.cmake)
-  elseif(NOT MDBLS_BOOTSTRAPPED_REF)
+  elseif(NOT MDBLS_BOOTSTRAPPED_REF AND MDBLS_CHECK_SERVER_PIN)
     # A server tree given with -DMARIADB_SOURCE_DIR: check it is at the pin.
     find_package(Git QUIET)
     if(GIT_FOUND)

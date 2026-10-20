@@ -735,7 +735,8 @@ Build conventions, copied from the shell where the shell has them:
   Python, no server tree, no provenance gate at build time. The library is built static
   and shared (`libmariadbparser.so.2`, version script on Linux, version read from
   `mdbparse.h`), plus the `mdbparse` CLI when RapidJSON is found.
-- `cmake/compiler.cmake`: C++23 and the shell's warning set (`-Werror -Wall -Wextra
+- `cmake/compiler.cmake`: C++23 (`-std=c++23`; `/std:c++23preview` on MSVC in place of
+  CMake's `/std:c++latest`) and the shell's warning set (`-Werror -Wall -Wextra
   -Wpedantic -Wshadow ...`, `/W4 /WX` on MSVC), applied per target through
   `mdbls_target_warnings()` rather than globally, because the extracted lexer in
   `libs/mariadbparser` is compiled as written; the library's own C files are held to
@@ -1064,8 +1065,17 @@ Status (2026-10-19): `cmake/packaging.cmake` adds install rules and a CPack ZIP 
 (OpenSSL, zlib; found with a `RUNTIME_DEPENDENCY_SET`), and the installed binary's RPATH
 points there (`@loader_path/../lib`, `$ORIGIN/../lib`). Built on macOS 26 (arm64, static
 and `-dynamic` triplets); Linux and Windows not tried yet, and the
-macOS binary is neither signed nor notarized. Open: installing into the shell's `bin/`, a
-release workflow, signing.
+macOS binary is neither signed nor notarized.
+
+Status (later on 2026-10-19): no release workflow of its own, by decision: MariaDB Shell
+builds this repository as its `src/lsp-server` submodule (`cmake/lsp_server.cmake` there,
+an `ExternalProject` with the shell's compiler, vcpkg toolchain, triplet and server tree,
+`-DWITH_TESTS=0 -DMDBLS_CHECK_SERVER_PIN=OFF`) and bundles `bin/mariadb-lsp` next to
+`mariadb-shell`, with the RPATH of its other bundled binaries, so it uses the package's
+OpenSSL and zlib; signing follows the shell's. Built that way on macOS arm64. CI here tests
+on Linux; `build-release.yml`, on a push to `release/candidate`, builds on the shell's
+release platforms and triplets (Rocky 9 x64/arm64, macOS arm64/x64, Windows x64/arm64).
+The CPack zip stays for trying a build on its own.
 
 ### P8 — Formatting (added 2026-10-18)
 
