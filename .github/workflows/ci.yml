@@ -1,135 +1,151 @@
 name: MariaDB-LSP-Server-CI
 
-# Builds the language server and runs its unit tests.  Shaped like MariaDB
-# Shell's shell-ci.yml: the Linux build runs on the self-hosted devtools runner
-# (started by devtools-ci-start.yml) with ccache, a PR titled [bypass-ci] skips
-# the build, and a fork PR falls back to a GitHub-hosted runner.  macOS and
-# Windows jobs run on GitHub-hosted runners; the Windows job sets up MSVC,
-# vcpkg and win_bison as the shell's shell-release.yml does.
+# Builds the language server and runs its tests, as MariaDB Shell's
+# shell-ci.yml does for the shell: one Linux build (RelWithDebInfo,
+# x64-linux-dynamic, ccache), then the tests; a failing test fails the job.
+# It runs on a GitHub-hosted runner, so what the shell's self-hosted runner
+# keeps between runs is kept with actions/cache here: ccache, vcpkg's binary
+# cache, and the MariaDB server tree the client library is built from.
+#
+# A pull request titled [bypass-ci] builds nothing; the job still reports.
 
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      test:
+        description: 'Run the tests'
+        type: boolean
+        required: false
+        default: true
 
 jobs:
-  ensure-runner:
-    if: ${{ !contains(github.event.pull_request.title, '[bypass-ci]') }}
-    uses: ./.github/workflows/devtools-ci-start.yml
-    secrets: inherit
+  build:
+    name: LSP-Server-CI-Verification
+    runs-on: ubuntu-latest
 
-  linux:
-    name: Linux build and unit tests
-    needs: ensure-runner
-    if: ${{ always() && needs.ensure-runner.result != 'failure' && needs.ensure-runner.result != 'cancelled' }}
-    runs-on: ${{ (github.event.pull_request.head.repo.fork || contains(github.event.pull_request.title, '[bypass-ci]')) && 'ubuntu-latest' || 'self-hosted' }}
     env:
       BUILD_DIR: bld
+      CCACHE_DIR: ${{ github.workspace }}/../.cache/ccache
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/../.cache/vcpkg-archives
+      MARIADB_BOOTSTRAP_DIR: ${{ github.workspace }}/../.cache/mariadb-server-lsp
+      # [bypass-ci] is the only thing that calls the build off.
       RUN_BUILD: ${{ !contains(github.event.pull_request.title, '[bypass-ci]') }}
+      # A pull_request run has no inputs: it always tests. A manual run goes
+      # by what it asked for.
+      RUN_TESTS: ${{ !contains(github.event.pull_request.title, '[bypass-ci]')
+        && (github.event_name == 'pull_request' || inputs.test) }}
+
     steps:
       - name: Skip CI Notice
         if: contains(github.event.pull_request.title, '[bypass-ci]')
         run: echo "Bypassing CI checks due to PR title tag."
 
+      # ========================================
+      # 0. CHECKOUT
+      # ========================================
       - name: Checkout
         if: env.RUN_BUILD == 'true'
         uses: actions/checkout@v4
 
-      - name: Setup ccache
+      # ========================================
+      # 1. TOOLS
+      # ========================================
+      - name: Install Build Dependencies
         if: env.RUN_BUILD == 'true'
         run: |
-          set -euo pipefail
-          if ! command -v ccache >/dev/null 2>&1; then
-            sudo apt-get update && sudo apt-get install -y ccache
-          fi
-          echo "CCACHE_DIR=$HOME/.cache/ci/ccache-lsp-server" >> "$GITHUB_ENV"
+          sudo apt-get update
+          sudo apt-get install -y ninja-build bison ccache
+          mkdir -p "$CCACHE_DIR" "$VCPKG_DEFAULT_BINARY_CACHE"
+          cmake --version | head -1
+          bison --version | head -1
+
+      # ========================================
+      # 2. CACHES
+      # ========================================
+      # A new entry every run, restored from the newest one: ccache's
+      # contents change with every build.
+      - name: Restore ccache
+        if: env.RUN_BUILD == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ runner.os }}-x64-linux-dynamic-${{ github.run_id }}
+          restore-keys: ccache-${{ runner.os }}-x64-linux-dynamic-
+
+      - name: Restore vcpkg binary cache
+        if: env.RUN_BUILD == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-${{ runner.os }}-x64-linux-dynamic-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-${{ runner.os }}-x64-linux-dynamic-
+
+      # The server tree at the pin of libs/mariadbparser/UPSTREAM.md, with
+      # its client targets built.
+      - name: Restore MariaDB server tree
+        if: env.RUN_BUILD == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.MARIADB_BOOTSTRAP_DIR }}
+          key: mariadb-server-${{ runner.os }}-x64-linux-dynamic-${{ hashFiles('libs/mariadbparser/UPSTREAM.md') }}
 
       - name: Prime ccache
         if: env.RUN_BUILD == 'true'
         run: |
           set -euo pipefail
-          mkdir -p "$CCACHE_DIR"
-          ccache --set-config=max_size=5G
+          ccache --set-config=max_size=2G
+          # Per-run counters, so the summary describes this build only.
           ccache --zero-stats
 
+      # ========================================
+      # 3. CONFIGURE
+      # ========================================
       - name: Configure
         if: env.RUN_BUILD == 'true'
         run: |
           cmake -S . -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DWITH_VCPKG_TRIPLET=x64-linux-dynamic \
-            -DMARIADB_BOOTSTRAP_DIR="$HOME/.cache/ci/mariadb-server-lsp" \
+            -DMARIADB_BOOTSTRAP_DIR="$MARIADB_BOOTSTRAP_DIR" \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
+      # ========================================
+      # 4. BUILD
+      # ========================================
+      # A job count, never a bare --parallel.
       - name: Build
         if: env.RUN_BUILD == 'true'
         run: cmake --build "$BUILD_DIR" --parallel "$(nproc)"
 
+      # Reported even when the build failed; never fails the job.
       - name: Report ccache statistics
         if: always() && env.RUN_BUILD == 'true'
         run: ccache --show-stats || true
 
-      - name: Unit tests
-        if: env.RUN_BUILD == 'true'
-        run: ctest --test-dir "$BUILD_DIR" --output-on-failure --parallel "$(nproc)"
-
-  macos:
-    name: macOS build and unit tests
-    if: ${{ !contains(github.event.pull_request.title, '[bypass-ci]') }}
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Tools
-        run: brew install ninja bison
-
-      - name: Configure
+      # ========================================
+      # 5. TESTS
+      # ========================================
+      # The unit tests (run_unit_tests), the CLI tests and the end-to-end
+      # tests of the language server, all registered with ctest. ctest exits
+      # non-zero when a test fails, which fails this step and the job; no
+      # test registered at all is a failure too.
+      - name: Run the tests
+        if: env.RUN_TESTS == 'true'
         run: |
-          cmake -S . -B bld -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DWITH_VCPKG_TRIPLET=arm64-osx \
-            -DBISON_EXECUTABLE="$(brew --prefix bison)/bin/bison"
+          ctest --test-dir "$BUILD_DIR" --output-on-failure --no-tests=error \
+            --parallel "$(nproc)" --output-junit test-results.xml
 
-      - name: Build
-        run: cmake --build bld --parallel "$(sysctl -n hw.ncpu)"
-
-      - name: Unit tests
-        run: ctest --test-dir bld --output-on-failure --parallel "$(sysctl -n hw.ncpu)"
-
-  windows:
-    name: Windows build and unit tests
-    if: ${{ !contains(github.event.pull_request.title, '[bypass-ci]') }}
-    runs-on: windows-2022
-    steps:
-      - uses: actions/checkout@v4
-
-      # The VS 2022 toolset (MSVC 14.44), as in the shell's shell-release.yml.
-      - name: Setup Visual Studio 2022 Environment
-        uses: ilammy/msvc-dev-cmd@v1
+      # ========================================
+      # 6. ARCHIVE
+      # ========================================
+      # always(), so the results are there when a failure is what to look at.
+      - name: Archive Test Results
+        if: always() && env.RUN_TESTS == 'true'
+        uses: actions/upload-artifact@v4
         with:
-          arch: x64
-          toolset: '14.44'
-
-      # vcpkg runs vcvarsall itself with the newest toolset it finds; the
-      # overlay triplet pins its ports to the same 14.44 toolset.
-      - name: Pin vcpkg to the VS 2022 toolset
-        run: echo "VCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}/.github/vcpkg-triplets" >> "$GITHUB_ENV"
-        shell: bash
-
-      # Git Bash's coreutils link.exe shadows the MSVC linker.
-      - name: Remove conflicting Git link.exe
-        run: rm -f "C:/Program Files/Git/usr/bin/link.exe"
-        shell: bash
-
-      # cmake/bison.cmake looks for win_bison in c:\ProgramData\chocolatey\bin.
-      - name: Tools
-        run: choco install winflexbison3 ninja -y
-
-      - name: Configure
-        run: |
-          cmake -S . -B bld -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DWITH_VCPKG_TRIPLET=x64-windows
-        shell: bash
-
-      - name: Build
-        run: cmake --build bld --parallel
-
-      - name: Unit tests
-        run: ctest --test-dir bld --output-on-failure --parallel 4
+          name: test-results
+          path: |
+            ${{ env.BUILD_DIR }}/test-results.xml
+            ${{ env.BUILD_DIR }}/Testing/Temporary/LastTest.log
+          if-no-files-found: warn
+          retention-days: 7
