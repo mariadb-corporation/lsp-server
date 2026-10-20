@@ -54,7 +54,7 @@ original project were left behind on purpose. Facts the rest of this plan relies
   jump and is deferred by decision.
 - **`generated/` is committed**, produced by P0's one extraction run from the server tree
   at the pin. The plan assumed that run needed a Linux host; it ran on macOS (arm64,
-  bison 3.8.2, `UPSTREAM.md`). The build needs bison 3.8 or newer and a compiler only, on
+  bison 3.8.2, `UPSTREAM.md`). The build needs bison 3.7.4 or newer and a compiler only, on
   every platform.
 - **`REST` is not a keyword** in the server grammar, so `CREATE REST SERVICE ...` is
   rejected by the unmerged parser, usually at `REST`. §2.2 and §3 merge the REST SQL
@@ -728,8 +728,9 @@ Build conventions, copied from the shell where the shell has them:
 - **libmariadbparser builds from `generated/`**: `bison -k -d -Dparse.lac=full` over
   `generated/yy_stub.yy`, the result `#include`d by `src/parser_glue.c`; the token names
   come from bison's `yytname[]` and `yytranslate[]` at run time and the rule numbers from
-  `yyn` inside each action, so there is no generated table and no XML report. Bison 3.8
-  or newer is required (`libs/mariadbparser/CMakeLists.txt`; the shell's
+  `yyn` inside each action, so there is no generated table and no XML report. Bison 3.7.4
+  or newer is required (Rocky Linux 9's; its tables equal 3.8.2's but for the unused
+  `yydefgoto[0]`) (`libs/mariadbparser/CMakeLists.txt`; the shell's
   `cmake/bison.cmake` finds Homebrew bison on macOS and `win_bison` on Windows). No
   Python, no server tree, no provenance gate at build time. The library is built static
   and shared (`libmariadbparser.so.2`, version script on Linux, version read from

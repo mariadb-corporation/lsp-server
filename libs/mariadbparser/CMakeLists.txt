@@ -3,12 +3,14 @@
 # No Python and no MariaDB source tree are needed at build time; see
 # UPSTREAM.md for where generated/ comes from.
 
+# 3.7.4 is the oldest bison tried: Rocky Linux 9's and winflexbison3's.  Its
+# tables are 3.8.2's but for yydefgoto[0] (the start symbol, never used).
 if(NOT BISON_FOUND)
-  message(FATAL_ERROR "libmariadbparser needs bison 3.8 or newer "
+  message(FATAL_ERROR "libmariadbparser needs bison 3.7.4 or newer "
     "(Homebrew bison on macOS, winflexbison3 on Windows).")
 endif()
-if(BISON_VERSION VERSION_LESS "3.8")
-  message(FATAL_ERROR "libmariadbparser needs bison 3.8 or newer, found ${BISON_VERSION}")
+if(BISON_VERSION VERSION_LESS "3.7.4")
+  message(FATAL_ERROR "libmariadbparser needs bison 3.7.4 or newer, found ${BISON_VERSION}")
 endif()
 
 set(MDBP_GENERATED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/generated")
