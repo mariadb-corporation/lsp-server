@@ -356,9 +356,12 @@ class Large_file(Lsp_test):
               f"check done after {finished - t0:.3f}s (from sending didOpen)", file=sys.stderr)
         if self.SIZE_MB >= 64:
             self.assertLess(answered, done_seq)
-        # workDoneProgress was offered, created, begun and ended.
+        # workDoneProgress was offered, created, begun and ended. The server
+        # sends $/progress's "end" just after parseProgress's "done", so it
+        # may not have arrived yet: wait for it.
         self.assertTrue(any(r["method"] == "window/workDoneProgress/create"
                             for r in c.server_requests))
+        c.wait_notification("$/progress", lambda p: p["value"]["kind"] == "end", timeout=30)
         kinds = [m["params"]["value"]["kind"] for _, m in c.notifications
                  if m["method"] == "$/progress"]
         self.assertEqual(kinds[0], "begin")
