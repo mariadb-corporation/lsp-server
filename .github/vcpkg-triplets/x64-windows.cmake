@@ -14,7 +14,7 @@
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335 USA
 
 # vcpkg's built-in x64-windows triplet, pinned to the VS 2022 toolset
-# (MSVC 14.44) to match the compiler ci.yml selects (copied from MariaDB Shell).
+# (MSVC 14.44) to match the compiler ci.yml and build-release.yml select.
 set(VCPKG_TARGET_ARCHITECTURE x64)
 set(VCPKG_CRT_LINKAGE dynamic)
 set(VCPKG_LIBRARY_LINKAGE dynamic)
