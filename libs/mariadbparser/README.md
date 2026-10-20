@@ -40,7 +40,7 @@ the exact ownership of every pointer in a result.
 
 ## Building
 
-Built by the top-level CMake of this repository. Needs bison 3.8 or newer and a C11 and
+Built by the top-level CMake of this repository. Needs bison 3.7.4 or newer and a C11 and
 C++17 compiler; no Python and no server source tree. Targets: `mariadbparser` (static),
 `mariadbparser_shared` (`libmariadbparser.so.2` / `.2.dylib`), and the `mdbparse` CLI.
 Built and tested on macOS (Apple Clang); the original project built it on Linux with
