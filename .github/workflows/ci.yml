@@ -26,9 +26,6 @@ jobs:
 
     env:
       BUILD_DIR: bld
-      CCACHE_DIR: ${{ github.workspace }}/../.cache/ccache
-      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/../.cache/vcpkg-archives
-      MARIADB_BOOTSTRAP_DIR: ${{ github.workspace }}/../.cache/mariadb-server-lsp
       # [bypass-ci] is the only thing that calls the build off.
       RUN_BUILD: ${{ !contains(github.event.pull_request.title, '[bypass-ci]') }}
       # A pull_request run has no inputs: it always tests. A manual run goes
@@ -51,23 +48,37 @@ jobs:
       # ========================================
       # 1. TOOLS
       # ========================================
+      # The cached directories, for the later steps (also the cache steps'
+      # `path:`). Absolute and without '..': actions/cache refuses a path
+      # with '.' or '..' in it, and then saves nothing.
       - name: Install Build Dependencies
         if: env.RUN_BUILD == 'true'
         run: |
+          CACHE_ROOT="$HOME/.cache/lsp-server-ci"
+          {
+            echo "CCACHE_DIR=$CACHE_ROOT/ccache"
+            echo "VCPKG_DEFAULT_BINARY_CACHE=$CACHE_ROOT/vcpkg-archives"
+            echo "MARIADB_BOOTSTRAP_DIR=$CACHE_ROOT/mariadb-server-lsp"
+          } >> "$GITHUB_ENV"
+          mkdir -p "$CACHE_ROOT/ccache" "$CACHE_ROOT/vcpkg-archives"
           sudo apt-get update
           sudo apt-get install -y ninja-build bison ccache
-          mkdir -p "$CCACHE_DIR" "$VCPKG_DEFAULT_BINARY_CACHE"
           cmake --version | head -1
           bison --version | head -1
 
       # ========================================
       # 2. CACHES
       # ========================================
-      # A new entry every run, restored from the newest one: ccache's
-      # contents change with every build.
+      # Restored here, and each saved by a step of its own right after the
+      # step that fills it, also when that or a later step fails, so what
+      # was built is kept for the next run. (actions/cache saves only at the
+      # end of a job that succeeded.)
+      #
+      # ccache and vcpkg's binary cache get a new entry every run, restored
+      # from the newest one: their contents grow with every build.
       - name: Restore ccache
         if: env.RUN_BUILD == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ${{ env.CCACHE_DIR }}
           key: ccache-${{ runner.os }}-x64-linux-dynamic-${{ github.run_id }}
@@ -75,17 +86,20 @@ jobs:
 
       - name: Restore vcpkg binary cache
         if: env.RUN_BUILD == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
-          key: vcpkg-${{ runner.os }}-x64-linux-dynamic-${{ hashFiles('vcpkg.json') }}
-          restore-keys: vcpkg-${{ runner.os }}-x64-linux-dynamic-
+          key: vcpkg-${{ runner.os }}-x64-linux-dynamic-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-x64-linux-dynamic-${{ hashFiles('vcpkg.json') }}-
+            vcpkg-${{ runner.os }}-x64-linux-dynamic-
 
       # The server tree at the pin of libs/mariadbparser/UPSTREAM.md, with
-      # its client targets built.
+      # its client targets built: one entry per pin.
       - name: Restore MariaDB server tree
+        id: mariadb-server
         if: env.RUN_BUILD == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ${{ env.MARIADB_BOOTSTRAP_DIR }}
           key: mariadb-server-${{ runner.os }}-x64-linux-dynamic-${{ hashFiles('libs/mariadbparser/UPSTREAM.md') }}
@@ -102,12 +116,31 @@ jobs:
       # 3. CONFIGURE
       # ========================================
       - name: Configure
+        id: configure
         if: env.RUN_BUILD == 'true'
         run: |
           cmake -S . -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DWITH_VCPKG_TRIPLET=x64-linux-dynamic \
             -DMARIADB_BOOTSTRAP_DIR="$MARIADB_BOOTSTRAP_DIR" \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      # The vcpkg ports configure built (OpenSSL takes minutes), also those
+      # of a configure that failed later.
+      - name: Save vcpkg binary cache
+        if: always() && env.RUN_BUILD == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-${{ runner.os }}-x64-linux-dynamic-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}
+
+      # Only a complete tree: its key does not change while the pin does
+      # not, so a half-built one would be restored by every later run.
+      - name: Save MariaDB server tree
+        if: always() && env.RUN_BUILD == 'true' && steps.configure.outcome == 'success' && steps.mariadb-server.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.MARIADB_BOOTSTRAP_DIR }}
+          key: mariadb-server-${{ runner.os }}-x64-linux-dynamic-${{ hashFiles('libs/mariadbparser/UPSTREAM.md') }}
 
       # ========================================
       # 4. BUILD
@@ -121,6 +154,14 @@ jobs:
       - name: Report ccache statistics
         if: always() && env.RUN_BUILD == 'true'
         run: ccache --show-stats || true
+
+      # The objects compiled so far, also by a build that failed.
+      - name: Save ccache
+        if: always() && env.RUN_BUILD == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ runner.os }}-x64-linux-dynamic-${{ github.run_id }}
 
       # ========================================
       # 5. TESTS
