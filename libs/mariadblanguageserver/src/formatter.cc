@@ -517,12 +517,25 @@ class Builder {
     for (uint32_t n = 0; n < t_.size(); ++n) {
       if (t_.is_token(n)) leaves_[t_.node(n).first_token] = n;
     }
+    lines_before_.assign(tokens.size(), 0);
+    lines_through_.assign(tokens.size(), 0);
+    uint32_t lines = 0;  // gaps and tokens with a line break so far
     uint32_t prev = npos;
     for (uint32_t j = 0; j < tokens.size(); ++j) {
-      if (tokens[j].begin == tokens[j].end) continue;
-      if (prev != npos && !read_gap(text_.substr(tokens[prev].end, tokens[j].begin - tokens[prev].end), &gaps_[j])) {
-        ok_ = false;
+      if (tokens[j].begin == tokens[j].end) {
+        lines_before_[j] = lines_through_[j] = lines;
+        continue;
       }
+      if (prev != npos) {
+        const std::string_view gap = text_.substr(tokens[prev].end, tokens[j].begin - tokens[prev].end);
+        if (!read_gap(gap, &gaps_[j])) ok_ = false;
+        if (gap.find('\n') != std::string_view::npos) ++lines;
+      }
+      lines_before_[j] = lines;
+      if (text_.substr(tokens[j].begin, tokens[j].end - tokens[j].begin).find('\n') != std::string_view::npos) {
+        ++lines;
+      }
+      lines_through_[j] = lines;
       prev = j;
     }
     mark_statement_clauses();
@@ -595,8 +608,14 @@ class Builder {
     return npos;
   }
 
-  // Whether node n spans lines in the original.
-  bool spans_lines(uint32_t n) const { return t_.text(text_, n).find('\n') != std::string_view::npos; }
+  // Whether node n spans lines in the original: a line break in one of
+  // its tokens or the gaps between them, counted once for the whole text.
+  bool spans_lines(uint32_t n) const {
+    const uint32_t j = first_token(n);
+    if (j == npos) return false;
+    const auto &node = t_.node(n);
+    return lines_through_[node.first_token + node.token_count - 1] > lines_before_[j];
+  }
 
   // The separator before token j: `kind`, with the comments of the gap
   // before it.  A comment on a line of its own breaks the line before it; a
@@ -1087,11 +1106,26 @@ class Builder {
     }
   }
 
+  // Whether routine n has a body with tokens, found without building it.
+  bool has_routine_body(uint32_t n) const {
+    for (const uint32_t k : t_.children(n)) {
+      const int sym = symbol(k);
+      if (sym == s_.sp_tail_standalone || sym == s_.sf_c_chistics_and_body_standalone) {
+        if (has_routine_body(k)) return true;
+      } else if (sym == s_.sp_proc_stmt || sym == s_.sp_proc_stmt_in_returns_clause || sym == s_.ev_sql_stmt) {
+        if (first_token(k) != npos) return true;
+      }
+    }
+    return false;
+  }
+
   // The header on its line; the characteristics or clauses one level
   // deeper on lines of their own when the statement breaks; the body on a
   // line of its own, a block at the header's level, any other statement one
   // level deeper; an event's DO at the header's level, its body after it.
   Piece routine(uint32_t n) {
+    // Without a body, its children as they stand, built once.
+    if (!has_routine_body(n)) return children(n);
     Routine_parts r;
     routine_parts(n, &r);
     // No space before the parameter list: p(IN a INT).
@@ -1306,6 +1340,10 @@ class Builder {
   const Symbols &s_;
   std::vector<Gap> gaps_;
   std::vector<uint32_t> leaves_;
+  // By token: the gaps and tokens with a line break before it (its gap
+  // included) and up to its end.
+  std::vector<uint32_t> lines_before_;
+  std::vector<uint32_t> lines_through_;
   std::vector<bool> clause_starts_;  // by token
   std::vector<bool> block_starts_;   // by token: a compound statement starts
   std::vector<bool> begin_starts_;   // by token: a BEGIN ... END block starts
