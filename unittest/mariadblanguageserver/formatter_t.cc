@@ -609,6 +609,15 @@ TEST(Formatter, triggers_events_and_compound_statements_are_routines_too) {
   EXPECT_EQ(routine("begin not atomic declare x int; set x = 1; end"),
             "BEGIN NOT ATOMIC\n  DECLARE x INT;\n  SET x = 1;\nEND");
   EXPECT_EQ(routine("if @a then select 1; end if"), "IF @a THEN\n  SELECT 1;\nEND IF");
+  // A body of one IF is a statement other than BEGIN ... END: one level
+  // deeper.
+  EXPECT_EQ(routine("create trigger tr before insert on t for each row if new.a then set new.b = 1; end if"),
+            "CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW\n"
+            "  IF new.a THEN\n"
+            "    SET new.b = 1;\n"
+            "  END IF");
+  // No empty line before END.
+  EXPECT_EQ(routine("CREATE PROCEDURE p() BEGIN SELECT 1;\n\nEND"), "CREATE PROCEDURE p()\nBEGIN\n  SELECT 1;\nEND");
 }
 
 TEST(Formatter, every_routine_layout_is_its_own_layout) {
@@ -732,6 +741,14 @@ TEST(Formatter, clauses_go_one_level_deeper_by_default) {
       EXPECT_EQ(with_clauses(once, a, b), once);
     }
   }
+}
+
+TEST(Formatter, an_events_body_indents_its_clauses_once) {
+  const std::string sql = "DELIMITER $$\nCREATE EVENT e ON SCHEDULE AT '2035-12-31' DO SELECT a FROM t\nWHERE b = 1$$\n"
+                          "DELIMITER ;\n";
+  EXPECT_EQ(with_clauses(sql, true, true),
+            "DELIMITER $$\nCREATE EVENT e\n  ON SCHEDULE AT '2035-12-31'\nDO SELECT a\n  FROM t\n  WHERE b = 1$$\n"
+            "DELIMITER ;\n");
 }
 
 TEST(Formatter, a_range_formats_the_statements_it_touches) {
