@@ -76,9 +76,12 @@ if(Python3_Interpreter_FOUND)
   endif()
   add_test(NAME mariadb-lsp.e2e
            COMMAND Python3::Interpreter -m unittest discover -s "${PROJECT_SOURCE_DIR}/tests/e2e" -v)
+  # The timing lock: never alongside the fuzz tests (fuzz/), which keep
+  # cores busy while the latency bounds are measured.
   set_tests_properties(mariadb-lsp.e2e PROPERTIES
     ENVIRONMENT "MARIADB_LSP=$<TARGET_FILE:mariadb-lsp>;MDBLS_E2E_LARGE_MB=16;MDBLS_COMPLETION_P95_MS=${_p95};MDBLS_SHELL_BIN_DIR=${MDBLS_SHELL_BIN_DIR}"
-    TIMEOUT ${_e2e_timeout})
+    TIMEOUT ${_e2e_timeout}
+    RESOURCE_LOCK mdbls_timing)
   option(MDBLS_LARGE_TESTS "Run the end-to-end tests on a 256 MB dump too" OFF)
   if(MDBLS_LARGE_TESTS)
     add_test(NAME mariadb-lsp.e2e-large
@@ -86,7 +89,8 @@ if(Python3_Interpreter_FOUND)
                      -k Large_file -v)
     set_tests_properties(mariadb-lsp.e2e-large PROPERTIES
       ENVIRONMENT "MARIADB_LSP=$<TARGET_FILE:mariadb-lsp>;MDBLS_E2E_LARGE_MB=256"
-      TIMEOUT 900)
+      TIMEOUT 900
+      RESOURCE_LOCK mdbls_timing)
   endif()
 else()
   message(STATUS "Python 3 not found: the language server's end-to-end tests are skipped")

@@ -22,8 +22,14 @@
 
 extern "C" {
 
-// Leaks are reported on macOS too, where LeakSanitizer is off by default.
+// Leaks are reported on macOS too, where LeakSanitizer is off by default;
+// not with Xcode's clang, whose runtime aborts at startup on detect_leaks=1
+// ("not supported on this platform").
+#if defined(__apple_build_version__)
+const char *__asan_default_options() { return ""; }
+#else
 const char *__asan_default_options() { return "detect_leaks=1"; }
+#endif
 
 const char *__ubsan_default_options() { return "print_stacktrace=1"; }
 

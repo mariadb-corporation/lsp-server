@@ -16,11 +16,12 @@
  */
 
 // Connection URIs (the cases of the MCP plugin's test_config.py), the
-// shell's secret store through its plaintext helper, and the workspace
+// shell's secret store through its login-path helper, and the workspace
 // catalog.
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
@@ -74,6 +75,10 @@ fs::path temp_dir(const std::string &name) {
 class Private_store {
  public:
   explicit Private_store(const std::string &name) : m_dir(temp_dir(name)) {
+    for (size_t i = 0; i < k_names.size(); ++i) {
+      const char *v = std::getenv(k_names[i]);
+      m_saved[i] = v ? v : "";
+    }
     set_env("MARIADB_SHELL_USER_CONFIG_HOME", m_dir.string());
     set_env("MARIADB_SHELL_CREDENTIAL_STORE_HELPER", "login-path");
     set_env("MYSQL_TEST_LOGIN_FILE", (m_dir / "login.cnf").string());
@@ -81,14 +86,17 @@ class Private_store {
   Private_store(const Private_store &) = delete;
   Private_store &operator=(const Private_store &) = delete;
   ~Private_store() {
-    set_env("MARIADB_SHELL_CREDENTIAL_STORE_HELPER", "");
-    set_env("MARIADB_SHELL_USER_CONFIG_HOME", "");
-    set_env("MYSQL_TEST_LOGIN_FILE", "");
+    // Back to what the environment held before (unset when it was).
+    for (size_t i = 0; i < k_names.size(); ++i) set_env(k_names[i], m_saved[i]);
     fs::remove_all(m_dir);
   }
 
  private:
+  static constexpr std::array<const char *, 3> k_names = {
+      "MARIADB_SHELL_USER_CONFIG_HOME", "MARIADB_SHELL_CREDENTIAL_STORE_HELPER",
+      "MYSQL_TEST_LOGIN_FILE"};
   fs::path m_dir;
+  std::array<std::string, 3> m_saved;
 };
 
 }  // namespace
@@ -179,7 +187,12 @@ TEST(Secret_store, login_path_helper) {
   const std::string bin = MDBLS_SHELL_BIN_DIR;
   const Private_store private_store("secrets");
   const Secret_store store({bin, ""});
-  if (!store.error().empty()) GTEST_SKIP() << store.error();
+  // Skipped only without the helper: any other error is a failure.
+  if (!fs::exists(fs::path(bin) / "mariadb-secret-store-login-path") &&
+      !fs::exists(fs::path(bin) / "mariadb-secret-store-login-path.exe")) {
+    GTEST_SKIP() << "no mariadb-secret-store-login-path in " << bin;
+  }
+  ASSERT_EQ(store.error(), "");
   EXPECT_EQ(store.helper_name(), "login-path");
 
   auto put = [&](const std::string &type, const std::string &id, const std::string &secret) {

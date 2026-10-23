@@ -101,7 +101,8 @@ enable_testing()
 set(MDBLS_SHELL_BIN_DIR "" CACHE PATH
     "Directory of MariaDB Shell's binaries, for the secret store and live-connection tests (empty: looked up)")
 if(NOT MDBLS_SHELL_BIN_DIR)
-  find_program(MDBLS_SHELL_PROGRAM mariadb-shell)
+  # NO_CACHE: a cached result would never be looked up again.
+  find_program(MDBLS_SHELL_PROGRAM mariadb-shell NO_CACHE)
   if(MDBLS_SHELL_PROGRAM)
     file(REAL_PATH "${MDBLS_SHELL_PROGRAM}" _shell)
     get_filename_component(MDBLS_SHELL_BIN_DIR "${_shell}" DIRECTORY)

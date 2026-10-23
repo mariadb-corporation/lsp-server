@@ -80,8 +80,10 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *bytes, size_t size) {
   auto edits = format_sql(text, index, 0, size32, cache, options);
   check_edits(edits, size32);
   const std::string formatted = apply_edits(text, edits);
-  (void)format_sql(formatted, Statement_index::build(formatted, index_options), 0,
-                   static_cast<uint32_t>(formatted.size()), cache, options);
+  const auto formatted_size = static_cast<uint32_t>(formatted.size());
+  check_edits(format_sql(formatted, Statement_index::build(formatted, index_options), 0,
+                         formatted_size, cache, options),
+              formatted_size);
 
   const uint32_t begin = std::min<uint32_t>(range_begin, size32);
   const uint32_t end = std::min<uint32_t>(begin + range_length, size32);

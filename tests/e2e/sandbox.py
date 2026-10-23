@@ -93,7 +93,12 @@ class Sandbox:
             shutil.rmtree(self.dir, ignore_errors=True)
             raise
         if setup_sql:
-            self.sql(setup_sql)
+            try:
+                self.sql(setup_sql)
+            except RuntimeError:
+                # setUpClass failed, so tearDownClass will not stop it.
+                self.stop()
+                raise
 
     def run(self, *args):
         """The shell's output; its error output in the exception when it fails."""

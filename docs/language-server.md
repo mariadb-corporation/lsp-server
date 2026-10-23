@@ -524,7 +524,9 @@ and builds the libFuzzer targets of `fuzz/`:
 Each is a ctest test (label `fuzz`) that runs for `MDBLS_FUZZ_SECONDS` (default 10) from
 `tests/fixtures/sql` and the inputs earlier runs found, kept in `<build>/fuzz/corpus/`. A
 failing input is written to `<build>/fuzz/artifacts/<target>/`; the target run on that file
-reproduces it. A longer run by hand, four processes:
+reproduces it. The fuzz tests and the end-to-end tests share the ctest resource lock
+`mdbls_timing`, so they run one at a time: fuzzing would keep cores busy while the
+latency bounds are measured. A longer run by hand, four processes:
 
 ```bash
 bld/bin/edit_fuzz -fork=4 -max_total_time=900 -max_len=8192 bld/fuzz/corpus/edit_fuzz tests/fixtures/sql

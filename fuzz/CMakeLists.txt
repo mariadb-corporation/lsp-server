@@ -39,7 +39,8 @@ function(mdbls_add_fuzzer target)
   add_test(NAME ${target}
            COMMAND ${target} -max_total_time=${MDBLS_FUZZ_SECONDS} -timeout=10 -max_len=8192
                    -artifact_prefix=${artifacts}/ "${corpus}" "${PROJECT_SOURCE_DIR}/tests/fixtures/sql")
-  set_tests_properties(${target} PROPERTIES LABELS fuzz)
+  # The timing lock of the end-to-end tests: not while they measure latency.
+  set_tests_properties(${target} PROPERTIES LABELS fuzz RESOURCE_LOCK mdbls_timing)
 endfunction()
 
 mdbls_add_fuzzer(splitter_fuzz)
