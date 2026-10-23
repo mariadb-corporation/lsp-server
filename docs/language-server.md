@@ -241,9 +241,11 @@ SELECT f.title, c.name AS category, count(r.rental_id) AS rentals,
   lines); `END`, `ELSEIF`, `ELSE` and `UNTIL ... END REPEAT` come back to the block's
   level, a CASE's `WHEN` arms go one level deeper with their statements one more. When an
   `IF`, `ELSEIF`, `WHEN` or `WHILE` condition breaks, `THEN` or `DO` starts a line of its
-  own at the keyword's level. A handler's block starts on its line
-  (`DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN`), a cursor's query like a view's. One
-  empty line between statements (and between table columns) stays; comments before
+  own at the keyword's level, and so does `END REPEAT` after an `UNTIL` condition that
+  breaks. A handler's block starts on its line
+  (`DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN`), a cursor's query like a view's, and a
+  `FOR` loop's `IN (SELECT ...)` like a subquery. One empty line between statements (and
+  between table columns) stays, none right after `BEGIN`, `THEN` or `(`; comments before
   `END` or `ELSE` stay with the statements before them.
 
 ```sql
