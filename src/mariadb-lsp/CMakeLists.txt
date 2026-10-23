@@ -18,6 +18,7 @@ find_package(RapidJSON CONFIG REQUIRED)
 add_executable(mariadb-lsp main.cc)
 target_link_libraries(mariadb-lsp PRIVATE mariadblanguageserver rapidjson)
 mdbls_target_warnings(mariadb-lsp)
+mdbls_sanitizer_defaults(mariadb-lsp)
 set_target_properties(mariadb-lsp PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 # Smoke tests of the command line.
@@ -55,20 +56,32 @@ add_test(NAME mariadb-lsp.tree COMMAND mariadb-lsp tree "${_fixtures}/mrs_gramma
 # End-to-end tests of the language server (tests/e2e): Python 3, standard
 # library only.  MDBLS_E2E_LARGE_MB sets the size of the generated dump the
 # large-file tests open; MDBLS_LARGE_TESTS adds a run at 256 MB.  The
-# completion latency bound is P5's 20 ms (p95 at 1 MB) for optimized builds.
-# The live-connection tests need mariadbd on PATH and MDBLS_SHELL_BIN_DIR.
+# completion latency bound is P5's 20 ms (p95 at 1 MB) for optimized builds
+# without sanitizers.
+# The live-connection tests need mariadbd on PATH (or MDBLS_TEST_MARIADBD)
+# and MariaDB Shell in MDBLS_SHELL_BIN_DIR.
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
-  if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$")
-    set(_p95 20)
-  else()
+  # Several times slower under the sanitizers.
+  if(MDBLS_SANITIZERS)
     set(_p95 100)
+    set(_e2e_timeout 900)
+  else()
+    if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$")
+      set(_p95 20)
+    else()
+      set(_p95 100)
+    endif()
+    set(_e2e_timeout 300)
   endif()
   add_test(NAME mariadb-lsp.e2e
            COMMAND Python3::Interpreter -m unittest discover -s "${PROJECT_SOURCE_DIR}/tests/e2e" -v)
+  # The timing lock: never alongside the fuzz tests (fuzz/), which keep
+  # cores busy while the latency bounds are measured.
   set_tests_properties(mariadb-lsp.e2e PROPERTIES
     ENVIRONMENT "MARIADB_LSP=$<TARGET_FILE:mariadb-lsp>;MDBLS_E2E_LARGE_MB=16;MDBLS_COMPLETION_P95_MS=${_p95};MDBLS_SHELL_BIN_DIR=${MDBLS_SHELL_BIN_DIR}"
-    TIMEOUT 300)
+    TIMEOUT ${_e2e_timeout}
+    RESOURCE_LOCK mdbls_timing)
   option(MDBLS_LARGE_TESTS "Run the end-to-end tests on a 256 MB dump too" OFF)
   if(MDBLS_LARGE_TESTS)
     add_test(NAME mariadb-lsp.e2e-large
@@ -76,7 +89,8 @@ if(Python3_Interpreter_FOUND)
                      -k Large_file -v)
     set_tests_properties(mariadb-lsp.e2e-large PROPERTIES
       ENVIRONMENT "MARIADB_LSP=$<TARGET_FILE:mariadb-lsp>;MDBLS_E2E_LARGE_MB=256"
-      TIMEOUT 900)
+      TIMEOUT 900
+      RESOURCE_LOCK mdbls_timing)
   endif()
 else()
   message(STATUS "Python 3 not found: the language server's end-to-end tests are skipped")

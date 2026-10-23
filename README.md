@@ -16,6 +16,7 @@ ctest --test-dir bld
 
 - `-DWITH_VCPKG_TRIPLET=<triplet>` (for example `arm64-osx`, `x64-linux-dynamic`) fetches vcpkg into `../vcpkg`, or uses `VCPKG_ROOT`, and installs the dependencies in `vcpkg.json`. `-DWITH_TESTS=0` leaves GoogleTest out.
 - The MariaDB client library is built from a MariaDB server tree, as in MariaDB Shell. Without options the configure step fetches the server at the commit `libs/mariadbparser` is pinned to into `../mariadb-server-lsp` and builds only the client targets there. To use an existing server build instead, pass `-DMARIADB_SOURCE_DIR=<src> -DMARIADB_BUILD_DIR=<bld>`, with `mariadbclient mysys mysys_ssl caching_sha2_password GenError` built in it; a tree that is not at the pin gets a warning, which `-DMDBLS_CHECK_SERVER_PIN=OFF` turns off. `-DWITH_MARIADB_CLIENT=OFF` builds without the client library.
+- `-DWITH_ASAN=ON` and `-DWITH_UBSAN=ON` build with AddressSanitizer (leaks reported too, on macOS as well) and UndefinedBehaviorSanitizer; `-DWITH_FUZZERS=ON` (clang) builds both in and adds the libFuzzer targets of `fuzz/`, run by ctest. See [Tests](docs/language-server.md#tests).
 
 ## Packaging
 
@@ -84,6 +85,7 @@ Files are read as UTF-8. A Latin-1 file is converted to UTF-8 first when `--char
 | `scripts/gen_builtin_functions.py` | writes the built-in function table (names, call forms, summaries) from a MariaDB server tree; run by hand, output committed |
 | `unittest/` | GoogleTest suites, built into one `run_unit_tests` binary |
 | `tests/e2e/` | end-to-end tests of the language server, in Python |
+| `fuzz/` | libFuzzer targets: the splitter, the edit path, the parser and the formatter |
 | `cmake/` | build modules, most copied from MariaDB Shell |
 | `docs/plans/` | the implementation plan |
 | `docs/outline-format.md` | the outline JSON format |

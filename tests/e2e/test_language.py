@@ -704,7 +704,7 @@ class Mcp_mode(unittest.TestCase):
 
 
 @unittest.skipUnless(sandbox.mariadbd() and sandbox.shell_bin_dir(),
-                     "needs mariadbd and MariaDB Shell's mariadb-secret-store-plaintext")
+                     "needs mariadbd and MariaDB Shell with its login-path helper")
 class Live_connection(unittest.TestCase):
     """A sandbox server and a private secret store: the catalog, sql_mode and
     version come from the server named by mariadb/documentContext."""

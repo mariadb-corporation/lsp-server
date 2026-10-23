@@ -33,6 +33,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <ostream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -49,6 +50,10 @@ struct Lex_case {
   int prepare_mode = 0;
   std::vector<std::pair<std::string, std::string>> tokens;
 };
+
+// What gtest shows of a case (its own fallback dumps the bytes, the
+// struct's padding included): where it comes from.
+void PrintTo(const Lex_case &c, std::ostream *os) { *os << c.file << ": " << c.id; }
 
 std::string from_hex(const std::string &hex) {
   std::string out;

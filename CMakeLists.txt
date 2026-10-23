@@ -91,10 +91,25 @@ endif()
 
 enable_testing()
 
-# A MariaDB Shell build's binary directory: the secret store tests talk to
-# its mariadb-secret-store-plaintext helper, and are skipped without it.
-set(MDBLS_SHELL_BIN_DIR "${PROJECT_SOURCE_DIR}/../mariadb-shell/build/bin" CACHE PATH
-    "Directory of a MariaDB Shell build's binaries, for the secret store tests")
+# MariaDB Shell's binary directory: the secret store and live-connection
+# tests use its mariadb-secret-store-login-path helper (and the shell's
+# sandboxes), and are skipped without it.  Unless set, looked up at every
+# configure (so a shell installed later is found): the directory of the
+# mariadb-shell on the PATH (an installed shell), else a build of the shell
+# next to this checkout.  The normal variable set here, which the
+# subdirectories see, holds the directory found.
+set(MDBLS_SHELL_BIN_DIR "" CACHE PATH
+    "Directory of MariaDB Shell's binaries, for the secret store and live-connection tests (empty: looked up)")
+if(NOT MDBLS_SHELL_BIN_DIR)
+  # NO_CACHE: a cached result would never be looked up again.
+  find_program(MDBLS_SHELL_PROGRAM mariadb-shell NO_CACHE)
+  if(MDBLS_SHELL_PROGRAM)
+    file(REAL_PATH "${MDBLS_SHELL_PROGRAM}" _shell)
+    get_filename_component(MDBLS_SHELL_BIN_DIR "${_shell}" DIRECTORY)
+  else()
+    set(MDBLS_SHELL_BIN_DIR "${PROJECT_SOURCE_DIR}/../mariadb-shell/build/bin")
+  endif()
+endif()
 
 add_subdirectory(libs/mariadbparser)
 add_subdirectory(libs/sqlsplitter)
@@ -103,6 +118,9 @@ add_subdirectory(src/mariadb-lsp)
 
 if(WITH_TESTS)
   add_subdirectory(unittest)
+endif()
+if(WITH_FUZZERS)
+  add_subdirectory(fuzz)
 endif()
 
 # cmake --install and cpack: bin/mariadb-lsp and its documents, as a zip.

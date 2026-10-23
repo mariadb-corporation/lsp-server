@@ -66,6 +66,64 @@ elseif(MSVC)
   endif()
 endif()
 
+# Sanitizers, named as MariaDB Shell's options: -DWITH_ASAN=ON, -DWITH_UBSAN=ON
+# (both may be on), for every target of the tree, the extracted lexer and
+# parser too.  The libraries from vcpkg and the MariaDB client library are not
+# instrumented, which AddressSanitizer and UndefinedBehaviorSanitizer allow.
+# Undefined behaviour aborts, so a test that hits it fails.
+# -DWITH_FUZZERS=ON builds the libFuzzer targets of fuzz/ (clang only); it
+# turns on both sanitizers and instruments the whole tree for coverage, so it
+# wants a build directory of its own.
+option(WITH_ASAN "Build with AddressSanitizer" OFF)
+option(WITH_UBSAN "Build with UndefinedBehaviorSanitizer" OFF)
+option(WITH_FUZZERS "Build the libFuzzer targets (clang; implies WITH_ASAN and WITH_UBSAN)" OFF)
+if(WITH_FUZZERS)
+  # Not AppleClang: Xcode's clang ships no libFuzzer.
+  if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    message(FATAL_ERROR "WITH_FUZZERS needs LLVM's clang (libFuzzer), not ${CMAKE_CXX_COMPILER_ID}")
+  endif()
+  set(WITH_ASAN ON)
+  set(WITH_UBSAN ON)
+  add_compile_options(-fsanitize=fuzzer-no-link)
+endif()
+# The sanitizers in use, empty without: a test in other directories too.
+set(MDBLS_SANITIZERS)
+if(WITH_ASAN)
+  list(APPEND MDBLS_SANITIZERS address)
+endif()
+if(WITH_UBSAN)
+  list(APPEND MDBLS_SANITIZERS undefined)
+endif()
+if(MDBLS_SANITIZERS)
+  if(MSVC)
+    if(WITH_UBSAN)
+      message(FATAL_ERROR "WITH_UBSAN is not supported with MSVC")
+    endif()
+    add_compile_options(/fsanitize=address)
+    # /fsanitize=address and the run-time checks (/RTC1 of a Debug build)
+    # are incompatible.
+    foreach(_flags CMAKE_C_FLAGS_DEBUG CMAKE_CXX_FLAGS_DEBUG)
+      string(REGEX REPLACE "/RTC[1csu]*" "" ${_flags} "${${_flags}}")
+    endforeach()
+  else()
+    list(JOIN MDBLS_SANITIZERS "," _mdbls_sanitize)
+    message(STATUS "Sanitizers: ${_mdbls_sanitize}")
+    add_compile_options(-fsanitize=${_mdbls_sanitize} -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=${_mdbls_sanitize})
+    if(WITH_UBSAN)
+      add_compile_options(-fno-sanitize-recover=undefined)
+    endif()
+  endif()
+endif()
+
+# Links the sanitizers' defaults (cmake/sanitizer_defaults.cc) into an
+# executable of a sanitizer build; does nothing otherwise.
+function(mdbls_sanitizer_defaults target)
+  if(MDBLS_SANITIZERS AND NOT MSVC)
+    target_sources(${target} PRIVATE "${PROJECT_SOURCE_DIR}/cmake/sanitizer_defaults.cc")
+  endif()
+endfunction()
+
 # Applies the project's warning set to one of this project's own C++ targets.
 function(mdbls_target_warnings target)
   target_compile_options(${target} PRIVATE
@@ -74,9 +132,13 @@ endfunction()
 
 # RapidJSON's SIMD scanning of strings and whitespace: a 256 MB didOpen is
 # one JSON string.  Set for every target, so that all translation units see
-# the same RapidJSON code.
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64|ARM64)$")
-  add_compile_definitions(RAPIDJSON_NEON)
-elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
-  add_compile_definitions(RAPIDJSON_SSE2)
+# the same RapidJSON code.  Not with AddressSanitizer: the scan loads whole
+# aligned 16-byte blocks, so it reads up to 15 bytes past a string's end
+# (never past the block, so never into an unmapped page), which ASan reports.
+if(NOT WITH_ASAN)
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64|ARM64)$")
+    add_compile_definitions(RAPIDJSON_NEON)
+  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    add_compile_definitions(RAPIDJSON_SSE2)
+  endif()
 endif()

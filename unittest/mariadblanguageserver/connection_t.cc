@@ -16,11 +16,12 @@
  */
 
 // Connection URIs (the cases of the MCP plugin's test_config.py), the
-// shell's secret store through its plaintext helper, and the workspace
+// shell's secret store through its login-path helper, and the workspace
 // catalog.
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
@@ -67,6 +68,36 @@ fs::path temp_dir(const std::string &name) {
   fs::create_directories(p);
   return p;
 }
+
+// While it lives: the shell's login-path helper with a login file in a
+// directory of its own, never ~/.mylogin.cnf, and the shell's config
+// directory there too.
+class Private_store {
+ public:
+  explicit Private_store(const std::string &name) : m_dir(temp_dir(name)) {
+    for (size_t i = 0; i < k_names.size(); ++i) {
+      const char *v = std::getenv(k_names[i]);
+      m_saved[i] = v ? v : "";
+    }
+    set_env("MARIADB_SHELL_USER_CONFIG_HOME", m_dir.string());
+    set_env("MARIADB_SHELL_CREDENTIAL_STORE_HELPER", "login-path");
+    set_env("MYSQL_TEST_LOGIN_FILE", (m_dir / "login.cnf").string());
+  }
+  Private_store(const Private_store &) = delete;
+  Private_store &operator=(const Private_store &) = delete;
+  ~Private_store() {
+    // Back to what the environment held before (unset when it was).
+    for (size_t i = 0; i < k_names.size(); ++i) set_env(k_names[i], m_saved[i]);
+    fs::remove_all(m_dir);
+  }
+
+ private:
+  static constexpr std::array<const char *, 3> k_names = {
+      "MARIADB_SHELL_USER_CONFIG_HOME", "MARIADB_SHELL_CREDENTIAL_STORE_HELPER",
+      "MYSQL_TEST_LOGIN_FILE"};
+  fs::path m_dir;
+  std::array<std::string, 3> m_saved;
+};
 
 }  // namespace
 
@@ -150,19 +181,19 @@ TEST(Secret_store, runs_programs) {
 #endif
 }
 
-// Against MariaDB Shell's mariadb-secret-store-plaintext, in a config
-// directory of its own.
-TEST(Secret_store, plaintext_helper) {
+// Against MariaDB Shell's mariadb-secret-store-login-path, with a config
+// directory and a login file of its own.
+TEST(Secret_store, login_path_helper) {
   const std::string bin = MDBLS_SHELL_BIN_DIR;
-  if (!fs::exists(fs::path(bin) / "mariadb-secret-store-plaintext")) {
-    GTEST_SKIP() << "no mariadb-secret-store-plaintext in " << bin;
-  }
-  const auto dir = temp_dir("secrets");
-  set_env("MARIADB_SHELL_USER_CONFIG_HOME", dir.string());
-  set_env("MARIADB_SHELL_CREDENTIAL_STORE_HELPER", "plaintext");
+  const Private_store private_store("secrets");
   const Secret_store store({bin, ""});
+  // Skipped only without the helper: any other error is a failure.
+  if (!fs::exists(fs::path(bin) / "mariadb-secret-store-login-path") &&
+      !fs::exists(fs::path(bin) / "mariadb-secret-store-login-path.exe")) {
+    GTEST_SKIP() << "no mariadb-secret-store-login-path in " << bin;
+  }
   ASSERT_EQ(store.error(), "");
-  EXPECT_EQ(store.helper_name(), "plaintext");
+  EXPECT_EQ(store.helper_name(), "login-path");
 
   auto put = [&](const std::string &type, const std::string &id, const std::string &secret) {
     int code = -1;
@@ -198,15 +229,10 @@ TEST(Secret_store, plaintext_helper) {
 
   set_env("MARIADB_SHELL_CREDENTIAL_STORE_HELPER", "<disabled>");
   EXPECT_NE(Secret_store({bin, ""}).error(), "");
-  set_env("MARIADB_SHELL_CREDENTIAL_STORE_HELPER", "");
-  set_env("MARIADB_SHELL_USER_CONFIG_HOME", "");
-  fs::remove_all(dir);
 }
 
 TEST(Live_catalog, reports_a_connection_that_is_not_configured) {
-  const auto dir = temp_dir("live");
-  set_env("MARIADB_SHELL_USER_CONFIG_HOME", dir.string());
-  set_env("MARIADB_SHELL_CREDENTIAL_STORE_HELPER", "plaintext");
+  const Private_store private_store("live");
   {
     std::mutex m;
     std::condition_variable cv;
@@ -246,15 +272,10 @@ TEST(Live_catalog, reports_a_connection_that_is_not_configured) {
     }
     EXPECT_NE(ssh.error().find("SSH tunnels"), std::string::npos);
   }
-  set_env("MARIADB_SHELL_CREDENTIAL_STORE_HELPER", "");
-  set_env("MARIADB_SHELL_USER_CONFIG_HOME", "");
-  fs::remove_all(dir);
 }
 
 TEST(Live_catalog, a_missing_password_is_retried_three_times_then_when_asked) {
-  const auto dir = temp_dir("retries");
-  set_env("MARIADB_SHELL_USER_CONFIG_HOME", dir.string());
-  set_env("MARIADB_SHELL_CREDENTIAL_STORE_HELPER", "plaintext");
+  const Private_store private_store("retries");
   {
     Live_catalog_options o;
     o.secrets.shell_bin_dir = MDBLS_SHELL_BIN_DIR;
@@ -276,9 +297,6 @@ TEST(Live_catalog, a_missing_password_is_retried_three_times_then_when_asked) {
     settle(8);
     EXPECT_EQ(live.attempts(), 8u);
   }
-  set_env("MARIADB_SHELL_CREDENTIAL_STORE_HELPER", "");
-  set_env("MARIADB_SHELL_USER_CONFIG_HOME", "");
-  fs::remove_all(dir);
 }
 
 TEST(Workspace_catalog, folds_files_in_order) {

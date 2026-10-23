@@ -28,6 +28,7 @@ endif()
 
 add_executable(run_unit_tests ${_unit_test_sources})
 mdbls_target_warnings(run_unit_tests)
+mdbls_sanitizer_defaults(run_unit_tests)
 target_link_libraries(run_unit_tests PRIVATE
   mariadbparser
   sqlsplitter

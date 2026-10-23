@@ -28,7 +28,7 @@ import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
-from lsp_client import Client, Lsp_error  # noqa: E402
+from lsp_client import Client, Lsp_error, Request_error  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "tests" / "fixtures" / "sql"
@@ -193,6 +193,48 @@ class Diagnostics(Lsp_test):
         for token in begun:
             c.wait_notification("$/progress",
                                 lambda p, t=token: p["token"] == t and p["value"]["kind"] == "end")
+
+    def progress_kinds(self, c):
+        with c.cond:
+            return [m["params"]["value"]["kind"] for _, m in c.notifications
+                    if m["method"] == "$/progress"]
+
+    def test_progress_accepted_after_the_check_is_begun_and_ended(self):
+        c = self.client
+        held = []
+
+        def hold(msg):
+            if msg["method"] != "window/workDoneProgress/create":
+                return None
+            held.append(msg)
+            return Client.NO_ANSWER
+
+        c.request_handler = hold
+        c.initialize({"progressThreshold": 1}, capabilities={"window": {"workDoneProgress": True}})
+        c.open(URI, SAKILA)
+        c.wait_notification("mariadb/parseProgress", lambda p: p["done"], 30)
+        self.assertEqual(len(held), 1)
+        self.assertEqual(self.progress_kinds(c), [])
+        # Accepted only now: begun and ended, so the client's token ends.
+        c._send({"jsonrpc": "2.0", "id": held[0]["id"], "result": None})
+        c.wait_notification("$/progress", lambda p: p["value"]["kind"] == "end", 30)
+        self.assertEqual(self.progress_kinds(c), ["begin", "end"])
+
+    def test_declined_progress_is_never_reported(self):
+        c = self.client
+
+        def decline(msg):
+            if msg["method"] == "window/workDoneProgress/create":
+                raise Request_error("no progress here", -32603)
+            return None
+
+        c.request_handler = decline
+        c.initialize({"progressThreshold": 1}, capabilities={"window": {"workDoneProgress": True}})
+        c.open(URI, SAKILA * 20)
+        c.wait_notification("mariadb/parseProgress", lambda p: p["done"], 60)
+        # A request after the check: the declining answer was read before it.
+        c.request("textDocument/documentSymbol", {"textDocument": {"uri": URI}})
+        self.assertEqual(self.progress_kinds(c), [])
 
     def test_many_quick_edits(self):
         c = self.client

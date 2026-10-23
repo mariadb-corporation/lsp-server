@@ -1077,6 +1077,19 @@ on Linux; `build-release.yml`, on a push to `release/candidate`, builds on the s
 release platforms and triplets (Rocky 9 x64/arm64, macOS arm64/x64, Windows x64/arm64).
 The CPack zip stays for trying a build on its own.
 
+Status (2026-10-23): sanitizers and fuzzing. `-DWITH_ASAN=ON`, `-DWITH_UBSAN=ON` (the
+shell's option names) for the whole tree, with the sanitizers' defaults linked into each
+binary (leaks reported on macOS too; suppressed: the stdin reader the server detaches at
+exit, and libFuzzer's RSS monitor); `-DWITH_FUZZERS=ON` adds `fuzz/` with three libFuzzer targets run by ctest
+(`splitter_fuzz`, `edit_fuzz`, `format_fuzz`, see `docs/language-server.md` "Sanitizers
+and fuzzing"). On macOS arm64 the unit, CLI and e2e tests pass under ASan, UBSan and LSan
+with nothing reported; the one finding was RapidJSON's SIMD scan reading past a string
+within its aligned block, now off in sanitizer builds. 15 minutes of each fuzz target
+(4 processes; 1.95 M, 123 K and 289 K inputs) found nothing. `sanitizers.yml` (clang,
+`-DWITH_FUZZERS=ON`) runs on a push to `release/candidate` and by hand, not on pull
+requests (the user's choice, 2026-10-23). Open: TSan, Valgrind (Linux only), static analysis, the RSS and
+latency gates.
+
 ### P8 — Formatting (added 2026-10-18)
 
 `textDocument/formatting` and `rangeFormatting`, and `mariadb-lsp format FILE`. The
