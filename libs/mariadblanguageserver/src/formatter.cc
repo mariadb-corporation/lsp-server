@@ -640,12 +640,25 @@ class Builder {
     for (uint32_t n = 0; n < t_.size(); ++n) {
       if (t_.is_token(n)) leaves_[t_.node(n).first_token] = n;
     }
+    lines_before_.assign(tokens.size(), 0);
+    lines_through_.assign(tokens.size(), 0);
+    uint32_t lines = 0;  // gaps and tokens with a line break so far
     uint32_t prev = npos;
     for (uint32_t j = 0; j < tokens.size(); ++j) {
-      if (tokens[j].begin == tokens[j].end) continue;
-      if (prev != npos && !read_gap(text_.substr(tokens[prev].end, tokens[j].begin - tokens[prev].end), &gaps_[j])) {
-        ok_ = false;
+      if (tokens[j].begin == tokens[j].end) {
+        lines_before_[j] = lines_through_[j] = lines;
+        continue;
       }
+      if (prev != npos) {
+        const std::string_view gap = text_.substr(tokens[prev].end, tokens[j].begin - tokens[prev].end);
+        if (!read_gap(gap, &gaps_[j])) ok_ = false;
+        if (gap.find('\n') != std::string_view::npos) ++lines;
+      }
+      lines_before_[j] = lines;
+      if (text_.substr(tokens[j].begin, tokens[j].end - tokens[j].begin).find('\n') != std::string_view::npos) {
+        ++lines;
+      }
+      lines_through_[j] = lines;
       prev = j;
     }
     mark_statement_clauses();
@@ -718,8 +731,14 @@ class Builder {
     return npos;
   }
 
-  // Whether node n spans lines in the original.
-  bool spans_lines(uint32_t n) const { return t_.text(text_, n).find('\n') != std::string_view::npos; }
+  // Whether node n spans lines in the original: a line break in one of
+  // its tokens or the gaps between them, counted once for the whole text.
+  bool spans_lines(uint32_t n) const {
+    const uint32_t j = first_token(n);
+    if (j == npos) return false;
+    const auto &node = t_.node(n);
+    return lines_through_[node.first_token + node.token_count - 1] > lines_before_[j];
+  }
 
   // The separator before token j: `kind`, with the comments of the gap
   // before it.  A comment on a line of its own breaks the line before it; a
@@ -1277,17 +1296,39 @@ class Builder {
     }
   }
 
+  // Whether routine n has a body or a clause with tokens, found on the tree
+  // as routine_parts() would, without building them.
+  bool has_routine_layout(uint32_t n) const {
+    const int parent = symbol(n);
+    for (const uint32_t k : t_.children(n)) {
+      const int sym = symbol(k);
+      if (sym == s_.sp_tail_standalone || sym == s_.sf_c_chistics_and_body_standalone ||
+          sym == s_.ev_alter_on_schedule_completion || sym == s_.opt_ev_sql_stmt) {
+        if (has_routine_layout(k)) return true;
+        continue;
+      }
+      const bool part = sym == s_.sp_c_chistics || sym == s_.sp_a_chistics || sym == s_.sp_proc_stmt ||
+                        sym == s_.sp_proc_stmt_in_returns_clause || sym == s_.ev_sql_stmt ||
+                        s_.event_clauses.has(sym) ||
+                        (sym == s_.on && (parent == s_.event_tail || parent == s_.ev_alter_on_schedule_completion));
+      if (part && first_token(k) != npos) return true;
+    }
+    return false;
+  }
+
   // The header on its line; the characteristics or clauses one level
   // deeper on lines of their own when the statement breaks; the body on a
   // line of its own, a block at the header's level, any other statement one
   // level deeper; an event's DO at the header's level, its body after it.
   Piece routine(uint32_t n) {
+    // Nothing to lay out without a body or clauses (ALTER may have either):
+    // its children as they stand, built once.
+    if (!has_routine_layout(n)) return children(n);
     Routine_parts r;
     routine_parts(n, &r);
     // No space before the parameter list: p(IN a INT).
     Piece out = join(std::move(r.words.head), [&](size_t k) { return k == r.params ? Sep::none : Sep::space; });
-    // Nothing to lay out without a body or clauses (ALTER may have either).
-    if (out.empty() || (r.body.empty() && r.words.clauses.empty())) return children(n);
+    if (out.empty()) return children(n);
     std::vector<Doc> parts{std::move(out.doc)};
     append_clauses(std::move(r.words.clauses), &parts);
     append_body(std::move(r), &parts);
@@ -1555,6 +1596,10 @@ class Builder {
   const Symbols &s_;
   std::vector<Gap> gaps_;
   std::vector<uint32_t> leaves_;
+  // By token: the gaps and tokens with a line break before it (its gap
+  // included) and up to its end.
+  std::vector<uint32_t> lines_before_;
+  std::vector<uint32_t> lines_through_;
   std::vector<bool> clause_starts_;  // by token
   // By token: a compound statement starts, and whether it is BEGIN ... END.
   enum class Block : uint8_t { none, compound, begin };
