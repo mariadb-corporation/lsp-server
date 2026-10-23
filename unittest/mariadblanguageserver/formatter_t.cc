@@ -748,12 +748,23 @@ TEST(Formatter, a_query_inside_explain_or_create_table_is_laid_out) {
   // Like a view's: the query on a line of its own under the header.
   EXPECT_EQ(with_clauses("CREATE TABLE c AS SELECT * FROM t\nWHERE x = 1;", true, true),
             "CREATE TABLE c AS\n  SELECT *\n  FROM t\n  WHERE x = 1;");
+  // After the columns too, while the columns and `)` stay at the header's
+  // level.
   EXPECT_EQ(with_clauses("CREATE TABLE s (a INT) SELECT 1 AS a;", true, true),
-            "CREATE TABLE s (\n  a INT\n)\nSELECT 1 AS a;");
+            "CREATE TABLE s (\n  a INT\n)\n  SELECT 1 AS a;");
+  EXPECT_EQ(with_clauses("create table t3 (a int) as select a from t where b = 1;", true, true),
+            "CREATE TABLE t3 (\n  a INT\n) AS\n  SELECT a\n  FROM t\n  WHERE b = 1;");
+  EXPECT_EQ(with_clauses("create table t3 (a int) as select a from t where b = 1;", false, false),
+            "CREATE TABLE t3 (\n  a INT\n) AS\nSELECT a\nFROM t\nWHERE b = 1;");
 }
 
 TEST(Formatter, rows_fill_the_line_after_values) {
   EXPECT_EQ(with_clauses("insert into t (a, b) values (1, 2);", true, true), "INSERT INTO t (a, b) VALUES (1, 2);");
+  // VALUE, which the lexer reads as VALUES, and VALUES(a) after ON
+  // DUPLICATE KEY UPDATE, which it reads as VALUE, are recased too.
+  EXPECT_EQ(with_clauses("insert into t value (1);", true, true), "INSERT INTO t VALUE (1);");
+  EXPECT_EQ(with_clauses("insert into t (a) values (1) on duplicate key update a = values(a);", true, true),
+            "INSERT INTO t (a) VALUES (1) ON DUPLICATE KEY UPDATE a = VALUES(a);");
   EXPECT_EQ(with_clauses("insert into film (film_id, title, rating) values (1, 'ACADEMY DINOSAUR', 'PG'), (2, 'ACE "
                          "GOLDFINGER', 'G'), (3, 'ADAPTATION HOLES', null);",
                          true, true),
@@ -912,3 +923,4 @@ TEST(Formatter, a_range_formats_the_statements_it_touches) {
 }
 
 }  // namespace mdbls
+

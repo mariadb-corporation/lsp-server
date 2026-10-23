@@ -37,6 +37,7 @@ struct Kind_syms {
   int opt_create_select = grammar::symbol("opt_create_select");
   int describe = grammar::symbol("describe");
   int analyze_stmt_command = grammar::symbol("analyze_stmt_command");
+  int explainable_command = grammar::symbol("explainable_command");
   int grant = grammar::symbol("grant");
   int revoke = grammar::symbol("revoke");
 };
@@ -46,12 +47,24 @@ const Kind_syms &syms() {
   return s;
 }
 
+bool is_query_or_dml(int sym) {
+  const auto &s = syms();
+  return sym == s.select || sym == s.select_into || sym == s.insert || sym == s.replace || sym == s.update ||
+         sym == s.delete_;
+}
+
 }  // namespace
 
 bool has_clauses(const Syntax_tree &tree, uint32_t n) {
   const auto &s = syms();
   const int sym = tree.node(n).symbol;
   constexpr uint32_t npos = Syntax_tree::npos;
+  // EXPLAIN or ANALYZE of a query or DML statement; not DESCRIBE t or
+  // EXPLAIN FOR CONNECTION.
+  if (sym == s.describe || sym == s.analyze_stmt_command) {
+    const uint32_t cmd = tree.child(n, s.explainable_command);
+    return cmd != npos && tree.children(cmd).size() == 1 && is_query_or_dml(tree.node(tree.children(cmd)[0]).symbol);
+  }
   if (sym == s.create || sym == s.alter) {
     if (tree.child(n, s.view) != npos || tree.child(n, s.user) != npos) return true;
     // CREATE TABLE ... AS SELECT without columns (theirs are lines of their
@@ -61,9 +74,7 @@ bool has_clauses(const Syntax_tree &tree, uint32_t n) {
     return select != npos && tree.child(body, s.create_field_list_parens) == npos &&
            tree.begin(select) != tree.end(select);
   }
-  return sym == s.select || sym == s.select_into || sym == s.insert || sym == s.replace || sym == s.update ||
-         sym == s.delete_ || sym == s.describe || sym == s.analyze_stmt_command || sym == s.grant ||
-         sym == s.revoke;
+  return is_query_or_dml(sym) || sym == s.grant || sym == s.revoke;
 }
 
 }  // namespace mdbls

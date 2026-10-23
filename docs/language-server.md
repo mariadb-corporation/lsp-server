@@ -229,7 +229,9 @@ SELECT f.title, c.name AS category, count(r.rental_id) AS rentals,
   one level deeper, whatever its length, and the closing parenthesis and the table
   options on the next line (`) ENGINE=InnoDB`), filling it up to the width and continuing
   one level deeper; the partitioning on a line after that, its partitions (and their
-  subpartitions) one per line like the columns.
+  subpartitions) one per line like the columns. A `[AS] SELECT` after the columns starts
+  a line of its own, the query and its clauses one level deeper (`) AS`, then the query),
+  as without columns; with `indentClauses` off, at the statement's indentation.
   `ALTER TABLE` with several changes puts each on a line one level deeper; a single
   change stays on the statement's line. Inside a column the words keep their spacing.
 - **Routines:** the header stays on its line (`CREATE PROCEDURE p(IN a INT)`, a

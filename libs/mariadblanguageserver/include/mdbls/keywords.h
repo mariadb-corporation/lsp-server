@@ -31,6 +31,9 @@ namespace mdbls {
 // (sql_functions[]) are left out.  Empty for a terminal no word spells.
 const std::vector<std::string_view> &keyword_spellings(int symbol);
 
+// Whether `word` spells a keyword of the keyword table (any case).
+bool is_keyword_word(std::string_view word);
+
 // Whether terminal `symbol` is a keyword that can also stand for a name
 // (a non-reserved keyword: STATUS, USER, COMMENT), found by asking the
 // parser whether it accepts the keyword as a table name.

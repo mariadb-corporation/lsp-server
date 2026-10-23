@@ -429,12 +429,14 @@ struct Symbols {
       grammar::symbol("sp_unlabeled_block_not_atomic"),
   };
   // Blocks, IF, CASE and loops: their statements on lines of their own.
-  Symbol_set compounds = {
-      grammar::symbol("sp_unlabeled_block"), grammar::symbol("sp_labeled_block"),
-      grammar::symbol("sp_unlabeled_block_not_atomic"), grammar::symbol("sp_proc_stmt_if"),
-      grammar::symbol("sp_labeled_control"), grammar::symbol("sp_unlabeled_control"),
-      case_stmt_specification,
-  };
+  Symbol_set compounds = [this] {
+    Symbol_set out = blocks;
+    for (const int s : {grammar::symbol("sp_proc_stmt_if"), grammar::symbol("sp_labeled_control"),
+                        grammar::symbol("sp_unlabeled_control"), case_stmt_specification}) {
+      out.add(s);
+    }
+    return out;
+  }();
   // The parts of those that only group their words and statement lists.
   Symbol_set compound_parts = {
       grammar::symbol("sp_if"), grammar::symbol("sp_elseifs"), grammar::symbol("loop_body"),
@@ -666,6 +668,7 @@ class Builder {
   struct Piece {
     Doc doc;
     uint32_t first = npos;  // the first non-empty token
+    bool indented = false;  // one level deeper, the line break before it too
     bool empty() const { return first == npos; }
   };
 
@@ -683,14 +686,12 @@ class Builder {
   // line breaks before it as before a query's clauses.
   void mark_statement_clauses() {
     clause_starts_.assign(t_.tokens().size(), false);
-    block_starts_.assign(t_.tokens().size(), false);
-    begin_starts_.assign(t_.tokens().size(), false);
+    block_starts_.assign(t_.tokens().size(), Block::none);
     for (uint32_t n = 0; n < t_.size(); ++n) {
       const auto &node = t_.node(n);
       if (s_.compounds.has(node.symbol)) {
         if (const uint32_t j = first_token(n); j != npos) {
-          block_starts_[j] = true;
-          if (s_.blocks.has(node.symbol)) begin_starts_[j] = true;
+          block_starts_[j] = s_.blocks.has(node.symbol) ? Block::begin : Block::compound;
         }
       }
       if (node.parent == npos) continue;
@@ -804,10 +805,14 @@ class Builder {
     }
   }
 
-  // A keyword, and not one standing for a name.
+  // A keyword, and not one standing for a name.  The lexer turns some
+  // keywords into others (VALUE into VALUES, VALUES into VALUE_SYM in ON
+  // DUPLICATE KEY UPDATE): a keyword token spelled as any keyword is one.
   bool is_keyword(uint32_t j, std::string_view word) const {
     const auto &spellings = keyword_spellings(token(j).symbol);
-    if (std::none_of(spellings.begin(), spellings.end(), [&](std::string_view s) { return iequals(s, word); })) {
+    if (spellings.empty()) return false;
+    if (std::none_of(spellings.begin(), spellings.end(), [&](std::string_view s) { return iequals(s, word); }) &&
+        !is_keyword_word(word)) {
       return false;
     }
     const uint32_t leaf_node = leaves_[j];
@@ -840,8 +845,15 @@ class Builder {
       if (out.empty()) {
         out.first = p.first;
       } else {
-        const Sep kind = clause_starts_[p.first] ? Sep::line : block_starts_[p.first] ? Sep::space : sep(k);
-        parts.push_back(separator(p.first, kind));
+        const Sep kind = clause_starts_[p.first]                ? Sep::line
+                         : block_starts_[p.first] != Block::none ? Sep::space
+                                                                 : sep(k);
+        Doc s = separator(p.first, kind);
+        if (p.indented) {
+          parts.push_back(nest(o_.indent, concat(std::move(s), std::move(p.doc))));
+          continue;
+        }
+        parts.push_back(std::move(s));
       }
       parts.push_back(std::move(p.doc));
     }
@@ -880,10 +892,24 @@ class Builder {
     if (sym == s_.case_stmt_specification) return case_statement(n);
     if (sym == s_.sp_parenthesized_pdparam_list || sym == s_.sp_parenthesized_fdparam_list) return parameters(n);
     if (s_.compounds.has(sym)) return compound(n);
+    if (sym == s_.opt_create_select) return create_select(n);
     // A statement of a routine's body: its clauses break with it, apart
     // from the routine's, and always when it was on several lines.
     if (sym == s_.sp_proc_stmt || sym == s_.sp_decl) return body_statement(n);
     return children(n);
+  }
+
+  // CREATE TABLE's [AS] SELECT after the columns: with the clauses
+  // indented, the query and its clauses one level deeper, as without
+  // columns (has_clauses); the columns and `)` stay at the header's level.
+  Piece create_select(uint32_t n) {
+    Piece p = children(n);
+    const uint32_t body = t_.node(n).parent;
+    if (body == npos || t_.child(body, s_.create_field_list_parens) == npos) return p;
+    bool routine = false;
+    for (uint32_t a = body; a != npos && !routine; a = t_.node(a).parent) routine = symbol(a) == s_.sp_proc_stmt;
+    p.indented = routine ? o_.indent_routine_clauses : o_.indent_clauses;
+    return p;
   }
 
   // With `indent_routine_clauses`, a query or DML statement, or a cursor's
@@ -1279,7 +1305,7 @@ class Builder {
       parts->push_back(std::move(r.intro.doc));
       parts->push_back(separator(r.body.first, Sep::space));
       parts->push_back(std::move(r.body.doc));
-    } else if (begin_starts_[r.body.first]) {
+    } else if (block_starts_[r.body.first] == Block::begin) {
       parts->push_back(separator(r.body.first, Sep::line));
       parts->push_back(std::move(r.body.doc));
     } else {
@@ -1530,8 +1556,9 @@ class Builder {
   std::vector<Gap> gaps_;
   std::vector<uint32_t> leaves_;
   std::vector<bool> clause_starts_;  // by token
-  std::vector<bool> block_starts_;   // by token: a compound statement starts
-  std::vector<bool> begin_starts_;   // by token: a BEGIN ... END block starts
+  // By token: a compound statement starts, and whether it is BEGIN ... END.
+  enum class Block : uint8_t { none, compound, begin };
+  std::vector<Block> block_starts_;
   bool ok_ = true;
 };
 
