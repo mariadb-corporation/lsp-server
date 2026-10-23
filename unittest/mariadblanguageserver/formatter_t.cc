@@ -198,12 +198,10 @@ TEST(Formatter, other_statements_are_left_alone) {
   EXPECT_EQ(layout(versioned), versioned);
   const std::string broken = "SELECT a FROM WHERE;";
   EXPECT_EQ(layout(broken), broken);
-  // Rows, tables made from a query, a UDF, a transaction's BEGIN are not
-  // laid out.
+  // A UDF, a transaction's BEGIN, DESCRIBE of a table are not laid out.
   for (const std::string sql :
-       {"INSERT INTO t SET a = 1;", "INSERT INTO t (a, b) VALUES (1, 'select');",
-        "CREATE TABLE c AS SELECT * FROM t WHERE x = 1;", "CREATE FUNCTION f RETURNS INTEGER SONAME 'f.so';",
-        "begin work;"}) {
+       {"CREATE FUNCTION f RETURNS INTEGER SONAME 'f.so';", "begin work;", "describe some_table;",
+        "analyze table some_table;"}) {
     EXPECT_EQ(layout(sql, 20), sql);
   }
 }
@@ -326,10 +324,8 @@ TEST(Formatter, create_table_puts_each_column_and_key_on_a_line) {
   EXPECT_EQ(layout("CREATE TABLE c ( -- the columns\nid INT, -- the id\n/* the name */\nname TEXT\n-- last\n);", 80, true,
                    "\t"),
             "CREATE TABLE c ( -- the columns\n\tid INT, -- the id\n\t/* the name */\n\tname TEXT\n\t-- last\n);");
-  // Nothing to lay out in a copy, nor in a table made from a query.
-  for (const std::string sql : {"CREATE TABLE l LIKE t;", "CREATE TABLE s (a INT) SELECT 1 AS a;"}) {
-    EXPECT_EQ(layout(sql), sql);
-  }
+  // Nothing to lay out in a copy.
+  EXPECT_EQ(layout("CREATE TABLE l LIKE t;"), "CREATE TABLE l LIKE t;");
 }
 
 TEST(Formatter, partitions_go_one_per_line_like_columns) {
@@ -798,6 +794,182 @@ TEST(Formatter, clauses_go_one_level_deeper_by_default) {
   }
 }
 
+TEST(Formatter, a_query_inside_explain_or_create_table_is_laid_out) {
+  EXPECT_EQ(with_clauses("explain select a, b from customer where store_id = 1 and active = 1 order by last_name;",
+                         true, true),
+            "EXPLAIN SELECT a, b\n  FROM customer\n  WHERE store_id = 1 AND active = 1\n  ORDER BY last_name;");
+  EXPECT_EQ(with_clauses("ANALYZE FORMAT=JSON SELECT a FROM t\nWHERE b = 1;", true, true),
+            "ANALYZE FORMAT=JSON SELECT a\n  FROM t\n  WHERE b = 1;");
+  // Like a view's: the query on a line of its own under the header.
+  EXPECT_EQ(with_clauses("CREATE TABLE c AS SELECT * FROM t\nWHERE x = 1;", true, true),
+            "CREATE TABLE c AS\n  SELECT *\n  FROM t\n  WHERE x = 1;");
+  // After the columns too, while the columns and `)` stay at the header's
+  // level.
+  EXPECT_EQ(with_clauses("CREATE TABLE s (a INT) SELECT 1 AS a;", true, true),
+            "CREATE TABLE s (\n  a INT\n)\n  SELECT 1 AS a;");
+  EXPECT_EQ(with_clauses("create table t3 (a int) as select a from t where b = 1;", true, true),
+            "CREATE TABLE t3 (\n  a INT\n) AS\n  SELECT a\n  FROM t\n  WHERE b = 1;");
+  EXPECT_EQ(with_clauses("create table t3 (a int) as select a from t where b = 1;", false, false),
+            "CREATE TABLE t3 (\n  a INT\n) AS\nSELECT a\nFROM t\nWHERE b = 1;");
+  // A comment before AS puts it on a line one level deeper, with the query.
+  EXPECT_EQ(with_clauses("CREATE TABLE t (a INT) -- c\nAS SELECT 1;", true, true),
+            "CREATE TABLE t (\n  a INT\n) -- c\n  AS\n  SELECT 1;");
+  EXPECT_EQ(with_clauses("CREATE TABLE t (a INT)\n-- own line\nAS SELECT 1;", true, true),
+            "CREATE TABLE t (\n  a INT\n)\n  -- own line\n  AS\n  SELECT 1;");
+}
+
+TEST(Formatter, rows_fill_the_line_after_values) {
+  EXPECT_EQ(with_clauses("insert into t (a, b) values (1, 2);", true, true), "INSERT INTO t (a, b) VALUES (1, 2);");
+  // VALUE, which the lexer reads as VALUES, and VALUES(a) after ON
+  // DUPLICATE KEY UPDATE, which it reads as VALUE, are recased too.
+  EXPECT_EQ(with_clauses("insert into t value (1);", true, true), "INSERT INTO t VALUE (1);");
+  EXPECT_EQ(with_clauses("insert into t (a) values (1) on duplicate key update a = values(a);", true, true),
+            "INSERT INTO t (a) VALUES (1) ON DUPLICATE KEY UPDATE a = VALUES(a);");
+  EXPECT_EQ(with_clauses("insert into film (film_id, title, rating) values (1, 'ACADEMY DINOSAUR', 'PG'), (2, 'ACE "
+                         "GOLDFINGER', 'G'), (3, 'ADAPTATION HOLES', null);",
+                         true, true),
+            "INSERT INTO film (film_id, title, rating)\n"
+            "  VALUES (1, 'ACADEMY DINOSAUR', 'PG'), (2, 'ACE GOLDFINGER', 'G'),\n"
+            "         (3, 'ADAPTATION HOLES', NULL);");
+  EXPECT_EQ(with_clauses("INSERT INTO t SET a = 1, bbbbbbbbbbbbbbbbbb = 2, cccccccccccccccccccc = 3, dddddddddddddd = 4, "
+                         "e = 5;",
+                         true, true),
+            "INSERT INTO t\n  SET a = 1, bbbbbbbbbbbbbbbbbb = 2, cccccccccccccccccccc = 3,\n"
+            "      dddddddddddddd = 4, e = 5;");
+}
+
+TEST(Formatter, rows_of_a_dump_are_left_as_they_are) {
+  // An INSERT over 64 KB.
+  std::string big = "INSERT INTO t VALUES (0,'x')";
+  for (int i = 1; big.size() <= 64 * 1024; ++i) big += ",(" + std::to_string(i) + ",'x')";
+  big += ";";
+  EXPECT_EQ(with_clauses(big, true, true), big);
+  // Short INSERTs in a text over 4 MB: left as they are when the whole
+  // text is formatted, laid out when a range of it is.
+  std::string text;
+  const std::string row = "insert into t (a, b) values (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd'), (5, 'e'), (6, 'f');\n";
+  while (text.size() <= 4 * 1024 * 1024) text += row;
+  const auto index = Statement_index::build(text);
+  Parser_cache cache;
+  EXPECT_TRUE(format_sql(text, index, 0, static_cast<uint32_t>(text.size()), cache).empty());
+  const auto edits = format_sql(text, index, 0, 1, cache);
+  ASSERT_EQ(edits.size(), 1u);
+  EXPECT_EQ(edits[0].text, "INSERT INTO t (a, b)\n  VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd'), (5, 'e'), (6, 'f')");
+}
+
+TEST(Formatter, grant_revoke_and_users_put_their_clauses_on_lines) {
+  EXPECT_EQ(with_clauses("grant select on db.t to u;", true, true), "GRANT SELECT ON db.t TO u;");
+  EXPECT_EQ(with_clauses("grant select, insert, update, delete, create, drop, references, index, alter on db.* to "
+                         "'app'@'%', 'other'@'localhost' with grant option;",
+                         true, true),
+            "GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, REFERENCES, INDEX, ALTER\n"
+            "  ON db.*\n"
+            "  TO 'app'@'%', 'other'@'localhost'\n"
+            "  WITH GRANT OPTION;");
+  EXPECT_EQ(with_clauses("REVOKE SELECT, INSERT ON db.t\nFROM 'app'@'%';", true, true),
+            "REVOKE SELECT, INSERT\n  ON db.t\n  FROM 'app'@'%';");
+  // The comma of REVOKE ALL PRIVILEGES, GRANT OPTION is the statement's own;
+  // a role's GRANT and REVOKE space their words like the privileges'.
+  EXPECT_EQ(with_clauses("revoke all privileges , grant option from u;", true, true),
+            "REVOKE ALL PRIVILEGES, GRANT OPTION FROM u;");
+  EXPECT_EQ(with_clauses("grant   r1   to   u  with  admin  option;\nrevoke   r1   from   u;", true, true),
+            "GRANT r1 TO u WITH ADMIN OPTION;\nREVOKE r1 FROM u;");
+  EXPECT_EQ(with_clauses("create user 'u'@'%' identified by 'p' require ssl with max_queries_per_hour 10 password "
+                         "expire account lock;",
+                         true, true),
+            "CREATE USER 'u'@'%' IDENTIFIED BY 'p'\n"
+            "  REQUIRE SSL\n"
+            "  WITH MAX_QUERIES_PER_HOUR 10\n"
+            "  PASSWORD EXPIRE ACCOUNT LOCK;");
+}
+
+TEST(Formatter, alter_event_and_procedure_are_laid_out_like_routines) {
+  EXPECT_EQ(with_clauses("alter event e on schedule every 1 day on completion preserve rename to f enable comment "
+                         "'nightly cleanup' do delete from log where ts < now() - interval 1 day;",
+                         true, true),
+            "ALTER EVENT e\n"
+            "  ON SCHEDULE EVERY 1 DAY\n"
+            "  ON COMPLETION PRESERVE\n"
+            "  RENAME TO f\n"
+            "  ENABLE\n"
+            "  COMMENT 'nightly cleanup'\n"
+            "DO DELETE FROM log WHERE ts < now() - INTERVAL 1 DAY;");
+  EXPECT_EQ(with_clauses("alter procedure p comment 'a procedure with a long comment that does not fit' sql security "
+                         "invoker;",
+                         true, true),
+            "ALTER PROCEDURE p\n  COMMENT 'a procedure with a long comment that does not fit'\n  SQL SECURITY INVOKER;");
+  EXPECT_EQ(with_clauses("alter function f comment 'x';", true, true), "ALTER FUNCTION f COMMENT 'x';");
+}
+
+TEST(Formatter, rest_sql_is_laid_out_as_show_create_writes_it) {
+  EXPECT_EQ(with_clauses("CREATE OR REPLACE REST VIEW /city ON SERVICE /svc SCHEMA /sakila AS sakila.city CLASS MyCity "
+                         "@INSERT { cityId: city_id @KEY @SORTABLE, country: sakila.country @UNNEST { countryId: "
+                         "country_id } } AUTHENTICATION REQUIRED COMMENT \"x\" OPTIONS { \"a\": { \"b\": true }, \"c\": "
+                         "[1, null] };",
+                         true, true),
+            "CREATE OR REPLACE REST VIEW /city\n"
+            "  ON SERVICE /svc SCHEMA /sakila\n"
+            "  AS sakila.city CLASS MyCity @INSERT {\n"
+            "    cityId: city_id @KEY @SORTABLE,\n"
+            "    country: sakila.country @UNNEST {\n"
+            "      countryId: country_id\n"
+            "    }\n"
+            "  }\n"
+            "  AUTHENTICATION REQUIRED\n"
+            "  COMMENT \"x\"\n"
+            "  OPTIONS {\n"
+            "    \"a\": {\n"
+            "      \"b\": true\n"
+            "    },\n"
+            "    \"c\": [\n"
+            "      1,\n"
+            "      null\n"
+            "    ]\n"
+            "  };");
+  // Short ones stay on their line; paths and vendors keep their case.
+  EXPECT_EQ(with_clauses("create rest content set /scripts on service /svc;", true, true),
+            "CREATE REST CONTENT SET /scripts ON SERVICE /svc;");
+  EXPECT_EQ(with_clauses("CREATE REST AUTH APP \"MariaDB\" VENDOR MariaDB ALLOW NEW USERS TO REGISTER DEFAULT ROLE "
+                         "\"Full Access\";",
+                         true, true),
+            "CREATE REST AUTH APP \"MariaDB\"\n"
+            "  VENDOR MariaDB\n"
+            "  ALLOW NEW USERS TO REGISTER\n"
+            "  DEFAULT ROLE \"Full Access\";");
+  EXPECT_EQ(with_clauses("CREATE OR REPLACE REST SERVICE /svc ENABLED COMMENT \"A simple REST service\" AUTHENTICATION "
+                         "PATH \"/authentication\" REDIRECTION DEFAULT VALIDATION DEFAULT;",
+                         true, true),
+            "CREATE OR REPLACE REST SERVICE /svc\n"
+            "  ENABLED\n"
+            "  COMMENT \"A simple REST service\"\n"
+            "  AUTHENTICATION\n"
+            "    PATH \"/authentication\"\n"
+            "    REDIRECTION DEFAULT\n"
+            "    VALIDATION DEFAULT;");
+}
+
+TEST(Formatter, every_new_statement_layout_is_its_own_layout) {
+  const std::vector<std::string> statements = {
+      "EXPLAIN SELECT c.name, o.total FROM customer AS c JOIN orders AS o ON o.customer_id = c.id WHERE o.total > 100",
+      "CREATE TABLE c AS SELECT a, b, count(*) AS n FROM t WHERE x = 1 GROUP BY a, b HAVING count(*) > 1",
+      "INSERT INTO film (film_id, title, rating) VALUES (1, 'ACADEMY DINOSAUR', 'PG'), (2, 'ACE GOLDFINGER', 'G'), "
+      "(3, 'ADAPTATION HOLES', 'NC-17') ON DUPLICATE KEY UPDATE title = VALUES(title)",
+      "GRANT SELECT, INSERT, UPDATE ON db.* TO 'app'@'%', 'other'@'localhost' WITH GRANT OPTION",
+      "CREATE USER 'u'@'%' IDENTIFIED BY 'p' REQUIRE SSL WITH MAX_QUERIES_PER_HOUR 10 PASSWORD EXPIRE",
+      "ALTER EVENT e ON SCHEDULE EVERY 1 DAY COMMENT 'x' DO DELETE FROM log WHERE ts < NOW()",
+      "CREATE OR REPLACE REST VIEW /city ON SERVICE /svc SCHEMA /sakila AS sakila.city CLASS MyCity { cityId: city_id "
+      "@KEY, country: sakila.country { countryId: country_id } } AUTHENTICATION REQUIRED OPTIONS { \"a\": [1, 2] }",
+  };
+  for (const auto &st : statements) {
+    for (const bool indented : {true, false}) {
+      for (const size_t width : {0, 20, 40, 80, 120}) {
+        const std::string once = layout(st + ";", width, true, "  ", indented);
+        EXPECT_EQ(layout(once, width, true, "  ", indented), once) << "width " << width << "\n" << once;
+      }
+    }
+  }
+}
+
 TEST(Formatter, an_events_body_indents_its_clauses_once) {
   const std::string sql = "DELIMITER $$\nCREATE EVENT e ON SCHEDULE AT '2035-12-31' DO SELECT a FROM t\nWHERE b = 1$$\n"
                           "DELIMITER ;\n";
@@ -817,3 +989,4 @@ TEST(Formatter, a_range_formats_the_statements_it_touches) {
 }
 
 }  // namespace mdbls
+

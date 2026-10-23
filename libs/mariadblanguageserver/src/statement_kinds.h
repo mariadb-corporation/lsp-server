@@ -29,8 +29,9 @@ namespace mdbls {
 
 // Whether node `n`, a verb_clause's child, is a statement whose clauses
 // (FROM, WHERE, SET, ...) start lines of their own one level deeper than
-// its first line: a query, INSERT, REPLACE, UPDATE, DELETE, CREATE or ALTER
-// VIEW.
+// its first line: a query, INSERT, REPLACE, UPDATE, DELETE, EXPLAIN or
+// ANALYZE of one, CREATE or ALTER VIEW or USER, CREATE TABLE ... AS SELECT
+// without columns, GRANT, REVOKE.
 bool has_clauses(const Syntax_tree &tree, uint32_t n);
 
 }  // namespace mdbls

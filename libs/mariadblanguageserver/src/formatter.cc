@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cctype>
 #include <deque>
+#include <initializer_list>
 #include <optional>
 
 #include "mdbls/keywords.h"
@@ -257,6 +258,24 @@ class Printer {
 
 // ---- from the parse tree to the layout
 
+// Grammar symbols, looked up in constant time (the builder asks for every
+// node of a statement: thousands for a long INSERT).
+class Symbol_set {
+ public:
+  Symbol_set(std::initializer_list<int> symbols) {
+    for (const int s : symbols) add(s);
+  }
+  void add(int s) {
+    if (s < 0) return;
+    if (static_cast<size_t>(s) >= has_.size()) has_.resize(static_cast<size_t>(s) + 1, false);
+    has_[static_cast<size_t>(s)] = true;
+  }
+  bool has(int s) const { return s >= 0 && static_cast<size_t>(s) < has_.size() && has_[static_cast<size_t>(s)]; }
+
+ private:
+  std::vector<bool> has_;
+};
+
 struct Symbols {
   int select = grammar::symbol("select");
   int select_into = grammar::symbol("select_into");
@@ -336,44 +355,107 @@ struct Symbols {
   int case_stmt_body = grammar::symbol("case_stmt_body");
   int else_clause_opt = grammar::symbol("else_clause_opt");
   int do_ = grammar::symbol("DO_SYM");
+  int opt_ev_sql_stmt = grammar::symbol("opt_ev_sql_stmt");
+  int ev_alter_on_schedule_completion = grammar::symbol("ev_alter_on_schedule_completion");
+  int sp_a_chistics = grammar::symbol("sp_a_chistics");
+  int event = grammar::symbol("EVENT_SYM");
+  int procedure = grammar::symbol("PROCEDURE_SYM");
+  int function = grammar::symbol("FUNCTION_SYM");
+  int user = grammar::symbol("USER_SYM");
+  int describe = grammar::symbol("describe");
+  int analyze_stmt_command = grammar::symbol("analyze_stmt_command");
+  int grant = grammar::symbol("grant");
+  int revoke = grammar::symbol("revoke");
+  int create_like = grammar::symbol("create_like");
+  int grant_privileges_command = grammar::symbol("grant_privileges_command");
+  int revoke_privileges = grammar::symbol("revoke_privileges");
+  int opt_require_clause = grammar::symbol("opt_require_clause");
+  int opt_resource_options = grammar::symbol("opt_resource_options");
+  int opt_account_locking = grammar::symbol("opt_account_locking_and_opt_password_expiration");
+  // REST SQL (MariaDB Shell's MRS statements).
+  int mrs_statement = grammar::symbol("mrs_statement");
+  int mrs_rest_results = grammar::symbol("mrs_rest_results");
+  int mrs_rest_authentication = grammar::symbol("mrs_rest_authentication");
+  int mrs_opt_binary = grammar::symbol("mrs_opt_binary");
+  int content = grammar::symbol("CONTENT_SYM");
+  int text_string = grammar::symbol("TEXT_STRING");
+  int mrs_json_value = grammar::symbol("mrs_json_value");
+  // The CREATE OR REPLACE REST VIEW ... at their start: words of the header.
+  Symbol_set rest_prefixes = [] {
+    Symbol_set out{};
+    for (int s = 0; s < mdbp_grammar_symbol_count(); ++s) {
+      const std::string_view n = grammar::name(s);
+      if (n.starts_with("mrs_") && n.ends_with("_prefix")) out.add(s);
+    }
+    return out;
+  }();
+  // Their options, each on a line of its own (left-recursive lists).
+  Symbol_set rest_option_lists = {
+      grammar::symbol("mrs_rest_metadata_options"), grammar::symbol("mrs_rest_service_options"),
+      grammar::symbol("mrs_rest_schema_options"), grammar::symbol("mrs_rest_object_options"),
+      grammar::symbol("mrs_rest_content_set_options"), grammar::symbol("mrs_alter_rest_content_set_options"),
+      grammar::symbol("mrs_rest_content_file_options"), grammar::symbol("mrs_rest_auth_app_options"),
+      grammar::symbol("mrs_user_options"), grammar::symbol("mrs_rest_role_options"),
+  };
+  // The parts that start a line of their own, as SHOW CREATE REST writes
+  // them: ON SERVICE ... SCHEMA ..., AS ..., FROM ..., VENDOR ..., NEW
+  // REQUEST PATH ..., PARAMETERS ..., [BINARY] CONTENT ...
+  Symbol_set rest_clauses = {
+      grammar::symbol("mrs_opt_on_service_schema_selector"), grammar::symbol("mrs_opt_on_service"),
+      grammar::symbol("mrs_opt_new_request_path"), grammar::symbol("mrs_opt_alter_view_class"),
+      grammar::symbol("mrs_opt_rest_parameters"), grammar::symbol("mrs_opt_identified_by"),
+      grammar::symbol("mrs_opt_extends"), grammar::symbol("mrs_opt_role_service"), mrs_opt_binary,
+      grammar::symbol("mrs_opt_rest_result"),
+      on, from, grammar::symbol("AS"), grammar::symbol("VENDOR_SYM"), grammar::symbol("NEW_SYM"),
+  };
+  // { fields }, { "json": ... }, [ ... ]: one entry per line.
+  Symbol_set rest_blocks = {
+      grammar::symbol("mrs_graphql_obj"), grammar::symbol("mrs_json_obj"), grammar::symbol("mrs_json_arr"),
+  };
+  // A row of INSERT ... VALUES.
+  Symbol_set rows = {grammar::symbol("no_braces"), grammar::symbol("no_braces_with_names")};
   int sp_cursor_stmt = grammar::symbol("sp_cursor_stmt");
   int sp_decl_body = grammar::symbol("sp_decl_body");
   // An event's clauses besides ON SCHEDULE, each on a line of its own.
-  std::vector<int> event_clauses = {
+  Symbol_set event_clauses = {
       grammar::symbol("opt_ev_on_completion"),
+      grammar::symbol("ev_on_completion"),
+      grammar::symbol("opt_ev_rename_to"),
       grammar::symbol("opt_ev_status"),
       grammar::symbol("opt_ev_comment"),
   };
   // BEGIN ... END: a routine's body of one at the header's level.
-  std::vector<int> blocks = {
+  Symbol_set blocks = {
       grammar::symbol("sp_unlabeled_block"), grammar::symbol("sp_labeled_block"),
       grammar::symbol("sp_unlabeled_block_not_atomic"),
   };
   // Blocks, IF, CASE and loops: their statements on lines of their own.
-  std::vector<int> compounds = {
-      grammar::symbol("sp_unlabeled_block"), grammar::symbol("sp_labeled_block"),
-      grammar::symbol("sp_unlabeled_block_not_atomic"), grammar::symbol("sp_proc_stmt_if"),
-      grammar::symbol("sp_labeled_control"), grammar::symbol("sp_unlabeled_control"),
-      case_stmt_specification,
-  };
+  Symbol_set compounds = [this] {
+    Symbol_set out = blocks;
+    for (const int s : {grammar::symbol("sp_proc_stmt_if"), grammar::symbol("sp_labeled_control"),
+                        grammar::symbol("sp_unlabeled_control"), case_stmt_specification}) {
+      out.add(s);
+    }
+    return out;
+  }();
   // The parts of those that only group their words and statement lists.
-  std::vector<int> compound_parts = {
+  Symbol_set compound_parts = {
       grammar::symbol("sp_if"), grammar::symbol("sp_elseifs"), grammar::symbol("loop_body"),
       grammar::symbol("while_body"), grammar::symbol("repeat_body"), grammar::symbol("for_loop_statements"),
       grammar::symbol("sp_if_then_statements"), grammar::symbol("sp_case_then_statements"),
   };
   // Statements and declarations, each with its ';' (left-recursive), and the
   // WHEN arms of a CASE.
-  std::vector<int> statement_lists = {
+  Symbol_set statement_lists = {
       grammar::symbol("sp_decls"), grammar::symbol("sp_proc_stmts"), grammar::symbol("sp_proc_stmts1"),
   };
-  std::vector<int> when_lists = {
+  Symbol_set when_lists = {
       grammar::symbol("simple_when_clause_list"), grammar::symbol("searched_when_clause_list"),
   };
   // Comma lists: select items, GROUP BY, ORDER BY, SET a = 1, b = 2, ON
   // DUPLICATE KEY UPDATE ..., the columns of INSERT and CREATE VIEW, the
   // tables of a DELETE.
-  std::vector<int> lists = {
+  Symbol_set lists = {
       select_item_list,
       group_list,
       order_list,
@@ -382,14 +464,24 @@ struct Symbols {
       grammar::symbol("fields"),
       grammar::symbol("view_list"),
       grammar::symbol("table_alias_ref_list"),
+      // INSERT's rows and SET a = 1, ...; privileges, users and roles.
+      grammar::symbol("values_list"),
+      grammar::symbol("ident_eq_list"),
+      grammar::symbol("object_privilege_list"),
+      grammar::symbol("grant_list"),
+      grammar::symbol("user_and_role_list"),
   };
   // Nodes whose words are one space apart, besides the clauses: the start
   // of a query, the statements besides queries and their parts.
-  std::vector<int> spaced = {
+  Symbol_set spaced = {
       query_specification_start, insert, replace, update, delete_, create, alter, insert_field_spec,
       single_multi, grammar::symbol("delete_part2"), grammar::symbol("delete_single_table"), opt_insert_update,
       opt_returning, delete_limit_clause, view_check_option, create_body, alter_commands,
       grammar::symbol("partition"), grammar::symbol("part_definition"),
+      describe, analyze_stmt_command, grammar::symbol("table_value_constructor"),
+      grant, grammar::symbol("grant_command"), grant_privileges_command,
+      grammar::symbol("grant_privileges"), grammar::symbol("grant_role_command"), revoke,
+      grammar::symbol("revoke_privileges_or_proxy"), revoke_privileges, grammar::symbol("revoke_role"),
   };
   // Clauses of those statements, as {clause, the statement part it is a
   // clause of}: each starts a line of its own when the statement breaks.
@@ -414,9 +506,35 @@ struct Symbols {
       {grammar::symbol("opt_partitioning"), alter_commands},
       {grammar::symbol("remove_partitioning"), alter_commands},
       {sp_cursor_stmt, sp_decl_body},
+      // CREATE TABLE t AS, then the query, as a view's.
+      {create_select_query_expression, opt_create_select},
+      {grammar::symbol("SET"), insert_field_spec},
+      // GRANT ... ON ... TO ... REQUIRE ... WITH ..., REVOKE ... ON ... FROM.
+      {on, grant_privileges_command},
+      {grammar::symbol("TO_SYM"), grant_privileges_command},
+      {opt_require_clause, grant_privileges_command},
+      {grammar::symbol("opt_grant_options"), grant_privileges_command},
+      {on, revoke_privileges},
+      {from, revoke_privileges},
+      // CREATE or ALTER USER ... REQUIRE ... WITH ... PASSWORD ... ACCOUNT.
+      {opt_require_clause, create},
+      {opt_resource_options, create},
+      {opt_account_locking, create},
+      {opt_require_clause, alter},
+      {opt_resource_options, alter},
+      {opt_account_locking, alter},
+      // A DELETE's FROM and USING after its tables (refined below).
+      {from, single_multi},
+      {using_, single_multi},
   };
+  // The first symbols of those pairs.
+  Symbol_set statement_clause_symbols = [this] {
+    Symbol_set out{};
+    for (const auto &c : statement_clauses) out.add(c.first);
+    return out;
+  }();
   // Each starts a line of its own when its query breaks.
-  std::vector<int> clauses = {
+  Symbol_set clauses = {
       grammar::symbol("opt_from_clause"),        grammar::symbol("from_clause"),
       grammar::symbol("opt_where_clause"),       grammar::symbol("opt_group_clause"),
       grammar::symbol("opt_having_clause"),      grammar::symbol("opt_window_clause"),
@@ -429,7 +547,7 @@ struct Symbols {
   };
   // A query in parentheses: '(' one of these ')'; a FOR loop's cursor query
   // too (FOR rec IN (SELECT ...) DO).
-  std::vector<int> queries = {
+  Symbol_set queries = {
       grammar::symbol("query_expression"),
       grammar::symbol("query_expression_body_ext"),
       grammar::symbol("query_expression_no_with_clause"),
@@ -444,8 +562,12 @@ const Symbols &syms() {
   return s;
 }
 
-bool contains(const std::vector<int> &v, int symbol) {
-  return std::find(v.begin(), v.end(), symbol) != v.end();
+// ALTER EVENT, PROCEDURE or FUNCTION.
+bool is_alter_routine(const Syntax_tree &t, uint32_t n) {
+  const auto &s = syms();
+  return t.node(n).symbol == s.alter &&
+         (t.child(n, s.event) != Syntax_tree::npos || t.child(n, s.procedure) != Syntax_tree::npos ||
+          t.child(n, s.function) != Syntax_tree::npos);
 }
 
 // What is between two tokens: blanks and comments.
@@ -562,6 +684,7 @@ class Builder {
   struct Piece {
     Doc doc;
     uint32_t first = npos;  // the first non-empty token
+    bool indented = false;  // one level deeper, the line break before it too
     bool empty() const { return first == npos; }
   };
 
@@ -579,17 +702,16 @@ class Builder {
   // line breaks before it as before a query's clauses.
   void mark_statement_clauses() {
     clause_starts_.assign(t_.tokens().size(), false);
-    block_starts_.assign(t_.tokens().size(), false);
-    begin_starts_.assign(t_.tokens().size(), false);
+    block_starts_.assign(t_.tokens().size(), Block::none);
     for (uint32_t n = 0; n < t_.size(); ++n) {
       const auto &node = t_.node(n);
-      if (contains(s_.compounds, node.symbol)) {
+      if (s_.compounds.has(node.symbol)) {
         if (const uint32_t j = first_token(n); j != npos) {
-          block_starts_[j] = true;
-          if (contains(s_.blocks, node.symbol)) begin_starts_[j] = true;
+          block_starts_[j] = s_.blocks.has(node.symbol) ? Block::begin : Block::compound;
         }
       }
       if (node.parent == npos) continue;
+      if (!s_.statement_clause_symbols.has(node.symbol)) continue;
       const std::pair<int, int> at{node.symbol, symbol(node.parent)};
       bool clause = std::find(s_.statement_clauses.begin(), s_.statement_clauses.end(), at) !=
                     s_.statement_clauses.end();
@@ -630,8 +752,9 @@ class Builder {
   // after it land on the same level, under the clause's keyword (between
   // the words of one keyword, Sep::word, they stay on its level):
   // `SELECT -- c` puts the items on the next line, indented.  Between
-  // lines of their own (Sep::hard) an empty line stays; before END or `)`
-  // (Sep::close) only before a comment; not at all when `blank_ok` is false.
+  // lines of their own (Sep::hard) an empty line stays; before END, ELSE,
+  // WHEN or `)` (Sep::close) only before a comment; not at all when
+  // `blank_ok` is false.
   Doc separator(uint32_t j, Sep kind, bool blank_ok = true) const {
     const Gap &g = gaps_[j];
     auto line_break = [&] {
@@ -689,22 +812,37 @@ class Builder {
   // Token j, recased when it is a keyword.  The comments before it are the
   // separator's.
   Doc leaf(uint32_t j) const {
-    const auto &tk = token(j);
-    std::string word(text_.substr(tk.begin, tk.end - tk.begin));
-    if (is_keyword(j, word)) word = o_.upper_case_keywords ? upper(word) : lower(word);
+    std::string word;
+    append_word(j, &word);
     return text(std::move(word));
   }
 
-  // A keyword, and not one standing for a name.
+  // Token j at the end of `out`, recased when it is a keyword.
+  void append_word(uint32_t j, std::string *out) const {
+    const auto &tk = token(j);
+    const std::string_view word = text_.substr(tk.begin, tk.end - tk.begin);
+    if (is_keyword(j, word)) {
+      *out += o_.upper_case_keywords ? upper(word) : lower(word);
+    } else {
+      *out += word;
+    }
+  }
+
+  // A keyword, and not one standing for a name.  The lexer turns some
+  // keywords into others (VALUE into VALUES, VALUES into VALUE_SYM in ON
+  // DUPLICATE KEY UPDATE): a keyword token spelled as any keyword is one.
   bool is_keyword(uint32_t j, std::string_view word) const {
     const auto &spellings = keyword_spellings(token(j).symbol);
-    if (std::none_of(spellings.begin(), spellings.end(), [&](std::string_view s) { return iequals(s, word); })) {
+    if (spellings.empty()) return false;
+    if (std::none_of(spellings.begin(), spellings.end(), [&](std::string_view s) { return iequals(s, word); }) &&
+        !is_keyword_word(word)) {
       return false;
     }
     const uint32_t leaf_node = leaves_[j];
     if (leaf_node == npos) return false;
+    // Not a name, and not JSON's true, false, null.
     const uint32_t parent = t_.node(leaf_node).parent;
-    return parent == npos || !is_name_wrapper(symbol(parent));
+    return parent == npos || (!is_name_wrapper(symbol(parent)) && symbol(parent) != s_.mrs_json_value);
   }
 
   int symbol(uint32_t n) const { return t_.node(n).symbol; }
@@ -730,8 +868,18 @@ class Builder {
       if (out.empty()) {
         out.first = p.first;
       } else {
-        const Sep kind = clause_starts_[p.first] ? Sep::line : block_starts_[p.first] ? Sep::space : sep(k);
-        parts.push_back(separator(p.first, kind));
+        Sep kind = clause_starts_[p.first]                ? Sep::line
+                   : block_starts_[p.first] != Block::none ? Sep::space
+                                                           : sep(k);
+        // An indented piece nests the break a comment forces before it
+        // itself: not once more inside the separator (Sep::space would).
+        if (p.indented && kind == Sep::space) kind = Sep::word;
+        Doc s = separator(p.first, kind);
+        if (p.indented) {
+          parts.push_back(nest(o_.indent, concat(std::move(s), std::move(p.doc))));
+          continue;
+        }
+        parts.push_back(std::move(s));
       }
       parts.push_back(std::move(p.doc));
     }
@@ -746,11 +894,15 @@ class Builder {
       return {leaf(j), j};
     }
     const int sym = symbol(n);
-    if (contains(s_.lists, sym) || (sym == s_.derived_table_list && has_comma(n))) {
+    if (s_.rows.has(sym) && !spans_lines(n)) return as_written(n);
+    if (s_.lists.has(sym) || (sym == s_.derived_table_list && has_comma(n))) {
       return list(n);
     }
     if (sym == s_.join_table) return joins(n);
-    if (sym == s_.create_field_list_parens || sym == s_.part_defs || sym == s_.opt_sub_partition) {
+    if (sym == s_.mrs_statement && t_.children(n).size() == 1) return rest_statement(t_.children(n)[0]);
+    if (sym == s_.mrs_rest_authentication) return rest_authentication(n);
+    if (sym == s_.create_field_list_parens || sym == s_.part_defs || sym == s_.opt_sub_partition ||
+        s_.rest_blocks.has(sym)) {
       return rows_in_parentheses(n);
     }
     if (sym == s_.create_table_options && t_.node(n).parent != npos &&
@@ -758,17 +910,32 @@ class Builder {
       return table_options(n);
     }
     if (sym == s_.alter) {
+      if (is_alter_routine(t_, n)) return routine(n);
       if (const uint32_t changes = several_changes(n); changes != npos) return alter_table(n, changes);
     }
     if (sym == s_.expr && chain_operator(n) != -1) return chain(n);
     if (sym == s_.create_routine || sym == s_.trigger_tail || sym == s_.event_tail) return routine(n);
     if (sym == s_.case_stmt_specification) return case_statement(n);
     if (sym == s_.sp_parenthesized_pdparam_list || sym == s_.sp_parenthesized_fdparam_list) return parameters(n);
-    if (contains(s_.compounds, sym)) return compound(n);
+    if (s_.compounds.has(sym)) return compound(n);
+    if (sym == s_.opt_create_select) return create_select(n);
     // A statement of a routine's body: its clauses break with it, apart
     // from the routine's, and always when it was on several lines.
     if (sym == s_.sp_proc_stmt || sym == s_.sp_decl) return body_statement(n);
     return children(n);
+  }
+
+  // CREATE TABLE's [AS] SELECT after the columns: with the clauses
+  // indented, the query and its clauses one level deeper, as without
+  // columns (has_clauses); the columns and `)` stay at the header's level.
+  Piece create_select(uint32_t n) {
+    Piece p = children(n);
+    const uint32_t body = t_.node(n).parent;
+    if (body == npos || t_.child(body, s_.create_field_list_parens) == npos) return p;
+    bool routine = false;
+    for (uint32_t a = body; a != npos && !routine; a = t_.node(a).parent) routine = symbol(a) == s_.sp_proc_stmt;
+    p.indented = routine ? o_.indent_routine_clauses : o_.indent_clauses;
+    return p;
   }
 
   // With `indent_routine_clauses`, a query or DML statement, or a cursor's
@@ -814,7 +981,30 @@ class Builder {
       const int p = symbol(parent);
       return p == s_.opt_procedure_or_into || p == s_.select_into_query_specification;
     }
-    return contains(s_.clauses, sym);
+    return s_.clauses.has(sym);
+  }
+
+  // Node n as written, its keywords recased: a row of INSERT ... VALUES on
+  // one line, whose words keep their spacing anyway.  One pass over its
+  // tokens instead of a layout of each value (a few thousand rows).
+  Piece as_written(uint32_t n) const {
+    const auto &node = t_.node(n);
+    Piece out;
+    std::string written;
+    uint32_t prev = npos;
+    for (uint32_t j = node.first_token; j < node.first_token + node.token_count; ++j) {
+      const auto &tk = token(j);
+      if (tk.begin == tk.end) continue;
+      if (prev == npos) {
+        out.first = j;
+      } else {
+        written += text_.substr(token(prev).end, tk.begin - token(prev).end);
+      }
+      append_word(j, &written);
+      prev = j;
+    }
+    out.doc = text(std::move(written));
+    return out;
   }
 
   // A node's children, laid out by where they stand.
@@ -822,7 +1012,7 @@ class Builder {
     const auto kids = t_.children(n);
     const int sym = symbol(n);
     // Inside a clause the words are one space apart.
-    const bool spaced = contains(s_.clauses, sym) || contains(s_.spaced, sym);
+    const bool spaced = s_.clauses.has(sym) || s_.spaced.has(sym);
     std::vector<Piece> pieces;
     std::vector<Sep> seps;
     int previous = -1;  // the symbol of the last child with tokens
@@ -831,7 +1021,7 @@ class Builder {
       if (t_.is_token(kids[k]) && is_left_paren(symbol(kids[k])) && k + 2 < kids.size()) {
         size_t q = k + 1;
         if (symbol(kids[q]) == s_.with_clause && q + 2 < kids.size()) ++q;
-        if (contains(s_.queries, symbol(kids[q])) && t_.is_token(kids[q + 1]) &&
+        if (s_.queries.has(symbol(kids[q])) && t_.is_token(kids[q + 1]) &&
             symbol(kids[q + 1]) == s_.right_paren) {
           pieces.push_back(subquery(kids, k, q + 1));
           seps.push_back(Sep::keep);
@@ -840,7 +1030,8 @@ class Builder {
           continue;
         }
       }
-      Sep sep = spaced ? Sep::space : Sep::keep;
+      // No space before a comma (REVOKE ALL PRIVILEGES, GRANT OPTION ...).
+      Sep sep = !spaced ? Sep::keep : t_.is_token(kids[k]) && symbol(kids[k]) == s_.comma ? Sep::none : Sep::space;
       if (is_clause(kids[k], n) || symbol(kids[k]) == s_.unit_type_decl || previous == s_.unit_type_decl ||
           previous == s_.with_clause || previous == s_.opt_with_clause) {
         sep = Sep::line;
@@ -1083,11 +1274,12 @@ class Builder {
     const int parent = symbol(n);
     for (const uint32_t k : t_.children(n)) {
       const int sym = symbol(k);
-      if (sym == s_.sp_tail_standalone || sym == s_.sf_c_chistics_and_body_standalone) {
+      if (sym == s_.sp_tail_standalone || sym == s_.sf_c_chistics_and_body_standalone ||
+          sym == s_.ev_alter_on_schedule_completion || sym == s_.opt_ev_sql_stmt) {
         routine_parts(k, r);
         continue;
       }
-      if (sym == s_.sp_c_chistics) {
+      if (sym == s_.sp_c_chistics || sym == s_.sp_a_chistics) {
         for (Piece &p : joined_groups(k, Sep::space)) r->words.add(std::move(p), true);
         continue;
       }
@@ -1102,7 +1294,7 @@ class Builder {
       }
       Piece p = build(k);
       if (p.empty()) continue;
-      if (sym == s_.do_ && parent == s_.event_tail) {
+      if (sym == s_.do_ && (parent == s_.event_tail || parent == s_.opt_ev_sql_stmt)) {
         r->intro = std::move(p);
         continue;
       }
@@ -1110,19 +1302,28 @@ class Builder {
         r->params = r->words.head.size();
       }
       // SCHEDULE ... goes with the ON before it.
-      r->words.add(std::move(p), contains(s_.event_clauses, sym) || (sym == s_.on && parent == s_.event_tail));
+      r->words.add(std::move(p), s_.event_clauses.has(sym) ||
+                                     (sym == s_.on && (parent == s_.event_tail ||
+                                                       parent == s_.ev_alter_on_schedule_completion)));
     }
   }
 
-  // Whether routine n has a body with tokens, found without building it.
-  bool has_routine_body(uint32_t n) const {
+  // Whether routine n has a body or a clause with tokens, found on the tree
+  // as routine_parts() would, without building them.
+  bool has_routine_layout(uint32_t n) const {
+    const int parent = symbol(n);
     for (const uint32_t k : t_.children(n)) {
       const int sym = symbol(k);
-      if (sym == s_.sp_tail_standalone || sym == s_.sf_c_chistics_and_body_standalone) {
-        if (has_routine_body(k)) return true;
-      } else if (sym == s_.sp_proc_stmt || sym == s_.sp_proc_stmt_in_returns_clause || sym == s_.ev_sql_stmt) {
-        if (first_token(k) != npos) return true;
+      if (sym == s_.sp_tail_standalone || sym == s_.sf_c_chistics_and_body_standalone ||
+          sym == s_.ev_alter_on_schedule_completion || sym == s_.opt_ev_sql_stmt) {
+        if (has_routine_layout(k)) return true;
+        continue;
       }
+      const bool part = sym == s_.sp_c_chistics || sym == s_.sp_a_chistics || sym == s_.sp_proc_stmt ||
+                        sym == s_.sp_proc_stmt_in_returns_clause || sym == s_.ev_sql_stmt ||
+                        s_.event_clauses.has(sym) ||
+                        (sym == s_.on && (parent == s_.event_tail || parent == s_.ev_alter_on_schedule_completion));
+      if (part && first_token(k) != npos) return true;
     }
     return false;
   }
@@ -1132,28 +1333,37 @@ class Builder {
   // line of its own, a block at the header's level, any other statement one
   // level deeper; an event's DO at the header's level, its body after it.
   Piece routine(uint32_t n) {
-    // Without a body, its children as they stand, built once.
-    if (!has_routine_body(n)) return children(n);
+    // Nothing to lay out without a body or clauses (ALTER may have either):
+    // its children as they stand, built once.
+    if (!has_routine_layout(n)) return children(n);
     Routine_parts r;
     routine_parts(n, &r);
     // No space before the parameter list: p(IN a INT).
     Piece out = join(std::move(r.words.head), [&](size_t k) { return k == r.params ? Sep::none : Sep::space; });
-    if (out.empty() || r.body.empty()) return children(n);
+    if (out.empty()) return children(n);
     std::vector<Doc> parts{std::move(out.doc)};
     append_clauses(std::move(r.words.clauses), &parts);
-    if (!r.intro.empty()) {
-      parts.push_back(separator(r.intro.first, Sep::line));
-      parts.push_back(std::move(r.intro.doc));
-      parts.push_back(separator(r.body.first, Sep::space));
-      parts.push_back(std::move(r.body.doc));
-    } else if (begin_starts_[r.body.first]) {
-      parts.push_back(separator(r.body.first, Sep::line));
-      parts.push_back(std::move(r.body.doc));
-    } else {
-      parts.push_back(nest(o_.indent, concat(separator(r.body.first, Sep::line), std::move(r.body.doc))));
-    }
+    append_body(std::move(r), &parts);
     out.doc = concat(std::move(parts));
     return out;
+  }
+
+  // The body on a line of its own: a block at the header's level, any other
+  // statement one level deeper; an event's DO at the header's level, its
+  // body after it.
+  void append_body(Routine_parts r, std::vector<Doc> *parts) const {
+    if (r.body.empty()) return;
+    if (!r.intro.empty()) {
+      parts->push_back(separator(r.intro.first, Sep::line));
+      parts->push_back(std::move(r.intro.doc));
+      parts->push_back(separator(r.body.first, Sep::space));
+      parts->push_back(std::move(r.body.doc));
+    } else if (block_starts_[r.body.first] == Block::begin) {
+      parts->push_back(separator(r.body.first, Sep::line));
+      parts->push_back(std::move(r.body.doc));
+    } else {
+      parts->push_back(nest(o_.indent, concat(separator(r.body.first, Sep::line), std::move(r.body.doc))));
+    }
   }
 
   // A routine's ( parameters ): on the header's line when they fit, else
@@ -1216,7 +1426,7 @@ class Builder {
   // through the nodes that only group them.
   void compound_elements(uint32_t n, std::vector<uint32_t> *out) const {
     for (const uint32_t k : t_.children(n)) {
-      if (contains(s_.compound_parts, symbol(k))) {
+      if (s_.compound_parts.has(symbol(k))) {
         compound_elements(k, out);
       } else {
         out->push_back(k);
@@ -1252,7 +1462,7 @@ class Builder {
         continue;
       }
 
-      if (contains(s_.statement_lists, symbol(e))) {
+      if (s_.statement_lists.has(symbol(e))) {
         parts.push_back(one_per_line(joined_groups(e, Sep::none)));
         after_list = true;
         continue;
@@ -1284,7 +1494,7 @@ class Builder {
       const int sym = symbol(k);
       if (sym == s_.case_stmt_body) {
         for (const uint32_t b : t_.children(k)) {
-          if (contains(s_.when_lists, symbol(b))) {
+          if (s_.when_lists.has(symbol(b))) {
             for (const auto &g : left_recursive(b)) arms.push_back(compound(g.back()));
           } else {
             head.push_back(build(b));
@@ -1301,6 +1511,56 @@ class Builder {
     if (out.empty() || end.empty() || arms.empty()) return children(n);
     out.doc = concat(std::move(out.doc), one_per_line(std::move(arms)), separator(end.first, Sep::close),
                       std::move(end.doc));
+    return out;
+  }
+
+  // ---- REST SQL
+
+  // A REST SQL statement as MariaDB Shell's SHOW CREATE REST writes it: the
+  // header on its line; ON ..., AS ..., FROM ... and each option one level
+  // deeper on lines of their own when the statement breaks; the { } blocks
+  // one entry per line, which always breaks it.
+  Piece rest_statement(uint32_t n) {
+    Clauses words;
+    const auto kids = t_.children(n);
+    bool binary = false;  // BINARY started the clause CONTENT is in
+    for (size_t i = 0; i < kids.size(); ++i) {
+      const uint32_t k = kids[i];
+      const int sym = symbol(k);
+      if (s_.rest_prefixes.has(sym)) {
+        for (const uint32_t c : t_.children(k)) words.add(build(c), false);
+        continue;
+      }
+      if (s_.rest_option_lists.has(sym) || sym == s_.mrs_rest_results) {
+        for (Piece &p : joined_groups(k, Sep::space)) words.add(std::move(p), true);
+        continue;
+      }
+      // CONTENT 'text' starts a line, not CONTENT SET.
+      const bool content = sym == s_.content && i + 1 < kids.size() && symbol(kids[i + 1]) == s_.text_string;
+      const bool starts = (s_.rest_clauses.has(sym) && first_token(k) != npos) || (content && !binary);
+      binary = sym == s_.mrs_opt_binary && first_token(k) != npos;
+      words.add(build(k), starts);
+    }
+    Piece out = join(std::move(words.head), [](size_t) { return Sep::space; });
+    if (out.empty()) return children(n);
+    std::vector<Doc> parts{std::move(out.doc)};
+    append_clauses(std::move(words.clauses), &parts);
+    out.doc = concat(std::move(parts));
+    return out;
+  }
+
+  // AUTHENTICATION PATH ... REDIRECTION ...: each one level deeper still.
+  Piece rest_authentication(uint32_t n) {
+    std::vector<Piece> parts = joined_groups(n, Sep::space);
+    if (parts.empty() || parts[0].empty()) return children(n);
+    Piece out = std::move(parts[0]);
+    std::vector<Doc> rest;
+    for (size_t k = 1; k < parts.size(); ++k) {
+      if (parts[k].empty()) continue;
+      rest.push_back(separator(parts[k].first, Sep::line));
+      rest.push_back(std::move(parts[k].doc));
+    }
+    out.doc = concat(std::move(out.doc), nest(o_.indent, concat(std::move(rest))));
     return out;
   }
 
@@ -1354,8 +1614,9 @@ class Builder {
   std::vector<uint32_t> lines_before_;
   std::vector<uint32_t> lines_through_;
   std::vector<bool> clause_starts_;  // by token
-  std::vector<bool> block_starts_;   // by token: a compound statement starts
-  std::vector<bool> begin_starts_;   // by token: a BEGIN ... END block starts
+  // By token: a compound statement starts, and whether it is BEGIN ... END.
+  enum class Block : uint8_t { none, compound, begin };
+  std::vector<Block> block_starts_;
   bool ok_ = true;
 };
 
@@ -1447,27 +1708,48 @@ void leading_words(std::string_view s, size_t max, bool backslash_escapes, F f) 
   }
 }
 
+// INSERT ... VALUES or SET longer than this is left as it is, and so is
+// every one when the text formatted is longer than k_max_rows_text: a
+// dump's rows are never parsed, whether in long INSERTs or in millions of
+// short ones.
+constexpr size_t k_max_rows_statement = 64 * 1024;
+constexpr size_t k_max_rows_text = 4 * 1024 * 1024;
+
 // Whether the statement can be one the formatter lays out: a query
-// (SELECT, WITH, a parenthesized one), INSERT or REPLACE ... SELECT,
-// UPDATE, DELETE, CREATE or ALTER VIEW or TABLE, CREATE PROCEDURE,
-// FUNCTION, TRIGGER or EVENT, a compound statement (BEGIN NOT ATOMIC, IF,
-// CASE, a loop).  A cheap filter before the parse; `statement_node` decides
-// on the tree, so the two take the same statements.
-bool may_format(std::string_view s, bool backslash_escapes) {
+// (SELECT, WITH, a parenthesized one), INSERT or REPLACE ... SELECT (or
+// VALUES or SET when `rows`), UPDATE, DELETE, EXPLAIN or ANALYZE of one of
+// those, CREATE or ALTER VIEW, TABLE, USER or REST ..., CREATE or ALTER
+// PROCEDURE, FUNCTION, EVENT, CREATE TRIGGER, GRANT, REVOKE, a compound
+// statement (BEGIN NOT ATOMIC, IF, CASE, a loop).  A cheap filter before
+// the parse; `statement_node` decides on the tree, so the two take the
+// same statements.
+bool may_format(std::string_view s, bool backslash_escapes, bool rows) {
   // insert_head: before the table's name, which may be `value`.
-  enum { start, insert_head, insert, create, yes, no } state = start;
+  enum { start, explain, insert_head, insert, create, yes, no } state = start;
   leading_words(s, 24, backslash_escapes, [&](std::string w) {
     if (state == start) {
       const std::string_view first = std::string_view(w).substr(w.starts_with('(') ? 1 : 0);
       if (first == "select" || first == "with" || first == "update" || first == "delete" || first == "begin" ||
           first == "if" || first == "case" || first == "loop" || first == "while" || first == "repeat" ||
-          first == "for") {
+          first == "for" || first == "grant" || first == "revoke") {
         state = yes;
       } else if (first == "insert" || first == "replace") {
         state = insert_head;
       } else if (first == "create" || first == "alter") {
         state = create;
+      } else if (first == "explain" || first == "describe" || first == "desc" || first == "analyze") {
+        state = explain;
       } else {
+        state = no;
+      }
+    } else if (state == explain) {
+      // EXPLAIN [EXTENDED | PARTITIONS | FORMAT=JSON] <statement>, not
+      // DESCRIBE t or ANALYZE TABLE t.
+      if (w == "select" || w == "with" || w == "(select" || w == "(with" || w == "update" || w == "delete") {
+        state = yes;
+      } else if (w == "insert" || w == "replace") {
+        state = insert_head;
+      } else if (w != "extended" && w != "partitions" && w != "format" && w != "json" && w != "traditional") {
         state = no;
       }
     } else if (state == insert_head) {
@@ -1476,9 +1758,10 @@ bool may_format(std::string_view s, bool backslash_escapes) {
       }
     } else if (state == insert) {
       if (w == "select" || w == "with" || w == "(select" || w == "(with") state = yes;
-      if (w == "values" || w == "value" || w == "set") state = no;
+      if (w == "values" || w == "value" || w == "set") state = rows && s.size() <= k_max_rows_statement ? yes : no;
     } else if (state == create) {
-      if (w == "view" || w == "table" || w == "procedure" || w == "function" || w == "trigger" || w == "event") {
+      if (w == "view" || w == "table" || w == "procedure" || w == "function" || w == "trigger" || w == "event" ||
+          w == "user" || w == "rest") {
         state = yes;
       }
     }
@@ -1488,11 +1771,12 @@ bool may_format(std::string_view s, bool backslash_escapes) {
 }
 
 // The statement node of a tree the formatter lays out, or npos: a query,
-// INSERT or REPLACE ... SELECT, UPDATE, DELETE, CREATE or ALTER VIEW,
-// CREATE TABLE with its columns (not ... LIKE, not ... SELECT), ALTER TABLE,
-// CREATE PROCEDURE, FUNCTION (not a UDF's SONAME), TRIGGER, EVENT, a
-// compound statement.  `may_format` lets the same ones through to the
-// parse.
+// INSERT, REPLACE, UPDATE, DELETE, EXPLAIN or ANALYZE of one of those,
+// GRANT, REVOKE, REST SQL, CREATE or ALTER USER or VIEW, CREATE TABLE with
+// its columns or ... SELECT (not ... LIKE), ALTER TABLE, CREATE PROCEDURE,
+// FUNCTION (not a UDF's SONAME), TRIGGER, EVENT, ALTER EVENT, PROCEDURE,
+// FUNCTION, a compound statement.  `may_format` lets the same ones through
+// to the parse.
 uint32_t statement_node(const Syntax_tree &tree) {
   const auto &s = syms();
   const uint32_t top = tree.child(tree.roots()[0], s.directly_executable_statement);
@@ -1502,15 +1786,16 @@ uint32_t statement_node(const Syntax_tree &tree) {
   if (verb == npos || tree.children(verb).size() != 1) return npos;
   const uint32_t n = tree.children(verb)[0];
   const int sym = tree.node(n).symbol;
-  if (sym == s.select || sym == s.select_into || sym == s.update || sym == s.delete_) return n;
-  auto has_child = [&](uint32_t x, int symbol) { return tree.child(x, symbol) != npos; };
-  if (sym == s.insert || sym == s.replace) {
-    const uint32_t spec = tree.child(n, s.insert_field_spec);
-    const uint32_t values = spec == npos ? npos : tree.child(spec, s.insert_values);
-    if (values == npos) return npos;
-    const auto v = tree.children(values);
-    return v.size() == 1 && tree.node(v[0]).symbol == s.create_select_query_expression ? n : npos;
+  if (sym == s.select || sym == s.select_into || sym == s.update || sym == s.delete_ || sym == s.insert ||
+      sym == s.replace || sym == s.grant || sym == s.revoke || sym == s.mrs_statement) {
+    return n;
   }
+  auto has_child = [&](uint32_t x, int symbol) { return tree.child(x, symbol) != npos; };
+  // EXPLAIN or ANALYZE of a query or DML statement (not DESCRIBE t, not
+  // EXPLAIN FOR CONNECTION): the ones with clauses.
+  if (sym == s.describe || sym == s.analyze_stmt_command) return has_clauses(tree, n) ? n : npos;
+  if ((sym == s.create || sym == s.alter) && has_child(n, s.user)) return n;
+  if (is_alter_routine(tree, n)) return n;
   if ((sym == s.create || sym == s.alter) && has_child(n, s.view) && has_child(n, s.view_select)) return n;
   if (sym == s.create) {
     const uint32_t routine = tree.child(n, s.create_routine);
@@ -1521,11 +1806,14 @@ uint32_t statement_node(const Syntax_tree &tree) {
     if (has_child(n, s.trigger_tail) || has_child(n, s.event_tail)) return n;
   }
   if (sym == s.alter && has_child(n, s.table) && has_child(n, s.alter_commands)) return n;
+  // CREATE TABLE with columns, or ... AS SELECT; not ... LIKE.
   if (sym == s.create && has_child(n, s.table)) {
     const uint32_t body = tree.child(n, s.create_body);
-    if (body == npos || !has_child(body, s.create_field_list_parens)) return npos;
+    if (body == npos || has_child(body, s.create_like)) return npos;
     const uint32_t select = tree.child(body, s.opt_create_select);
-    return select == npos || tree.begin(select) == tree.end(select) ? n : npos;
+    return has_child(body, s.create_field_list_parens) || (select != npos && tree.begin(select) != tree.end(select))
+               ? n
+               : npos;
   }
   return npos;
 }
@@ -1543,9 +1831,9 @@ bool parses(mdbp_parser *parser, std::string_view sql) {
 // or the layout would not keep its tokens and comments.
 std::optional<Text_edit> format_statement(std::string_view text, uint32_t st_begin, uint32_t st_end,
                                           mdbp_parser *parser, uint32_t mode_bits,
-                                          const Format_options &options, std::string_view eol) {
+                                          const Format_options &options, std::string_view eol, bool rows) {
   const std::string_view sql = text.substr(st_begin, st_end - st_begin);
-  if (parser == nullptr || !may_format(sql, (mode_bits & k_no_backslash_escapes) == 0)) return std::nullopt;
+  if (parser == nullptr || !may_format(sql, (mode_bits & k_no_backslash_escapes) == 0, rows)) return std::nullopt;
   mdbp_result r;
   if (mdbp_parse_sql(parser, sql.data(), sql.size(), &r) != MDBP_OK || !r.accepted) return std::nullopt;
   const Syntax_tree tree = Syntax_tree::build(parser, r, st_begin);
@@ -1602,6 +1890,7 @@ std::vector<Text_edit> format_sql(std::string_view text, const Statement_index &
   // The document's line break, for a statement on one line, which has none
   // of its own.
   const std::string_view eol = eol_of(text);
+  const bool rows = std::min<size_t>(end, text.size()) - std::min<size_t>(begin, text.size()) <= k_max_rows_text;
   const auto &stmts = index.statements();
   for (size_t i = index.find(begin); i < stmts.size(); ++i) {
     const Statement &st = stmts[i];
@@ -1609,7 +1898,7 @@ std::vector<Text_edit> format_sql(std::string_view text, const Statement_index &
     if (st.body_end < begin || st.kind != Statement_kind::sql) continue;
     const Statement_mode &mode = index.modes()[st.mode];
     mdbp_parser *parser = cache.get(mode.mode, options.version_id, true);
-    if (auto edit = format_statement(text, st.begin, st.body_end, parser, mode.bits, options, eol)) {
+    if (auto edit = format_statement(text, st.begin, st.body_end, parser, mode.bits, options, eol, rows)) {
       edits.push_back(std::move(*edit));
     }
   }

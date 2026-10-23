@@ -176,16 +176,21 @@ key to or from a table in scope first.
 ## Formatting
 
 `textDocument/formatting` and `rangeFormatting` lay out queries, the statements built
-around them, table definitions and routines, when they parse whole: `SELECT`, `WITH`
-(or a parenthesized query), `INSERT`/`REPLACE ... SELECT`, `UPDATE`, `DELETE`,
-`CREATE`/`ALTER VIEW`, `CREATE TABLE` with its columns, `ALTER TABLE`,
-`CREATE PROCEDURE`/`FUNCTION`/`TRIGGER`/`EVENT`, and compound statements
-(`BEGIN NOT ATOMIC`, `IF`, `CASE`, the loops). Every other statement
-(`INSERT ... VALUES`/`SET`, `CREATE TABLE ... LIKE` and `... SELECT`, the rest of DDL),
-and any statement that holds a versioned comment (`/*!NNNNN`), is left as it is, so the
-data and versioned parts of mysqldump files keep their own layout (a dump's CREATE
-TABLEs, already one column per line, only get their keywords recased); a scan of the
-first words skips those without parsing them. Inside a routine's body every statement
+around them, table definitions, routines, access control and REST SQL, when they parse
+whole: `SELECT`, `WITH` (or a parenthesized query), `EXPLAIN`/`ANALYZE` of a query or DML
+statement, `INSERT`/`REPLACE` (`... SELECT`, `... VALUES`, `... SET`), `UPDATE`,
+`DELETE`, `CREATE`/`ALTER VIEW`, `CREATE TABLE` with its columns or `... AS SELECT`,
+`ALTER TABLE`, `CREATE PROCEDURE`/`FUNCTION`/`TRIGGER`/`EVENT`, `ALTER
+EVENT`/`PROCEDURE`/`FUNCTION`, compound statements (`BEGIN NOT ATOMIC`, `IF`, `CASE`,
+the loops), `GRANT`, `REVOKE`, `CREATE`/`ALTER USER`, and MariaDB Shell's REST SQL
+(`CREATE`/`ALTER REST SERVICE`, `SCHEMA`, `VIEW`, `PROCEDURE`, `FUNCTION`,
+`CONTENT SET`/`FILE`, `AUTH APP`, `USER`, `ROLE`, ...). Every other statement
+(`CREATE TABLE ... LIKE`, the rest of DDL, `SET`, `CALL`, ...), any statement that holds a
+versioned comment (`/*!NNNNN`), and `INSERT ... VALUES`/`SET` over 64 KB, or any of
+them when the text formatted is over 4 MB, are left as they are, so the data and
+versioned parts of dumps keep their own layout (a dump's CREATE TABLEs, already one
+column per line, only get their keywords recased); a scan of the first words skips those
+without parsing them. Routines in `sql_mode=ORACLE` are not parsed, so not laid out. Inside a routine's body every statement
 is laid out, by the rules below. A range formats each
 statement it touches, whole. `keywordCase` sets the keywords' case, `lineWidth` the
 width, and `indentation` one level of indentation, by default the request's
@@ -224,7 +229,9 @@ SELECT f.title, c.name AS category, count(r.rental_id) AS rentals,
   one level deeper, whatever its length, and the closing parenthesis and the table
   options on the next line (`) ENGINE=InnoDB`), filling it up to the width and continuing
   one level deeper; the partitioning on a line after that, its partitions (and their
-  subpartitions) one per line like the columns.
+  subpartitions) one per line like the columns. A `[AS] SELECT` after the columns starts
+  a line of its own, the query and its clauses one level deeper (`) AS`, then the query),
+  as without columns; with `indentClauses` off, at the statement's indentation.
   `ALTER TABLE` with several changes puts each on a line one level deeper; a single
   change stays on the statement's line. Inside a column the words keep their spacing.
 - **Routines:** the header stays on its line (`CREATE PROCEDURE p(IN a INT)`, a
@@ -245,7 +252,8 @@ SELECT f.title, c.name AS category, count(r.rental_id) AS rentals,
   breaks. A handler's block starts on its line
   (`DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN`), a cursor's query like a view's, and a
   `FOR` loop's `IN (SELECT ...)` like a subquery. One empty line between statements (and
-  between table columns) stays, none right after `BEGIN`, `THEN` or `(`; comments before
+  between table columns) stays, none right after `BEGIN`, `THEN` or `(` or before an
+  `ALTER TABLE`'s first change; comments before
   `END` or `ELSE` stay with the statements before them.
 
 ```sql
@@ -263,8 +271,21 @@ BEGIN
 END
 ```
 - **Lists** of select items, GROUP BY and ORDER BY items, `SET` and `ON DUPLICATE KEY
-  UPDATE` assignments, and the column lists of INSERT and CREATE VIEW continue after the comma on the
-  same line up to the width, then on the next, aligned with the first item.
+  UPDATE` assignments, the column lists of INSERT and CREATE VIEW, INSERT's rows
+  (`VALUES (1, 'a'), (2, 'b'), ...`), privileges and users continue after the comma on the
+  same line up to the width, then on the next, aligned with the first item. A row on one
+  line is written as it is, its keywords recased.
+- **Access control:** `GRANT`/`REVOKE` put `ON`, `TO`/`FROM`, `REQUIRE` and `WITH` on lines
+  of their own when the statement breaks; `CREATE`/`ALTER USER` its `REQUIRE`, `WITH`
+  and `PASSWORD`/`ACCOUNT` clauses.
+- **REST SQL** is laid out as MariaDB Shell's `SHOW CREATE REST ...` writes it: the header
+  on its line; `ON SERVICE ... SCHEMA ...`, `AS ...` (with its `CLASS` and `{`), `FROM`,
+  `VENDOR`, `NEW REQUEST PATH`, `PARAMETERS`, each `RESULT`, `[BINARY] CONTENT` and each
+  option one level deeper on lines of their own when the statement breaks (always, with
+  a block); `{ }` blocks (a class's fields, `OPTIONS`/`METADATA` JSON, JSON arrays) one entry
+  per line, one level deeper, the brace closing at its line's level; `AUTHENTICATION`'s
+  `PATH`, `REDIRECTION`, ... one level deeper still. Request paths, names, vendors and
+  JSON's `true`/`false`/`null` keep their case.
 - **Joins** go on lines of their own one level under FROM when the query breaks; a join
   in parentheses stays inline when it fits. `ON` stays on the JOIN's line, or goes one
   level deeper on the next line when that line would pass the width.

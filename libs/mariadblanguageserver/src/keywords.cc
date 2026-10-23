@@ -98,6 +98,11 @@ const std::vector<std::string_view> &keyword_spellings(int symbol) {
   return it == t.spellings.end() ? none : it->second;
 }
 
+bool is_keyword_word(std::string_view word) {
+  const auto &t = tables();
+  return t.words.find(upper(word)) != t.words.end();
+}
+
 bool is_nonreserved_keyword(int symbol) {
   const auto &t = tables();
   return symbol >= 0 && static_cast<size_t>(symbol) < t.nonreserved.size() &&
@@ -129,14 +134,29 @@ bool is_name_symbol(int symbol) {
 }
 
 bool is_name_wrapper(int symbol) {
-  static const std::vector<int> wrappers = {
-      grammar::symbol("ident"),          grammar::symbol("ident_cli"),
-      grammar::symbol("IDENT_sys"),      grammar::symbol("IDENT_cli"),
-      grammar::symbol("ident_cli_func"), grammar::symbol("ident_cli_set_usual_case"),
-      grammar::symbol("label_ident"),
-  };
-  if (std::find(wrappers.begin(), wrappers.end(), symbol) != wrappers.end()) return true;
-  return !grammar::is_terminal(symbol) && std::string_view(grammar::name(symbol)).starts_with("keyword");
+  // By symbol, found once: asked for every keyword token formatted.
+  static const std::vector<uint8_t> by_symbol = [] {
+    std::vector<uint8_t> v(static_cast<size_t>(mdbp_grammar_symbol_count()), 0);
+    const int wrappers[] = {
+        grammar::symbol("ident"),          grammar::symbol("ident_cli"),
+        grammar::symbol("IDENT_sys"),      grammar::symbol("IDENT_cli"),
+        grammar::symbol("ident_cli_func"), grammar::symbol("ident_cli_set_usual_case"),
+        grammar::symbol("label_ident"),
+        // REST SQL: names, request path segments and GraphQL keys, any of
+        // which may be a keyword.
+        grammar::symbol("mrs_identifier"), grammar::symbol("mrs_path_segment"),
+        grammar::symbol("mrs_graphql_allowed_keyword"), grammar::symbol("mrs_vendor"),
+    };
+    for (const int w : wrappers) {
+      if (w >= 0 && static_cast<size_t>(w) < v.size()) v[static_cast<size_t>(w)] = 1;
+    }
+    for (size_t s = 0; s < v.size(); ++s) {
+      const int sym = static_cast<int>(s);
+      if (!grammar::is_terminal(sym) && std::string_view(grammar::name(sym)).starts_with("keyword")) v[s] = 1;
+    }
+    return v;
+  }();
+  return symbol >= 0 && static_cast<size_t>(symbol) < by_symbol.size() && by_symbol[static_cast<size_t>(symbol)];
 }
 
 bool is_left_paren(int symbol) {
