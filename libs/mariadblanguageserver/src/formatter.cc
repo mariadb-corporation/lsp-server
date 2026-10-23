@@ -565,7 +565,6 @@ bool is_alter_routine(const Syntax_tree &t, uint32_t n) {
           t.child(n, s.function) != Syntax_tree::npos);
 }
 
-
 // What is between two tokens: blanks and comments.
 struct Comment {
   std::string_view text;
@@ -730,8 +729,8 @@ class Builder {
   // after it land on the same level, under the clause's keyword (between
   // the words of one keyword, Sep::word, they stay on its level):
   // `SELECT -- c` puts the items on the next line, indented.  Between
-  // lines of their own (Sep::hard) an empty line stays, before END or `)`
-  // (Sep::close) only before a comment.
+  // lines of their own (Sep::hard) an empty line stays; before END, ELSE,
+  // WHEN or `)` (Sep::close) only before a comment.
   Doc separator(uint32_t j, Sep kind) const {
     const Gap &g = gaps_[j];
     auto line_break = [&] {
@@ -1182,7 +1181,6 @@ class Builder {
 
   // ---- routines
 
-
   // The parts of a routine: CREATE ... PROCEDURE p(...) or FUNCTION f(...)
   // RETURNS ..., TRIGGER ... FOR EACH ROW, EVENT e; the characteristics or
   // event clauses after it; DO before an event's body; the body.
@@ -1625,12 +1623,6 @@ void leading_words(std::string_view s, size_t max, bool backslash_escapes, F f) 
   }
 }
 
-// Whether the statement can be one the formatter lays out: a query
-// (SELECT, WITH, a parenthesized one), INSERT or REPLACE ... SELECT,
-// UPDATE, DELETE, CREATE or ALTER VIEW or TABLE, CREATE PROCEDURE,
-// FUNCTION, TRIGGER or EVENT, a compound statement (BEGIN NOT ATOMIC, IF,
-// CASE, a loop).  A cheap filter before the parse; `statement_node` decides
-// on the tree, so the two take the same statements.
 // INSERT ... VALUES or SET longer than this is left as it is, and so is
 // every one when the text formatted is longer than k_max_rows_text: a
 // dump's rows are never parsed, whether in long INSERTs or in millions of
@@ -1638,6 +1630,14 @@ void leading_words(std::string_view s, size_t max, bool backslash_escapes, F f) 
 constexpr size_t k_max_rows_statement = 64 * 1024;
 constexpr size_t k_max_rows_text = 4 * 1024 * 1024;
 
+// Whether the statement can be one the formatter lays out: a query
+// (SELECT, WITH, a parenthesized one), INSERT or REPLACE ... SELECT (or
+// VALUES or SET when `rows`), UPDATE, DELETE, EXPLAIN or ANALYZE of one of
+// those, CREATE or ALTER VIEW, TABLE, USER or REST ..., CREATE or ALTER
+// PROCEDURE, FUNCTION, EVENT, CREATE TRIGGER, GRANT, REVOKE, a compound
+// statement (BEGIN NOT ATOMIC, IF, CASE, a loop).  A cheap filter before
+// the parse; `statement_node` decides on the tree, so the two take the
+// same statements.
 bool may_format(std::string_view s, bool backslash_escapes, bool rows) {
   // insert_head: before the table's name, which may be `value`.
   enum { start, explain, insert_head, insert, create, yes, no } state = start;
@@ -1686,11 +1686,12 @@ bool may_format(std::string_view s, bool backslash_escapes, bool rows) {
 }
 
 // The statement node of a tree the formatter lays out, or npos: a query,
-// INSERT or REPLACE ... SELECT, UPDATE, DELETE, CREATE or ALTER VIEW,
-// CREATE TABLE with its columns (not ... LIKE, not ... SELECT), ALTER TABLE,
-// CREATE PROCEDURE, FUNCTION (not a UDF's SONAME), TRIGGER, EVENT, a
-// compound statement.  `may_format` lets the same ones through to the
-// parse.
+// INSERT, REPLACE, UPDATE, DELETE, EXPLAIN or ANALYZE of one of those,
+// GRANT, REVOKE, REST SQL, CREATE or ALTER USER or VIEW, CREATE TABLE with
+// its columns or ... SELECT (not ... LIKE), ALTER TABLE, CREATE PROCEDURE,
+// FUNCTION (not a UDF's SONAME), TRIGGER, EVENT, ALTER EVENT, PROCEDURE,
+// FUNCTION, a compound statement.  `may_format` lets the same ones through
+// to the parse.
 uint32_t statement_node(const Syntax_tree &tree) {
   const auto &s = syms();
   const uint32_t top = tree.child(tree.roots()[0], s.directly_executable_statement);
