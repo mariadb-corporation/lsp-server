@@ -1091,9 +1091,8 @@ Built on the parse tree and the gaps between its tokens: a small Wadler/Prettier
 printer (texts, lines that break or not, groups, nests, aligns, fills) and a builder that
 maps the grammar's clause nodes onto it (`src/formatter.cc`). Comments are kept before
 the token after them, and a line comment ending a clause keyword's line puts what
-follows one level deeper than the keyword; versioned comments, routine bodies and every
-non-query statement
-are left alone. Each layout is checked: the same tokens and comments, and it parses.
+follows one level deeper than the keyword; versioned comments and the statements the
+formatter does not know are left alone. Each layout is checked: the same tokens and comments, and it parses.
 
 **Status 2026-10-18: queries done** (SELECT, WITH, UNION, SELECT ... INTO), see
 `docs/language-server.md` "Formatting". **2026-10-19: DML and views done**: INSERT and
@@ -1102,8 +1101,18 @@ the query rules for their clauses (the query on a line of its own under the head
 `DELETE FROM t` keeps FROM on its line); CREATE TABLE and ALTER TABLE with several
 changes one item per line, one level deeper, whatever their length, partitions and
 subpartitions too, table options filling the line (the user's choice,
-2026-10-19; not aligned in columns, short tables too). Open: other DDL, routine bodies,
-the original relative indentation of line breaks inside other constructs (they all
+2026-10-19; not aligned in columns, short tables too). **2026-10-23: routines done**:
+CREATE PROCEDURE, FUNCTION, TRIGGER and EVENT, and compound statements at the top level;
+one statement per line in blocks, IF, CASE and loops, one level deeper (the user's
+choice, 2026-10-23), each statement laid out on its own by the rules above; the header
+on its line, parameters on it when they fit (else one per line), characteristics and
+event clauses one level deeper on lines of their own; empty lines between statements
+kept. Clauses one level deeper than their statement's first line by default, at the top
+level and in bodies, each switchable (`indentClauses`, `indentRoutineClauses`, the user's
+choice 2026-10-23); completion's added FROM always on a line of its own, placed by the
+same settings, and `completionAddsTables` to turn the added tables off. Open: other DDL,
+Oracle-mode routines (`AS BEGIN ... END`, packages: left as they
+are), the original relative indentation of line breaks inside other constructs (they all
 continue one level deeper), `onTypeFormatting`.
 
 ### P9 — SOURCE includes (added 2026-10-19)

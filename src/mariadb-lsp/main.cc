@@ -93,9 +93,11 @@ const char *const k_usage =
     "           (with --format json, a summary); exit 0 when there are none,\n"
     "           1 when there are\n"
     "  outline  the schema objects a SQL file defines, as JSON\n"
-    "  format   print a SQL file with its queries and tables laid out (SELECT,\n"
-    "           WITH, INSERT ... SELECT, UPDATE, DELETE, CREATE VIEW, CREATE and\n"
-    "           ALTER TABLE statements that parse; the rest as it is)\n"
+    "  format   print a SQL file with its queries, tables and routines laid out\n"
+    "           (SELECT, WITH, INSERT ... SELECT, UPDATE, DELETE, CREATE VIEW,\n"
+    "           CREATE and ALTER TABLE, CREATE PROCEDURE, FUNCTION, TRIGGER and\n"
+    "           EVENT statements and compound statements that parse; the rest\n"
+    "           as it is)\n"
     "  split    list the statements of a SQL file\n"
     "  tokens   list the tokens of every statement of a SQL file\n"
     "  tree     print the parse tree of every statement of a SQL file\n"
@@ -124,6 +126,13 @@ const char *const k_usage =
     "  --indent tab|2|4   format, complete: one level of indentation, a tab or 2\n"
     "                     or 4 spaces (format: default 2; complete: default a tab\n"
     "                     when the line has tabs, else 2)\n"
+    "  --no-indent-clauses\n"
+    "                     format, complete: a query's or DML statement's clauses\n"
+    "                     at its first line's level, not one level deeper\n"
+    "  --no-indent-routine-clauses\n"
+    "                     format, complete: the same in routine bodies\n"
+    "  --no-add-tables    complete: a column of a table not in the query adds\n"
+    "                     no FROM or JOIN\n"
     "  --connection URI   check, outline, complete: read the sql_mode, the version\n"
     "                     and the catalog from this server (its password from the\n"
     "                     shell's secret store); check then also reports tables and\n"
@@ -177,6 +186,7 @@ struct Options {
   mdbls::Format_options format;
   std::string indent;  // --indent; "": not given
   bool source = true;  // expand MSM SOURCE directives (--no-source: not)
+  bool add_tables = true;  // complete: --no-add-tables
   std::string source_dir;  // --source-dir, absolute; "": the file's folder
 };
 
@@ -673,6 +683,9 @@ void run_complete(const Options &o, const std::string &text, const mdbls::Line_m
   mdbls::Completion_options co;
   co.version_id = o.index.version_id;
   co.indent = o.indent;
+  co.indent_clauses = o.format.indent_clauses;
+  co.indent_routine_clauses = o.format.indent_routine_clauses;
+  co.add_tables = o.add_tables;
   auto t0 = Clock::now();
   const auto list = mdbls::complete(text, index, offset, view, cache, co);
   const double first_ms = ms_since(t0);
@@ -866,6 +879,12 @@ std::optional<Options> parse_args(int argc, char **argv) {
         return std::nullopt;
       }
       o.indent = *v == "tab" ? "\t" : std::string(*v == "2" ? 2 : 4, ' ');
+    } else if (arg == "--no-add-tables") {
+      o.add_tables = false;
+    } else if (arg == "--no-indent-clauses") {
+      o.format.indent_clauses = false;
+    } else if (arg == "--no-indent-routine-clauses") {
+      o.format.indent_routine_clauses = false;
     } else if (arg == "--stdio") {
       // The default and only transport.
     } else if (arg == "--mcp") {

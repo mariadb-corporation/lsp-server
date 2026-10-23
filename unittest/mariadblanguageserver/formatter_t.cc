@@ -28,14 +28,17 @@ namespace mdbls {
 
 namespace {
 
-// `sql` with its edits applied.
-std::string layout(const std::string &sql, size_t width = 80, bool upper = true, std::string indent = "  ") {
+// `sql` with its edits applied; the clauses at the level of their
+// statement's first line unless `indent_clauses`.
+std::string layout(const std::string &sql, size_t width = 80, bool upper = true, std::string indent = "  ",
+                   bool indent_clauses = false) {
   const auto index = Statement_index::build(sql);
   Parser_cache cache;
   Format_options o;
   o.line_width = width;
   o.upper_case_keywords = upper;
   o.indent = std::move(indent);
+  o.indent_clauses = o.indent_routine_clauses = indent_clauses;
   return apply_edits(sql, format_sql(sql, index, 0, static_cast<uint32_t>(sql.size()), cache, o));
 }
 
@@ -195,11 +198,12 @@ TEST(Formatter, other_statements_are_left_alone) {
   EXPECT_EQ(layout(versioned), versioned);
   const std::string broken = "SELECT a FROM WHERE;";
   EXPECT_EQ(layout(broken), broken);
-  // Rows, tables made from a query, and routines are not laid out.
+  // Rows, tables made from a query, a UDF, a transaction's BEGIN are not
+  // laid out.
   for (const std::string sql :
        {"INSERT INTO t SET a = 1;", "INSERT INTO t (a, b) VALUES (1, 'select');",
-        "CREATE TABLE c AS SELECT * FROM t WHERE x = 1;",
-        "DELIMITER ;;\nCREATE PROCEDURE p() BEGIN CREATE TABLE t (a INT, b INT); UPDATE t SET a = 1; END;;\nDELIMITER ;\n"}) {
+        "CREATE TABLE c AS SELECT * FROM t WHERE x = 1;", "CREATE FUNCTION f RETURNS INTEGER SONAME 'f.so';",
+        "begin work;"}) {
     EXPECT_EQ(layout(sql, 20), sql);
   }
 }
@@ -412,6 +416,9 @@ TEST(Formatter, every_layout_is_its_own_layout) {
   };
   for (const auto &q : queries) {
     for (const size_t width : {0, 20, 40, 80, 120}) {
+      const std::string indented_clauses = layout(q + ";", width, true, "  ", true);
+      EXPECT_EQ(layout(indented_clauses, width, true, "  ", true), indented_clauses) << "width " << width << "\n"
+                                                                                       << indented_clauses;
       const std::string once = layout(q + ";", width);
       EXPECT_EQ(layout(once, width), once) << "width " << width << "\n" << once;
       // The same, every line indented, with the width two columns wider
@@ -423,6 +430,380 @@ TEST(Formatter, every_layout_is_its_own_layout) {
       EXPECT_EQ(layout(indented, width == 0 ? 0 : width + 2), indented) << "width " << width << ", indented\n" << indented;
     }
   }
+}
+
+namespace {
+
+// `body` between DELIMITER $$ lines, laid out.
+std::string routine(const std::string &body, size_t width = 80) {
+  const std::string open = "DELIMITER $$\n";
+  const std::string close = "$$\nDELIMITER ;\n";
+  const std::string out = layout(open + body + close, width);
+  if (!out.starts_with(open) || !out.ends_with(close)) return out;
+  return out.substr(open.size(), out.size() - open.size() - close.size());
+}
+
+}  // namespace
+
+TEST(Formatter, a_routine_puts_each_statement_on_a_line) {
+  EXPECT_EQ(routine("create procedure p(in a int) begin declare n int default 0; set n = a; select n; end"),
+            "CREATE PROCEDURE p(IN a INT)\n"
+            "BEGIN\n"
+            "  DECLARE n INT DEFAULT 0;\n"
+            "  SET n = a;\n"
+            "  SELECT n;\n"
+            "END");
+  // A body that is no block stays on the header's line when it fits, else
+  // goes one level deeper.
+  EXPECT_EQ(routine("create function f(x int) returns int deterministic return x * 2"),
+            "CREATE FUNCTION f(x INT) RETURNS INT DETERMINISTIC RETURN x * 2");
+  EXPECT_EQ(routine("create procedure p()\nselect 1"), "CREATE PROCEDURE p()\n  SELECT 1");
+  EXPECT_EQ(routine("CREATE PROCEDURE p() BEGIN END"), "CREATE PROCEDURE p()\nBEGIN\nEND");
+}
+
+TEST(Formatter, characteristics_go_one_level_deeper_on_lines_of_their_own) {
+  EXPECT_EQ(routine("CREATE DEFINER=`root`@`localhost` FUNCTION `f`(a INT) RETURNS INT(11) DETERMINISTIC "
+                    "COMMENT 'twice' BEGIN RETURN a * 2; END"),
+            "CREATE DEFINER=`root`@`localhost` FUNCTION `f`(a INT) RETURNS INT(11)\n"
+            "  DETERMINISTIC\n"
+            "  COMMENT 'twice'\n"
+            "BEGIN\n"
+            "  RETURN a * 2;\n"
+            "END");
+}
+
+TEST(Formatter, parameters_that_do_not_fit_go_one_per_line) {
+  EXPECT_EQ(routine("CREATE PROCEDURE rewards_report (\n IN min_monthly_purchases TINYINT UNSIGNED\n"
+                    " , IN min_dollar_amount_purchased DECIMAL(10,2)\n , OUT count_rewardees INT\n)\n"
+                    "READS SQL DATA\nBEGIN\nSELECT 1;\nEND"),
+            "CREATE PROCEDURE rewards_report(\n"
+            "  IN min_monthly_purchases TINYINT UNSIGNED,\n"
+            "  IN min_dollar_amount_purchased DECIMAL(10,2),\n"
+            "  OUT count_rewardees INT\n"
+            ")\n"
+            "  READS SQL DATA\n"
+            "BEGIN\n"
+            "  SELECT 1;\n"
+            "END");
+}
+
+TEST(Formatter, if_case_and_loops_nest_their_statements) {
+  EXPECT_EQ(routine("CREATE PROCEDURE p(a INT) BEGIN "
+                    "IF a > 0 THEN SET a = 1; ELSEIF a < 0 THEN SET a = -1; ELSE SET a = 0; END IF; "
+                    "CASE a WHEN 1 THEN SET a = 2; ELSE BEGIN END; END CASE; "
+                    "lbl: LOOP SET a = a + 1; IF a > 9 THEN LEAVE lbl; END IF; END LOOP lbl; "
+                    "WHILE a > 0 DO SET a = a - 1; END WHILE; "
+                    "REPEAT SET a = a + 1; UNTIL a > 3 END REPEAT; "
+                    "FOR i IN 1..3 DO SET a = a + i; END FOR; END"),
+            "CREATE PROCEDURE p(a INT)\n"
+            "BEGIN\n"
+            "  IF a > 0 THEN\n"
+            "    SET a = 1;\n"
+            "  ELSEIF a < 0 THEN\n"
+            "    SET a = -1;\n"
+            "  ELSE\n"
+            "    SET a = 0;\n"
+            "  END IF;\n"
+            "  CASE a\n"
+            "    WHEN 1 THEN\n"
+            "      SET a = 2;\n"
+            "    ELSE\n"
+            "      BEGIN\n"
+            "      END;\n"
+            "  END CASE;\n"
+            "  lbl: LOOP\n"
+            "    SET a = a + 1;\n"
+            "    IF a > 9 THEN\n"
+            "      LEAVE lbl;\n"
+            "    END IF;\n"
+            "  END LOOP lbl;\n"
+            "  WHILE a > 0 DO\n"
+            "    SET a = a - 1;\n"
+            "  END WHILE;\n"
+            "  REPEAT\n"
+            "    SET a = a + 1;\n"
+            "  UNTIL a > 3 END REPEAT;\n"
+            "  FOR i IN 1..3 DO\n"
+            "    SET a = a + i;\n"
+            "  END FOR;\n"
+            "END");
+}
+
+TEST(Formatter, then_starts_a_line_after_a_condition_that_breaks) {
+  EXPECT_EQ(routine("CREATE PROCEDURE p() BEGIN IF (old.title != new.title) OR (old.description != new.description) "
+                    "OR (old.film_id != new.film_id) THEN SET @a = 1; END IF; END"),
+            "CREATE PROCEDURE p()\n"
+            "BEGIN\n"
+            "  IF (old.title != new.title)\n"
+            "    OR (old.description != new.description)\n"
+            "    OR (old.film_id != new.film_id)\n"
+            "  THEN\n"
+            "    SET @a = 1;\n"
+            "  END IF;\n"
+            "END");
+}
+
+TEST(Formatter, statements_of_a_body_follow_the_query_rules) {
+  EXPECT_EQ(routine("CREATE PROCEDURE p() BEGIN DECLARE c CURSOR FOR SELECT id FROM t WHERE x = 1; "
+                    "SELECT c.name, o.total FROM customer AS c LEFT OUTER JOIN orders AS o ON o.customer_id = c.id "
+                    "WHERE o.total > 100; UPDATE t SET a = 1\nWHERE b = 2; END"),
+            "CREATE PROCEDURE p()\n"
+            "BEGIN\n"
+            "  DECLARE c CURSOR FOR SELECT id FROM t WHERE x = 1;\n"
+            "  SELECT c.name, o.total\n"
+            "  FROM customer AS c\n"
+            "    LEFT OUTER JOIN orders AS o ON o.customer_id = c.id\n"
+            "  WHERE o.total > 100;\n"
+            "  UPDATE t\n"
+            "  SET a = 1\n"
+            "  WHERE b = 2;\n"
+            "END");
+  // A handler's block starts on its line.
+  EXPECT_EQ(routine("CREATE PROCEDURE p() BEGIN DECLARE EXIT HANDLER FOR SQLEXCEPTION\nBEGIN ROLLBACK; END; END"),
+            "CREATE PROCEDURE p()\n"
+            "BEGIN\n"
+            "  DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN\n"
+            "    ROLLBACK;\n"
+            "  END;\n"
+            "END");
+}
+
+TEST(Formatter, comments_and_empty_lines_stay_in_a_body) {
+  EXPECT_EQ(routine("CREATE PROCEDURE p() BEGIN -- start\n  DECLARE a INT; -- trailing\n\n\n"
+                    "  /* why */\n  IF a THEN SET a = 1;\n  -- before else\n  ELSE SET a = 2; END IF;\n"
+                    "-- before end\nEND"),
+            "CREATE PROCEDURE p()\n"
+            "BEGIN -- start\n"
+            "  DECLARE a INT; -- trailing\n"
+            "\n"
+            "  /* why */\n"
+            "  IF a THEN\n"
+            "    SET a = 1;\n"
+            "    -- before else\n"
+            "  ELSE\n"
+            "    SET a = 2;\n"
+            "  END IF;\n"
+            "  -- before end\n"
+            "END");
+  // An empty line stays between statements, after the declarations and
+  // between a CASE's arms, not right after BEGIN, CASE or `(`.
+  EXPECT_EQ(routine("CREATE PROCEDURE p() BEGIN\n\n  DECLARE a INT;\n\n  SELECT 1;\n  CASE a\n\n"
+                    "    WHEN 1 THEN SELECT 1;\n\n    WHEN 2 THEN SELECT 2;\n  END CASE;\n\nEND"),
+            "CREATE PROCEDURE p()\n"
+            "BEGIN\n"
+            "  DECLARE a INT;\n"
+            "\n"
+            "  SELECT 1;\n"
+            "  CASE a\n"
+            "    WHEN 1 THEN\n"
+            "      SELECT 1;\n"
+            "\n"
+            "    WHEN 2 THEN\n"
+            "      SELECT 2;\n"
+            "  END CASE;\n"
+            "END");
+  EXPECT_EQ(layout("CREATE TABLE t (\n\n  a INT,\n\n  b INT\n\n);"), "CREATE TABLE t (\n  a INT,\n\n  b INT\n);");
+}
+
+TEST(Formatter, a_for_loops_cursor_query_is_a_subquery_and_end_repeat_starts_a_line) {
+  const std::string sql =
+      "CREATE PROCEDURE p() BEGIN FOR rec IN (SELECT id FROM customer AS c WHERE c.total > 100) DO "
+      "SET @n = rec.id; END FOR; REPEAT SET @a = @a + 1; UNTIL @a > 3 AND @b > 3 AND @c > 3 AND @d > 3 "
+      "END REPEAT; END";
+  EXPECT_EQ(routine(sql),
+            "CREATE PROCEDURE p()\n"
+            "BEGIN\n"
+            "  FOR rec IN (SELECT id FROM customer AS c WHERE c.total > 100) DO\n"
+            "    SET @n = rec.id;\n"
+            "  END FOR;\n"
+            "  REPEAT\n"
+            "    SET @a = @a + 1;\n"
+            "  UNTIL @a > 3 AND @b > 3 AND @c > 3 AND @d > 3 END REPEAT;\n"
+            "END");
+  // The cursor's query breaks like a subquery, `) DO` closing it; END
+  // REPEAT comes back to the block's level after a condition that breaks.
+  EXPECT_EQ(routine(sql, 40),
+            "CREATE PROCEDURE p()\n"
+            "BEGIN\n"
+            "  FOR rec IN (\n"
+            "    SELECT id\n"
+            "    FROM customer AS c\n"
+            "    WHERE c.total > 100\n"
+            "  ) DO\n"
+            "    SET @n = rec.id;\n"
+            "  END FOR;\n"
+            "  REPEAT\n"
+            "    SET @a = @a + 1;\n"
+            "  UNTIL @a > 3\n"
+            "    AND @b > 3\n"
+            "    AND @c > 3\n"
+            "    AND @d > 3\n"
+            "  END REPEAT;\n"
+            "END");
+}
+
+TEST(Formatter, triggers_events_and_compound_statements_are_routines_too) {
+  EXPECT_EQ(routine("create trigger tr before insert on t for each row set new.a = 1"),
+            "CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW SET new.a = 1");
+  EXPECT_EQ(routine("create trigger tr after update on t for each row begin insert into log (a) values (new.a); end"),
+            "CREATE TRIGGER tr AFTER UPDATE ON t FOR EACH ROW\n"
+            "BEGIN\n"
+            "  INSERT INTO log (a) VALUES (new.a);\n"
+            "END");
+  EXPECT_EQ(routine("create event e on schedule every 1 day starts '2026-01-01' on completion preserve "
+                    "comment 'x' do begin delete from log where ts < now(); end"),
+            "CREATE EVENT e\n"
+            "  ON SCHEDULE EVERY 1 DAY STARTS '2026-01-01'\n"
+            "  ON COMPLETION PRESERVE\n"
+            "  COMMENT 'x'\n"
+            "DO BEGIN\n"
+            "  DELETE FROM log WHERE ts < now();\n"
+            "END");
+  EXPECT_EQ(routine("create event e on schedule at '2035-12-31 20:01:23' do set @a=5"),
+            "CREATE EVENT e ON SCHEDULE AT '2035-12-31 20:01:23' DO SET @a=5");
+  EXPECT_EQ(routine("begin not atomic declare x int; set x = 1; end"),
+            "BEGIN NOT ATOMIC\n  DECLARE x INT;\n  SET x = 1;\nEND");
+  EXPECT_EQ(routine("if @a then select 1; end if"), "IF @a THEN\n  SELECT 1;\nEND IF");
+  // A body of one IF is a statement other than BEGIN ... END: one level
+  // deeper.
+  EXPECT_EQ(routine("create trigger tr before insert on t for each row if new.a then set new.b = 1; end if"),
+            "CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW\n"
+            "  IF new.a THEN\n"
+            "    SET new.b = 1;\n"
+            "  END IF");
+  // No empty line before END.
+  EXPECT_EQ(routine("CREATE PROCEDURE p() BEGIN SELECT 1;\n\nEND"), "CREATE PROCEDURE p()\nBEGIN\n  SELECT 1;\nEND");
+}
+
+TEST(Formatter, every_routine_layout_is_its_own_layout) {
+  const std::vector<std::string> routines = {
+      "CREATE DEFINER=`root`@`localhost` PROCEDURE p(IN a INT, OUT b VARCHAR(20)) COMMENT 'demo' READS SQL DATA "
+      "BEGIN DECLARE n INT DEFAULT 0; DECLARE c CURSOR FOR SELECT id FROM t WHERE x = 1; "
+      "DECLARE CONTINUE HANDLER FOR NOT FOUND SET n = 1; "
+      "IF a > 0 AND n < 10 AND a + n > 100000 THEN SELECT COUNT(*) INTO n FROM t WHERE t.id = a; "
+      "ELSEIF a < 0 THEN SET n = 1; ELSE SET n = -1; END IF; "
+      "CASE WHEN a = 1 THEN SET b = 'one'; ELSE SET b = 'other'; END CASE; "
+      "l: WHILE n > 0 DO SET n = n - 1; END WHILE l; "
+      "INSERT INTO log (a, b) SELECT x, y FROM u JOIN v ON u.id = v.id WHERE u.k > 1; END",
+      "CREATE FUNCTION get_customer_balance(p_customer_id INT, p_effective_date DATETIME) RETURNS DECIMAL(5,2) "
+      "DETERMINISTIC READS SQL DATA BEGIN DECLARE v INT; -- the fees\n"
+      "SELECT IFNULL(SUM(film.rental_rate),0) INTO v FROM film, inventory WHERE film.film_id = inventory.film_id; "
+      "RETURN v; END",
+      "CREATE TRIGGER upd_film AFTER UPDATE ON film FOR EACH ROW BEGIN IF (old.title != new.title) OR "
+      "(old.description != new.description) THEN UPDATE film_text SET title=new.title, description=new.description "
+      "WHERE film_id=old.film_id; END IF; END",
+      "CREATE EVENT e ON SCHEDULE EVERY 1 DAY ON COMPLETION PRESERVE DO DELETE FROM log WHERE ts < NOW() - INTERVAL "
+      "1 DAY",
+  };
+  for (const auto &r : routines) {
+    for (const size_t width : {0, 20, 40, 80, 120}) {
+      const std::string once = routine(r, width);
+      EXPECT_EQ(routine(once, width), once) << "width " << width << "\n" << once;
+      std::string indented = "  " + once;
+      for (size_t at = indented.find('\n'); at != std::string::npos; at = indented.find('\n', at + 1)) {
+        indented.insert(at + 1, "  ");
+      }
+      EXPECT_EQ(routine(indented, width == 0 ? 0 : width + 2), indented) << "width " << width << ", indented\n"
+                                                                          << indented;
+    }
+  }
+}
+
+namespace {
+
+// `sql` laid out with the default options but these two.
+std::string with_clauses(const std::string &sql, bool top, bool routines) {
+  const auto index = Statement_index::build(sql);
+  Parser_cache cache;
+  Format_options o;
+  o.indent_clauses = top;
+  o.indent_routine_clauses = routines;
+  return apply_edits(sql, format_sql(sql, index, 0, static_cast<uint32_t>(sql.size()), cache, o));
+}
+
+}  // namespace
+
+TEST(Formatter, clauses_go_one_level_deeper_by_default) {
+  const std::string sql =
+      "SELECT c.name, o.total FROM customer AS c JOIN orders AS o ON o.customer_id = c.id WHERE o.total > 100 "
+      "AND c.active = 1 AND c.name LIKE 'A%' AND o.created_at > '2026-01-01';\n"
+      "CREATE VIEW v AS SELECT a FROM t\nWHERE b = 1;\n"
+      "DELIMITER $$\nCREATE PROCEDURE p() BEGIN DECLARE c CURSOR FOR SELECT a FROM t\nWHERE b = 1; "
+      "UPDATE film_text SET title = 'x'\nWHERE film_id = 1; SET @x =\n1; END$$\nDELIMITER ;\n";
+  const std::string top =
+      "SELECT c.name, o.total\n"
+      "  FROM customer AS c\n"
+      "    JOIN orders AS o ON o.customer_id = c.id\n"
+      "  WHERE o.total > 100\n"
+      "    AND c.active = 1\n"
+      "    AND c.name LIKE 'A%'\n"
+      "    AND o.created_at > '2026-01-01';\n"
+      "CREATE VIEW v AS\n"
+      "  SELECT a\n"
+      "  FROM t\n"
+      "  WHERE b = 1;\n";
+  const std::string flat_top =
+      "SELECT c.name, o.total\n"
+      "FROM customer AS c\n"
+      "  JOIN orders AS o ON o.customer_id = c.id\n"
+      "WHERE o.total > 100\n"
+      "  AND c.active = 1\n"
+      "  AND c.name LIKE 'A%'\n"
+      "  AND o.created_at > '2026-01-01';\n"
+      "CREATE VIEW v AS\n"
+      "SELECT a\n"
+      "FROM t\n"
+      "WHERE b = 1;\n";
+  // A statement without clauses keeps its line breaks one level deeper,
+  // either way.
+  const std::string body =
+      "DELIMITER $$\n"
+      "CREATE PROCEDURE p()\n"
+      "BEGIN\n"
+      "  DECLARE c CURSOR FOR\n"
+      "    SELECT a\n"
+      "    FROM t\n"
+      "    WHERE b = 1;\n"
+      "  UPDATE film_text\n"
+      "    SET title = 'x'\n"
+      "    WHERE film_id = 1;\n"
+      "  SET @x =\n"
+      "    1;\n"
+      "END$$\n"
+      "DELIMITER ;\n";
+  const std::string flat_body =
+      "DELIMITER $$\n"
+      "CREATE PROCEDURE p()\n"
+      "BEGIN\n"
+      "  DECLARE c CURSOR FOR\n"
+      "  SELECT a\n"
+      "  FROM t\n"
+      "  WHERE b = 1;\n"
+      "  UPDATE film_text\n"
+      "  SET title = 'x'\n"
+      "  WHERE film_id = 1;\n"
+      "  SET @x =\n"
+      "    1;\n"
+      "END$$\n"
+      "DELIMITER ;\n";
+  EXPECT_EQ(with_clauses(sql, true, true), top + body);
+  EXPECT_EQ(with_clauses(sql, false, true), flat_top + body);
+  EXPECT_EQ(with_clauses(sql, true, false), top + flat_body);
+  EXPECT_EQ(with_clauses(sql, false, false), flat_top + flat_body);
+  for (const bool a : {true, false}) {
+    for (const bool b : {true, false}) {
+      const std::string once = with_clauses(sql, a, b);
+      EXPECT_EQ(with_clauses(once, a, b), once);
+    }
+  }
+}
+
+TEST(Formatter, an_events_body_indents_its_clauses_once) {
+  const std::string sql = "DELIMITER $$\nCREATE EVENT e ON SCHEDULE AT '2035-12-31' DO SELECT a FROM t\nWHERE b = 1$$\n"
+                          "DELIMITER ;\n";
+  EXPECT_EQ(with_clauses(sql, true, true),
+            "DELIMITER $$\nCREATE EVENT e\n  ON SCHEDULE AT '2035-12-31'\nDO SELECT a\n  FROM t\n  WHERE b = 1$$\n"
+            "DELIMITER ;\n");
 }
 
 TEST(Formatter, a_range_formats_the_statements_it_touches) {

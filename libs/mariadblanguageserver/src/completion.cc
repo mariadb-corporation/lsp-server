@@ -184,21 +184,22 @@ struct Added_clause {
 };
 
 // The text inserting `clauses` at `at` in the statement [begin, body_end)
-// of `text`.  They stay on the line, one space apart, unless the statement
-// spans lines already or the line would grow past `width` characters (0:
-// no limit); `extra` is what the item's other edits add to that line.
+// of `text`.  They stay on the line, one space apart, unless `own_line`,
+// the statement spans lines already or the line would grow past `width`
+// characters (0: no limit); `extra` is what the item's other edits add to
+// that line.
 // Then each clause starts a line of its own at `indent`, and an ON that
 // would pass the width goes on the next line, `unit` deeper.
 std::string place_clauses(std::string_view text, uint32_t begin, uint32_t body_end, uint32_t at,
                           std::string_view indent, const std::vector<Added_clause> &clauses,
-                          int64_t extra, size_t width, std::string_view unit) {
+                          int64_t extra, size_t width, std::string_view unit, bool own_line) {
   std::string flat;
   for (const auto &c : clauses) {
     flat += " " + c.head;
     if (!c.on.empty()) flat += " " + c.on;
   }
   const std::string_view statement = text.substr(begin, body_end - begin);
-  if (statement.find('\n') == std::string_view::npos) {
+  if (!own_line && statement.find('\n') == std::string_view::npos) {
     if (width == 0) return flat;
     const uint32_t lb = line_begin(text, at);
     const auto length = static_cast<int64_t>(char_count(text.substr(lb, line_end(text, at) - lb)) +
@@ -605,7 +606,7 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
         // cursor has to be known before one is added.
         const Query_shape query = a.accepted() ? a.query_at(word_begin) : Query_shape{};
         const bool can_add_table =
-            query.found && !query.dual &&
+            options.add_tables && query.found && !query.dual &&
             (query.has_from || (word_begin >= query.select_list.begin &&
                                 word_begin <= query.select_list.end));
         // A table in scope, resolved in the catalog; nullptr for derived
@@ -714,7 +715,8 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
           // The edit adding `clauses` at `where`, laid out.  What the item
           // writes on that line besides counts towards its width: the
           // alias for the qualifiers and the column (its longest name).
-          auto add = [&](uint32_t where, std::string_view indent, const std::vector<Added_clause> &clauses) {
+          auto add = [&](uint32_t where, std::string_view indent, const std::vector<Added_clause> &clauses,
+                         bool own_line) {
             int64_t extra = 0;
             if (line_begin(text, where) == line_begin(text, word_begin)) {
               size_t longest = 0;
@@ -724,7 +726,7 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
             }
             edits.push_back({where, where,
                              place_clauses(text, begin, body_end, where, indent, clauses, extra,
-                                           options.line_width, indent_unit(indent, options.indent))});
+                                           options.line_width, indent_unit(indent, options.indent), own_line)});
             return edits;
           };
           auto joined = [&](const std::string &table, const std::string &as, const std::string &on) {
@@ -735,12 +737,20 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
             // query's, which in a routine body or a subquery is not the
             // statement's first line): the line before the select list's
             // leading blanks.
+            // With the clauses indented, one level deeper than the first
+            // line of the query's statement.
             uint32_t select_at = to_doc(query.select_list.begin);
             while (select_at > begin && std::isspace(static_cast<unsigned char>(text[select_at - 1]))) {
               --select_at;
             }
-            return add(to_doc(query.select_list.end), indentation(text, select_at > begin ? select_at - 1 : begin),
-                       {{clause("FROM", qualified, alias), ""}});
+            std::string from_indent(indentation(text, select_at > begin ? select_at - 1 : begin));
+            if (query.statement_begin != UINT32_MAX &&
+                (query.in_routine ? options.indent_routine_clauses : options.indent_clauses)) {
+              const std::string_view first = indentation(text, to_doc(query.statement_begin));
+              from_indent = std::string(first) + std::string(indent_unit(first, options.indent));
+            }
+            // A FROM always starts a line of its own.
+            return add(to_doc(query.select_list.end), from_indent, {{clause("FROM", qualified, alias), ""}}, true);
           }
           // A JOIN goes one level deeper than the FROM line, or at the
           // indentation of the last line of the tables when they span
@@ -780,7 +790,7 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
             }
             if (!on.empty()) break;
           }
-          if (!on.empty()) return add(at_end, join_indent, {joined(qualified, alias, on)});
+          if (!on.empty()) return add(at_end, join_indent, {joined(qualified, alias, on)}, false);
           // n:m: a table with a foreign key to the new one and one to a
           // table in scope links them; it is joined first, then the new
           // table on it.  Looked for among the tables of either schema.
@@ -819,9 +829,9 @@ Completion_list complete(std::string_view text, const Statement_index &index, ui
               });
               if (!link.empty()) break;
             }
-            if (!link.empty()) return add(at_end, join_indent, link);
+            if (!link.empty()) return add(at_end, join_indent, link, false);
           }
-          return add(at_end, join_indent, {{clause("CROSS JOIN", qualified, alias), ""}});
+          return add(at_end, join_indent, {{clause("CROSS JOIN", qualified, alias), ""}}, false);
         };
         // A table or schema to go on from: `name.`, and the list again.
         auto add_dotted = [&](const std::string &label, Completion_kind kind, int rank,

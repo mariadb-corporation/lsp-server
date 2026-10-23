@@ -92,6 +92,11 @@ struct Query_shape {
   bool has_from = false;
   bool dual = false;   // FROM DUAL: nothing to join to
   Range from_tables;   // the table references after FROM, joins included
+  // The start of the statement whose clauses the query's clauses are (a
+  // query, INSERT, REPLACE, UPDATE, DELETE, a view, a cursor's DECLARE),
+  // UINT32_MAX for a query in parentheses; whether it is in a routine body.
+  uint32_t statement_begin = UINT32_MAX;
+  bool in_routine = false;
 };
 
 struct Variable {

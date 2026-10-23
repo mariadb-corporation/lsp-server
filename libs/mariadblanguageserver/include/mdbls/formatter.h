@@ -37,6 +37,11 @@ struct Format_options {
   // them there; 0: no limit.
   size_t line_width = 80;
   std::string indent = "  ";  // one level of indentation
+  // A query's or DML statement's lines after its first (its clauses, and
+  // what they hold) one level deeper, at the top level of the text and in
+  // routine bodies.
+  bool indent_clauses = true;
+  bool indent_routine_clauses = true;
 };
 
 // The edits laying out the statements of `text` that overlap [begin, end)
@@ -44,14 +49,18 @@ struct Format_options {
 // statement is laid out when it is a query (SELECT, WITH, a parenthesized
 // query), one built around a query or clauses (INSERT or REPLACE ...
 // SELECT, UPDATE, DELETE, CREATE or ALTER VIEW), CREATE TABLE with its
-// columns or ALTER TABLE; it is left as it is when it is none of those,
+// columns, ALTER TABLE, a routine (CREATE PROCEDURE, FUNCTION, TRIGGER,
+// EVENT) or a compound statement (BEGIN NOT ATOMIC, IF, CASE, a loop); it
+// is left as it is when it is none of those,
 // does not parse whole, holds a versioned comment, or the layout would not
 // keep its tokens and comments.
 //
 // A query is laid out like this:
 //  - Its clauses (FROM, WHERE, GROUP BY, HAVING, ORDER BY, LIMIT, ...) stay
 //    on one line when the query fits there and the statement is on one line;
-//    otherwise each starts a line of its own.
+//    otherwise each starts a line of its own, one level deeper than the
+//    statement's first line (`indent_clauses`, `indent_routine_clauses`),
+//    or at its level.
 //  - The other statements' clauses do the same: the query after INSERT INTO
 //    t (...) and CREATE VIEW v AS, SET, ON DUPLICATE KEY UPDATE, RETURNING,
 //    WITH CHECK OPTION, an UPDATE's or DELETE's WHERE, ORDER BY, LIMIT.
@@ -60,6 +69,16 @@ struct Format_options {
 //    partitions and subpartitions likewise; its options fill the line, then
 //    continue one level deeper.  ALTER TABLE puts several changes one per
 //    line.
+//  - A routine's header stays on its line, its parameters too when they
+//    fit (else one per line, one level deeper); its characteristics, or an
+//    event's clauses, go one level deeper on lines of their own when the
+//    statement breaks; a BEGIN ... END body starts a line at the header's
+//    level, another statement one level deeper, an event's after DO.
+//  - In a block, IF, CASE or loop each statement goes on a line of its own
+//    one level deeper, laid out by these rules on its own; END, ELSE,
+//    ELSEIF and UNTIL back at the block's level, a CASE's WHEN arms one
+//    level deeper; THEN or DO after a condition that breaks starts a line.
+//    An empty line between statements stays.
 //  - Select, GROUP BY and ORDER BY lists continue after the comma on the
 //    same line up to the width, then on the next, aligned with the first
 //    item.

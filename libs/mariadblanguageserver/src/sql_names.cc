@@ -21,6 +21,7 @@
 
 #include "mdbls/keywords.h"
 #include "mdbparse.h"
+#include "statement_kinds.h"
 #include "text_util.h"
 
 namespace mdbls {
@@ -48,6 +49,7 @@ struct Name_syms {
   S(table_primary_ident) S(table_primary_derived) S(table_name_with_opt_use_partition)
   S(delete_single_table) S(select_item) S(select_item_list) S(expr) S(sp_param_name_and_mode)
   S(query_specification_start) S(from_clause) S(table_reference_list) S(DUAL_SYM)
+  S(verb_clause) S(sp_proc_stmt) S(sp_decl)
   // tokens
   S(TABLE_SYM) S(VIEW_SYM) S(SEQUENCE_SYM) S(INDEX_SYM) S(DATABASE)
 #undef S
@@ -728,6 +730,30 @@ Query_shape Statement_names::query_at(uint32_t offset) const {
     out.has_from = true;
     out.from_tables = {m_tree.begin(tables), m_tree.end(tables)};
     out.dual = m_tree.find(tables, s.DUAL_SYM) != npos;
+    break;
+  }
+  // Up to its statement, unless a parenthesis opens before it and closes
+  // after it on the way.
+  for (uint32_t c = q, a = m_tree.node(q).parent; a != npos; c = a, a = m_tree.node(a).parent) {
+    const auto kids = m_tree.children(a);
+    const auto at = std::find(kids.begin(), kids.end(), c);
+    auto is_token = [&](uint32_t k, auto pred) { return m_tree.is_token(k) && pred(m_tree.node(k).symbol); };
+    if (std::any_of(kids.begin(), at, [&](uint32_t k) { return is_token(k, is_left_paren); }) &&
+        std::any_of(at + 1, kids.end(), [&](uint32_t k) { return is_token(k, [&](int y) { return y == s.rparen; }); })) {
+      break;
+    }
+    const int sym = m_tree.node(a).symbol;
+    if (sym == s.sp_decl) {
+      out.statement_begin = m_tree.begin(a);
+      out.in_routine = true;
+      break;
+    }
+    if (sym != s.verb_clause) continue;
+    if (kids.size() == 1 && has_clauses(m_tree, kids[0])) {
+      const uint32_t st = kids[0];
+      out.statement_begin = m_tree.begin(st);
+      out.in_routine = ancestor(a, s.sp_proc_stmt) != npos;
+    }
     break;
   }
   return out;

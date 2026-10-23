@@ -93,6 +93,13 @@ struct Completion_options {
   // One level of indentation in those lines ("\t", "  ", "    "); empty:
   // a tab when the line's indentation has tabs, else two spaces.
   std::string indent;
+  // The FROM a column brings goes one level deeper than the first line of
+  // its query's statement, as the formatter puts clauses (Format_options).
+  bool indent_clauses = true;
+  bool indent_routine_clauses = true;
+  // A column of a table not in scope adds the table: FROM, or a JOIN; and
+  // the tables to join are offered.
+  bool add_tables = true;
   size_t max_items = 500;
 };
 

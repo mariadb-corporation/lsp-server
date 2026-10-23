@@ -128,7 +128,7 @@ class Completion(Language_test):
         name = next(i for i in r["items"] if i["label"] == "name")
         edits = name["additionalTextEdits"]
         self.assertEqual([range_text(text2, e["range"]) for e in edits], ["customer.", ""])
-        self.assertEqual([e["newText"] for e in edits], ["c.", " FROM customer AS c"])
+        self.assertEqual([e["newText"] for e in edits], ["c.", "\n  FROM customer AS c"])
         self.assertNotIn("command", name)
 
         # A second table: joined on its foreign key.
@@ -152,8 +152,17 @@ class Completion(Language_test):
         caps = {"textDocument": {"completion": {"completionItem": {"snippetSupport": True}}}}
         text, pos = self.open_at("SELECT 1,\n  customer.|;", capabilities=caps)
         name = next(i for i in self.at("textDocument/completion", pos)["items"] if i["label"] == "name")
-        self.assertEqual(name["textEdit"]["newText"], "name$0\nFROM customer AS c")
+        self.assertEqual(name["textEdit"]["newText"], "name$0\n  FROM customer AS c")
         self.assertEqual(name["insertTextMode"], 1)
+
+    def test_the_clause_and_table_settings(self):
+        text, pos = self.open_at("SELECT customer.|;", {"indentClauses": False})
+        name = next(i for i in self.at("textDocument/completion", pos)["items"] if i["label"] == "name")
+        self.assertEqual(name["additionalTextEdits"][-1]["newText"], "\nFROM customer AS c")
+        self.client.notify("workspace/didChangeConfiguration",
+                           {"settings": {"mariadb": {"completionAddsTables": False}}})
+        name = next(i for i in self.at("textDocument/completion", pos)["items"] if i["label"] == "name")
+        self.assertNotIn("additionalTextEdits", name)
 
     def test_lower_case_keywords(self):
         text, pos = self.open_at("sel|", {"keywordCase": "lower"})
@@ -179,11 +188,21 @@ class Formatting(Lsp_test):
         text = "DROP TABLE t;\nCREATE TABLE t (id INT, name TEXT);\n" + self.QUERY
         edits = self.format("textDocument/formatting", text)
         self.assertEqual(len(edits), 2)
-        # tabSize 4: the columns, and the join under FROM, one level of four
-        # spaces deeper.
+        # tabSize 4: the columns, the clauses, and the join under FROM, one
+        # level of four spaces deeper.
         self.assertEqual(edits[0]["range"]["start"], {"line": 1, "character": 0})
         self.assertEqual(edits[0]["newText"], "CREATE TABLE t (\n    id INT,\n    name TEXT\n)")
         self.assertEqual(edits[1]["range"]["start"], {"line": 2, "character": 0})
+        self.assertEqual(edits[1]["newText"],
+                         "SELECT o.id, c.name\n"
+                         "    FROM orders o\n"
+                         "        JOIN customer c ON c.id = o.customer_id\n"
+                         "    WHERE o.total > 100 AND c.name LIKE 'A%'")
+        # Without indentClauses, the clauses at the statement's level.
+        self.client.notify("workspace/didChangeConfiguration",
+                           {"settings": {"mariadb": {"indentClauses": False}}})
+        edits = self.client.request("textDocument/formatting", {
+            "textDocument": {"uri": URI}, "options": {"tabSize": 4, "insertSpaces": True}})
         self.assertEqual(edits[1]["newText"],
                          "SELECT o.id, c.name\n"
                          "FROM orders o\n"
@@ -209,7 +228,7 @@ class Formatting(Lsp_test):
         text = self.QUERY
         joined = "JOIN customer c ON c.id = o.customer_id\n"
         edits = self.format("textDocument/formatting", text, {"indentation": "tab"})
-        self.assertIn("\n\t" + joined, edits[0]["newText"])
+        self.assertIn("\n\t\t" + joined, edits[0]["newText"])
         c = self.client
         for setting, unit in (("2 spaces", "  "), ("4 spaces", "    "), ("editor", "    ")):
             c.notify("workspace/didChangeConfiguration",
@@ -219,7 +238,7 @@ class Formatting(Lsp_test):
                 "textDocument": {"uri": URI},
                 "options": {"tabSize": 2 if setting == "editor" else 8, "insertSpaces": True}})
             want = "  " if setting == "editor" else unit
-            self.assertIn("\n" + want + joined, edits[0]["newText"], setting)
+            self.assertIn("\n" + want * 2 + joined, edits[0]["newText"], setting)
 
     def test_cli_indent(self):
         self.client.initialize()  # shut down by tearDown
@@ -230,7 +249,10 @@ class Formatting(Lsp_test):
                 r = subprocess.run([BINARY, "format", "--indent", arg, f.name],
                                    capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stderr)
-                self.assertIn("\n" + unit + "JOIN customer c", r.stdout)
+                self.assertIn("\n" + unit * 2 + "JOIN customer c", r.stdout)
+            r = subprocess.run([BINARY, "format", "--no-indent-clauses", f.name],
+                               capture_output=True, text=True)
+            self.assertIn("\nFROM orders o\n  JOIN customer c", r.stdout)
             r = subprocess.run([BINARY, "format", "--indent", "3", f.name], capture_output=True,
                                text=True)
             self.assertEqual(r.returncode, 2)
