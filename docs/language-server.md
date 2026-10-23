@@ -484,7 +484,7 @@ a new position).
 256 MB one. `MDBLS_E2E_LARGE_MB` sets the size of the dump the large-file tests open
 (ctest passes 16; run by hand, the default is 64). `MDBLS_COMPLETION_P95_MS` is the
 bound of the completion latency test: ctest passes 20 for optimized builds and 100 for
-Debug ones. By hand:
+Debug and sanitizer ones. By hand:
 
 ```bash
 MARIADB_LSP=bld/bin/mariadb-lsp python3 -m unittest discover -s tests/e2e -v
@@ -495,3 +495,37 @@ The live-connection tests start a throwaway server with the `mariadbd` on `PATH`
 through MariaDB Shell's `mariadb-secret-store-plaintext` helper, found in
 `MDBLS_SHELL_BIN_DIR` (a CMake cache variable, default `../mariadb-shell/build/bin`).
 Without either, they are skipped; so are the unit tests of the secret store.
+
+### Sanitizers and fuzzing
+
+`-DWITH_ASAN=ON -DWITH_UBSAN=ON` builds the whole tree, the parser included, with
+AddressSanitizer and UndefinedBehaviorSanitizer; ctest then runs every test under them,
+the end-to-end tests too. Undefined behaviour aborts. The binaries carry their defaults
+(`cmake/sanitizer_defaults.cc`): leaks are reported, on macOS as well, except two threads
+detached on purpose: the stdin reader the server leaves when it exits with its input still
+open, and libFuzzer's RSS monitor. `ASAN_OPTIONS`, `LSAN_OPTIONS` and `UBSAN_OPTIONS` override them. RapidJSON's
+SIMD string scan is off in these builds: it reads the rest of an aligned 16-byte block past
+a string's end, which ASan reports.
+
+`-DWITH_FUZZERS=ON` (clang) turns both sanitizers on, instruments the tree for coverage
+and builds the libFuzzer targets of `fuzz/`:
+
+| Target | What it checks |
+| --- | --- |
+| `splitter_fuzz` | the statement index of any text: statements in order, inside the text, not overlapping, `find()` agreeing; the parallel split equal to the sequential one |
+| `edit_fuzz` | a text and up to 64 edits: `Statement_index::update()` equal to `build()` after each, with the splice it reports; a `Document` given the same edits as LSP positions |
+| `format_fuzz` | every statement checked by the parser; the whole text and a range formatted with options from the input, the result formatted again; the edits in order, inside the text |
+
+Each is a ctest test (label `fuzz`) that runs for `MDBLS_FUZZ_SECONDS` (default 10) from
+`tests/fixtures/sql` and the inputs earlier runs found, kept in `<build>/fuzz/corpus/`. A
+failing input is written to `<build>/fuzz/artifacts/<target>/`; the target run on that file
+reproduces it. A longer run by hand, four processes:
+
+```bash
+bld/bin/edit_fuzz -fork=4 -max_total_time=900 -max_len=8192 bld/fuzz/corpus/edit_fuzz tests/fixtures/sql
+```
+
+`.github/workflows/sanitizers.yml` builds so (clang, `-DWITH_FUZZERS=ON`) and runs the
+tests and each fuzz target for a minute: on a push to `release/candidate`, as the release
+build, and by hand on any branch (`gh workflow run sanitizers.yml --ref <branch>`). Pull
+requests run `ci.yml` only.
