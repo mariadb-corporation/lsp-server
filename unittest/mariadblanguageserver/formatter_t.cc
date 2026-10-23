@@ -581,6 +581,61 @@ TEST(Formatter, comments_and_empty_lines_stay_in_a_body) {
             "  END IF;\n"
             "  -- before end\n"
             "END");
+  // An empty line stays between statements, after the declarations and
+  // between a CASE's arms, not right after BEGIN, CASE or `(`.
+  EXPECT_EQ(routine("CREATE PROCEDURE p() BEGIN\n\n  DECLARE a INT;\n\n  SELECT 1;\n  CASE a\n\n"
+                    "    WHEN 1 THEN SELECT 1;\n\n    WHEN 2 THEN SELECT 2;\n  END CASE;\n\nEND"),
+            "CREATE PROCEDURE p()\n"
+            "BEGIN\n"
+            "  DECLARE a INT;\n"
+            "\n"
+            "  SELECT 1;\n"
+            "  CASE a\n"
+            "    WHEN 1 THEN\n"
+            "      SELECT 1;\n"
+            "\n"
+            "    WHEN 2 THEN\n"
+            "      SELECT 2;\n"
+            "  END CASE;\n"
+            "END");
+  EXPECT_EQ(layout("CREATE TABLE t (\n\n  a INT,\n\n  b INT\n\n);"), "CREATE TABLE t (\n  a INT,\n\n  b INT\n);");
+}
+
+TEST(Formatter, a_for_loops_cursor_query_is_a_subquery_and_end_repeat_starts_a_line) {
+  const std::string sql =
+      "CREATE PROCEDURE p() BEGIN FOR rec IN (SELECT id FROM customer AS c WHERE c.total > 100) DO "
+      "SET @n = rec.id; END FOR; REPEAT SET @a = @a + 1; UNTIL @a > 3 AND @b > 3 AND @c > 3 AND @d > 3 "
+      "END REPEAT; END";
+  EXPECT_EQ(routine(sql),
+            "CREATE PROCEDURE p()\n"
+            "BEGIN\n"
+            "  FOR rec IN (SELECT id FROM customer AS c WHERE c.total > 100) DO\n"
+            "    SET @n = rec.id;\n"
+            "  END FOR;\n"
+            "  REPEAT\n"
+            "    SET @a = @a + 1;\n"
+            "  UNTIL @a > 3 AND @b > 3 AND @c > 3 AND @d > 3 END REPEAT;\n"
+            "END");
+  // The cursor's query breaks like a subquery, `) DO` closing it; END
+  // REPEAT comes back to the block's level after a condition that breaks.
+  EXPECT_EQ(routine(sql, 40),
+            "CREATE PROCEDURE p()\n"
+            "BEGIN\n"
+            "  FOR rec IN (\n"
+            "    SELECT id\n"
+            "    FROM customer AS c\n"
+            "    WHERE c.total > 100\n"
+            "  ) DO\n"
+            "    SET @n = rec.id;\n"
+            "  END FOR;\n"
+            "  REPEAT\n"
+            "    SET @a = @a + 1;\n"
+            "  UNTIL @a > 3\n"
+            "    AND @b > 3\n"
+            "    AND @c > 3\n"
+            "    AND @d > 3\n"
+            "  END REPEAT;\n"
+            "END");
 }
 
 TEST(Formatter, triggers_events_and_compound_statements_are_routines_too) {

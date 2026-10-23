@@ -291,7 +291,9 @@ struct Symbols {
   int or_ = grammar::symbol("or");
   int on = grammar::symbol("ON");
   int comma = grammar::symbol("','");
+  int semicolon = grammar::symbol("';'");
   int right_paren = grammar::symbol("')'");
+  int end = grammar::symbol("END");
   int with_clause = grammar::symbol("with_clause");
   int unit_type_decl = grammar::symbol("unit_type_decl");
   int into = grammar::symbol("into");
@@ -544,13 +546,15 @@ struct Symbols {
       grammar::symbol("opt_select_lock_type"),   grammar::symbol("select_lock_type"),
       grammar::symbol("opt_procedure_or_into"),
   };
-  // A query in parentheses: '(' one of these ')'.
+  // A query in parentheses: '(' one of these ')'; a FOR loop's cursor query
+  // too (FOR rec IN (SELECT ...) DO).
   Symbol_set queries = {
       grammar::symbol("query_expression"),
       grammar::symbol("query_expression_body_ext"),
       grammar::symbol("query_expression_no_with_clause"),
       grammar::symbol("query_expression_body_ext_parens"),
       grammar::symbol("subselect"),
+      grammar::symbol("sp_cursor_stmt"),
   };
 };
 
@@ -750,13 +754,14 @@ class Builder {
   // the words of one keyword, Sep::word, they stay on its level):
   // `SELECT -- c` puts the items on the next line, indented.  Between
   // lines of their own (Sep::hard) an empty line stays; before END, ELSE,
-  // WHEN or `)` (Sep::close) only before a comment.
-  Doc separator(uint32_t j, Sep kind) const {
+  // WHEN or `)` (Sep::close) only before a comment; not at all when
+  // `blank_ok` is false.
+  Doc separator(uint32_t j, Sep kind, bool blank_ok = true) const {
     const Gap &g = gaps_[j];
     auto line_break = [&] {
       return kind == Sep::keep || kind == Sep::space ? nest(o_.indent, hardline()) : hardline();
     };
-    const bool blanks = kind == Sep::hard || kind == Sep::close;
+    const bool blanks = blank_ok && (kind == Sep::hard || kind == Sep::close);
     // A line break, and an empty line before it when `blank`.
     auto lines = [&](Doc d, bool blank) {
       if (blanks && blank) return concat(hardline(), std::move(d));
@@ -1079,12 +1084,16 @@ class Builder {
     return out;
   }
 
-  // Items on lines of their own, one level deeper.
+  // Items on lines of their own, one level deeper.  An empty line before
+  // the first stays only after a statement's ';' (the statements after the
+  // declarations), not after what opens the list: BEGIN, THEN, `(`.
   Doc one_per_line(std::vector<Piece> pieces) {
     std::vector<Doc> lines;
     for (Piece &p : pieces) {
       if (p.empty()) continue;
-      lines.push_back(separator(p.first, Sep::hard));
+      const uint32_t before = previous_token(p.first);
+      const bool blank_ok = !lines.empty() || (before != npos && token(before).symbol == s_.semicolon);
+      lines.push_back(separator(p.first, Sep::hard, blank_ok));
       lines.push_back(std::move(p.doc));
     }
     return nest(o_.indent, concat(std::move(lines)));
@@ -1425,7 +1434,8 @@ class Builder {
   // BEGIN ... END, IF ... THEN ... ELSE ... END IF, the loops, a WHEN arm:
   // the words one space apart, each statement list one statement per line
   // one level deeper, the words after it back on a line of their own.  A
-  // THEN or DO after a condition that breaks starts a line of its own.
+  // THEN or DO after a condition that breaks starts a line of its own, so
+  // does the END REPEAT after UNTIL's.
   Piece compound(uint32_t n) {
     std::vector<uint32_t> elements;
     compound_elements(n, &elements);
@@ -1435,7 +1445,7 @@ class Builder {
     size_t condition = npos;  // parts: the keyword before the last condition
     for (const uint32_t e : elements) {
       const int sym = symbol(e);
-      if ((sym == s_.then || sym == s_.do_) && condition != npos && t_.is_token(e)) {
+      if ((sym == s_.then || sym == s_.do_ || sym == s_.end) && condition != npos && t_.is_token(e)) {
         Piece p = build(e);
         if (p.empty()) continue;
         std::vector<Doc> head(std::make_move_iterator(parts.begin() + static_cast<std::ptrdiff_t>(condition)),
