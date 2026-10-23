@@ -423,6 +423,11 @@ struct Symbols {
       grammar::symbol("opt_ev_status"),
       grammar::symbol("opt_ev_comment"),
   };
+  // BEGIN ... END: a routine's body of one at the header's level.
+  Symbol_set blocks = {
+      grammar::symbol("sp_unlabeled_block"), grammar::symbol("sp_labeled_block"),
+      grammar::symbol("sp_unlabeled_block_not_atomic"),
+  };
   // Blocks, IF, CASE and loops: their statements on lines of their own.
   Symbol_set compounds = {
       grammar::symbol("sp_unlabeled_block"), grammar::symbol("sp_labeled_block"),
@@ -680,10 +685,14 @@ class Builder {
   void mark_statement_clauses() {
     clause_starts_.assign(t_.tokens().size(), false);
     block_starts_.assign(t_.tokens().size(), false);
+    begin_starts_.assign(t_.tokens().size(), false);
     for (uint32_t n = 0; n < t_.size(); ++n) {
       const auto &node = t_.node(n);
       if (s_.compounds.has(node.symbol)) {
-        if (const uint32_t j = first_token(n); j != npos) block_starts_[j] = true;
+        if (const uint32_t j = first_token(n); j != npos) {
+          block_starts_[j] = true;
+          if (s_.blocks.has(node.symbol)) begin_starts_[j] = true;
+        }
       }
       if (node.parent == npos) continue;
       if (!s_.statement_clause_symbols.has(node.symbol)) continue;
@@ -721,7 +730,8 @@ class Builder {
   // after it land on the same level, under the clause's keyword (between
   // the words of one keyword, Sep::word, they stay on its level):
   // `SELECT -- c` puts the items on the next line, indented.  Between
-  // lines of their own (Sep::hard, Sep::close) an empty line stays.
+  // lines of their own (Sep::hard) an empty line stays, before END or `)`
+  // (Sep::close) only before a comment.
   Doc separator(uint32_t j, Sep kind) const {
     const Gap &g = gaps_[j];
     auto line_break = [&] {
@@ -745,8 +755,9 @@ class Builder {
         case Sep::soft:
           return softline();
         case Sep::hard:
-        case Sep::close:
           return lines(hardline(), g.blank);
+        case Sep::close:
+          return hardline();  // no empty line before END or `)`
         case Sep::none:
           return text("");
       }
@@ -1217,8 +1228,13 @@ class Builder {
         for (Piece &p : joined_groups(k, Sep::space)) r->words.add(std::move(p), true);
         continue;
       }
-      if (sym == s_.sp_proc_stmt || sym == s_.ev_sql_stmt || sym == s_.sp_proc_stmt_in_returns_clause) {
+      if (sym == s_.sp_proc_stmt || sym == s_.sp_proc_stmt_in_returns_clause) {
         r->body = body_statement(k);
+        continue;
+      }
+      // Its sp_proc_stmt is the body statement: not nested twice.
+      if (sym == s_.ev_sql_stmt) {
+        r->body = build(k);
         continue;
       }
       Piece p = build(k);
@@ -1265,7 +1281,7 @@ class Builder {
       parts->push_back(std::move(r.intro.doc));
       parts->push_back(separator(r.body.first, Sep::space));
       parts->push_back(std::move(r.body.doc));
-    } else if (block_starts_[r.body.first]) {
+    } else if (begin_starts_[r.body.first]) {
       parts->push_back(separator(r.body.first, Sep::line));
       parts->push_back(std::move(r.body.doc));
     } else {
@@ -1517,6 +1533,7 @@ class Builder {
   std::vector<uint32_t> leaves_;
   std::vector<bool> clause_starts_;  // by token
   std::vector<bool> block_starts_;   // by token: a compound statement starts
+  std::vector<bool> begin_starts_;   // by token: a BEGIN ... END block starts
   bool ok_ = true;
 };
 
