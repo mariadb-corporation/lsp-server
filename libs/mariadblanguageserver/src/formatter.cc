@@ -298,6 +298,58 @@ struct Symbols {
   int opt_order_clause = grammar::symbol("opt_order_clause");
   int delete_limit_clause = grammar::symbol("delete_limit_clause");
   int view_check_option = grammar::symbol("view_check_option");
+  // Routines and compound statements.
+  int directly_executable_statement = grammar::symbol("directly_executable_statement");
+  int compound_statement = grammar::symbol("compound_statement");
+  int create_routine = grammar::symbol("create_routine");
+  int trigger_tail = grammar::symbol("trigger_tail");
+  int event_tail = grammar::symbol("event_tail");
+  int sp_tail_standalone = grammar::symbol("sp_tail_standalone");
+  int sf_c_chistics_and_body_standalone = grammar::symbol("sf_c_chistics_and_body_standalone");
+  int sp_c_chistics = grammar::symbol("sp_c_chistics");
+  int sp_parenthesized_pdparam_list = grammar::symbol("sp_parenthesized_pdparam_list");
+  int sf_parameters = grammar::symbol("sf_parameters");
+  int sp_parenthesized_fdparam_list = grammar::symbol("sp_parenthesized_fdparam_list");
+  int sp_pdparams = grammar::symbol("sp_pdparams");
+  int sp_fdparams = grammar::symbol("sp_fdparams");
+  int sp_proc_stmt = grammar::symbol("sp_proc_stmt");
+  int sp_proc_stmt_in_returns_clause = grammar::symbol("sp_proc_stmt_in_returns_clause");
+  int expr_lex = grammar::symbol("expr_lex");
+  int then = grammar::symbol("THEN_SYM");
+  int ev_sql_stmt = grammar::symbol("ev_sql_stmt");
+  int sp_decl = grammar::symbol("sp_decl");
+  int case_stmt_specification = grammar::symbol("case_stmt_specification");
+  int case_stmt_body = grammar::symbol("case_stmt_body");
+  int else_clause_opt = grammar::symbol("else_clause_opt");
+  int do_ = grammar::symbol("DO_SYM");
+  int sp_cursor_stmt = grammar::symbol("sp_cursor_stmt");
+  // An event's clauses besides ON SCHEDULE, each on a line of its own.
+  std::vector<int> event_clauses = {
+      grammar::symbol("opt_ev_on_completion"),
+      grammar::symbol("opt_ev_status"),
+      grammar::symbol("opt_ev_comment"),
+  };
+  // Blocks, IF, CASE and loops: their statements on lines of their own.
+  std::vector<int> compounds = {
+      grammar::symbol("sp_unlabeled_block"), grammar::symbol("sp_labeled_block"),
+      grammar::symbol("sp_unlabeled_block_not_atomic"), grammar::symbol("sp_proc_stmt_if"),
+      grammar::symbol("sp_labeled_control"), grammar::symbol("sp_unlabeled_control"),
+      case_stmt_specification,
+  };
+  // The parts of those that only group their words and statement lists.
+  std::vector<int> compound_parts = {
+      grammar::symbol("sp_if"), grammar::symbol("sp_elseifs"), grammar::symbol("loop_body"),
+      grammar::symbol("while_body"), grammar::symbol("repeat_body"), grammar::symbol("for_loop_statements"),
+      grammar::symbol("sp_if_then_statements"), grammar::symbol("sp_case_then_statements"),
+  };
+  // Statements and declarations, each with its ';' (left-recursive), and the
+  // WHEN arms of a CASE.
+  std::vector<int> statement_lists = {
+      grammar::symbol("sp_decls"), grammar::symbol("sp_proc_stmts"), grammar::symbol("sp_proc_stmts1"),
+  };
+  std::vector<int> when_lists = {
+      grammar::symbol("simple_when_clause_list"), grammar::symbol("searched_when_clause_list"),
+  };
   // Comma lists: select items, GROUP BY, ORDER BY, SET a = 1, b = 2, ON
   // DUPLICATE KEY UPDATE ..., the columns of INSERT and CREATE VIEW, the
   // tables of a DELETE.
@@ -341,6 +393,7 @@ struct Symbols {
       {grammar::symbol("opt_create_partitioning"), create_body},
       {grammar::symbol("opt_partitioning"), alter_commands},
       {grammar::symbol("remove_partitioning"), alter_commands},
+      {grammar::symbol("sp_cursor_stmt"), grammar::symbol("sp_decl_body")},
   };
   // Each starts a line of its own when its query breaks.
   std::vector<int> clauses = {
@@ -379,11 +432,13 @@ struct Comment {
   bool own_line = false;    // a line break before it
   bool line_after = false;  // a line comment, or a line break after it
   bool space_after = false; // blanks after it
+  bool blank_after = false; // an empty line after it
 };
 
 struct Gap {
   bool any = false;      // anything at all
   bool newline = false;  // a line break
+  bool blank = false;    // an empty line before the first comment, or the token
   std::vector<Comment> comments;
 };
 
@@ -398,11 +453,13 @@ bool line_comment_at(std::string_view s, size_t i) {
 bool read_gap(std::string_view s, Gap *gap) {
   gap->any = !s.empty();
   bool newline_seen = false;
+  int newlines = 0;  // since the last comment
   size_t i = 0;
   while (i < s.size()) {
     const char ch = s[i];
     if (ch == '\n') {
       gap->newline = newline_seen = true;
+      if (++newlines == 2) (gap->comments.empty() ? gap->blank : gap->comments.back().blank_after) = true;
       if (!gap->comments.empty()) gap->comments.back().line_after = true;
       ++i;
     } else if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\f' || ch == '\v') {
@@ -415,6 +472,7 @@ bool read_gap(std::string_view s, Gap *gap) {
       while (te > i && (s[te - 1] == '\r' || s[te - 1] == ' ' || s[te - 1] == '\t')) --te;
       gap->comments.push_back({s.substr(i, te - i), newline_seen, true});
       newline_seen = false;
+      newlines = 0;
       i = e;
     } else if (s.substr(i, 2) == "/*") {
       if (s.substr(i, 3) == "/*!" || s.substr(i, 4) == "/*M!") return false;
@@ -422,6 +480,7 @@ bool read_gap(std::string_view s, Gap *gap) {
       if (e == std::string_view::npos) return false;
       gap->comments.push_back({s.substr(i, e + 2 - i), newline_seen, false});
       newline_seen = false;
+      newlines = 0;
       i = e + 2;
     } else {
       return false;
@@ -456,7 +515,12 @@ class Builder {
   // The statement `root`; its clauses on lines of their own when `multiline`.
   // A hard line inside (one per line) breaks it too, as when the statement
   // was on several lines: formatting it again changes nothing.
-  Doc statement(uint32_t root, bool multiline) { return group(build(root).doc, multiline); }
+  // With `indent_clauses`, the lines of a query's or DML statement's
+  // clauses one level deeper than its first.
+  Doc statement(uint32_t root, bool multiline) {
+    Doc d = group(build(root).doc, multiline);
+    return o_.indent_clauses && has_clauses(root) ? nest(o_.indent, std::move(d)) : d;
+  }
 
  private:
   struct Piece {
@@ -479,8 +543,12 @@ class Builder {
   // line breaks before it as before a query's clauses.
   void mark_statement_clauses() {
     clause_starts_.assign(t_.tokens().size(), false);
+    block_starts_.assign(t_.tokens().size(), false);
     for (uint32_t n = 0; n < t_.size(); ++n) {
       const auto &node = t_.node(n);
+      if (contains(s_.compounds, node.symbol)) {
+        if (const uint32_t j = first_token(n); j != npos) block_starts_[j] = true;
+      }
       if (node.parent == npos) continue;
       const std::pair<int, int> at{node.symbol, symbol(node.parent)};
       bool clause = std::find(s_.statement_clauses.begin(), s_.statement_clauses.end(), at) !=
@@ -491,14 +559,21 @@ class Builder {
         clause = t_.children(node.parent)[0] != n;
       }
       if (!clause) continue;
-      for (uint32_t j = node.first_token; j < node.first_token + node.token_count; ++j) {
-        if (token(j).begin != token(j).end) {
-          clause_starts_[j] = true;
-          break;
-        }
-      }
+      if (const uint32_t j = first_token(n); j != npos) clause_starts_[j] = true;
     }
   }
+
+  // The first non-empty token of node n, or npos.
+  uint32_t first_token(uint32_t n) const {
+    const auto &node = t_.node(n);
+    for (uint32_t j = node.first_token; j < node.first_token + node.token_count; ++j) {
+      if (token(j).begin != token(j).end) return j;
+    }
+    return npos;
+  }
+
+  // Whether node n spans lines in the original.
+  bool spans_lines(uint32_t n) const { return t_.text(text_, n).find('\n') != std::string_view::npos; }
 
   // The separator before token j: `kind`, with the comments of the gap
   // before it.  A comment on a line of its own breaks the line before it; a
@@ -508,12 +583,16 @@ class Builder {
   // one of those breaks goes one level deeper, so a comment and the token
   // after it land on the same level, under the clause's keyword (between
   // the words of one keyword, Sep::word, they stay on its level):
-  // `SELECT -- c` puts the items on the next line, indented.
+  // `SELECT -- c` puts the items on the next line, indented.  Between
+  // lines of their own (Sep::hard, Sep::close) an empty line stays.
   Doc separator(uint32_t j, Sep kind) const {
     const Gap &g = gaps_[j];
     auto line_break = [&] {
       return kind == Sep::keep || kind == Sep::space ? nest(o_.indent, hardline()) : hardline();
     };
+    const bool blanks = kind == Sep::hard || kind == Sep::close;
+    // A line break, and an empty line before it when `blank`.
+    auto lines = [&](Doc d, bool blank) { return blanks && blank ? concat({hardline(), std::move(d)}) : d; };
     if (g.comments.empty()) {
       switch (kind) {
         case Sep::keep:
@@ -527,7 +606,7 @@ class Builder {
           return softline();
         case Sep::hard:
         case Sep::close:
-          return hardline();
+          return lines(hardline(), g.blank);
         case Sep::none:
           return text("");
       }
@@ -536,7 +615,7 @@ class Builder {
     std::vector<Doc> parts;
     const Comment &first = g.comments.front();
     if (first.own_line) {
-      parts.push_back(line_break());
+      parts.push_back(lines(line_break(), g.blank));
     } else if ((kind == Sep::line || kind == Sep::hard) && !first.line_after) {
       parts.push_back(kind == Sep::hard ? hardline() : line());
     } else {
@@ -544,7 +623,7 @@ class Builder {
     }
     for (const Comment &c : g.comments) {
       parts.push_back(text(std::string(c.text)));
-      parts.push_back(c.line_after ? line_break() : text(c.space_after ? " " : ""));
+      parts.push_back(c.line_after ? lines(line_break(), c.blank_after) : text(c.space_after ? " " : ""));
     }
     // A soft break keeps its place after the comments: `( /* c */` and
     // `x /* c */` still break before the query and before `)`.
@@ -588,7 +667,8 @@ class Builder {
   }
 
   // Pieces joined, `sep(k)` the separator before piece k (k >= 1); a
-  // break of the group before a statement's clause.
+  // break of the group before a statement's clause, a space before a block
+  // (DECLARE ... HANDLER FOR ... BEGIN).
   template <typename F>
   Piece join(std::vector<Piece> pieces, F sep) const {
     Piece out;
@@ -599,7 +679,8 @@ class Builder {
       if (out.empty()) {
         out.first = p.first;
       } else {
-        parts.push_back(separator(p.first, clause_starts_[p.first] ? Sep::line : sep(k)));
+        const Sep kind = clause_starts_[p.first] ? Sep::line : block_starts_[p.first] ? Sep::space : sep(k);
+        parts.push_back(separator(p.first, kind));
       }
       parts.push_back(std::move(p.doc));
     }
@@ -629,7 +710,39 @@ class Builder {
       if (const uint32_t changes = several_changes(n); changes != npos) return alter_table(n, changes);
     }
     if (sym == s_.expr && chain_operator(n) != -1) return chain(n);
+    if (sym == s_.create_routine || sym == s_.trigger_tail || sym == s_.event_tail) return routine(n);
+    if (sym == s_.case_stmt_specification) return case_statement(n);
+    if (sym == s_.sp_parenthesized_pdparam_list || sym == s_.sp_parenthesized_fdparam_list) return parameters(n);
+    if (contains(s_.compounds, sym)) return compound(n);
+    // A statement of a routine's body: its clauses break with it, apart
+    // from the routine's, and always when it was on several lines.
+    if (sym == s_.sp_proc_stmt || sym == s_.sp_decl) return body_statement(n);
     return children(n);
+  }
+
+  // With `indent_routine_clauses`, a query or DML statement, or a cursor's
+  // query, puts the lines of its clauses one level deeper than its first.
+  Piece body_statement(uint32_t n) {
+    Piece p = children(n);
+    p.doc = group(std::move(p.doc), spans_lines(n));
+    if (o_.indent_routine_clauses && indents_its_clauses(n)) p.doc = nest(o_.indent, std::move(p.doc));
+    return p;
+  }
+
+  bool indents_its_clauses(uint32_t n) const {
+    if (symbol(n) == s_.sp_decl) return t_.find(n, s_.sp_cursor_stmt) != npos;
+    const uint32_t verb = t_.find(n, s_.verb_clause);
+    if (verb == npos || t_.children(verb).size() != 1 || first_token(verb) != first_token(n)) return false;
+    return has_clauses(t_.children(verb)[0]);
+  }
+
+  // A query, INSERT or REPLACE, UPDATE, DELETE, CREATE or ALTER VIEW: the
+  // statements whose clauses start lines.
+  bool has_clauses(uint32_t n) const {
+    const int sym = symbol(n);
+    if (sym == s_.create || sym == s_.alter) return t_.child(n, s_.view) != npos;
+    return sym == s_.select || sym == s_.select_into || sym == s_.insert || sym == s_.replace ||
+           sym == s_.update || sym == s_.delete_;
   }
 
   bool has_comma(uint32_t n) const {
@@ -886,6 +999,235 @@ class Builder {
     return out;
   }
 
+  // ---- routines
+
+  // The parts of a routine: CREATE ... PROCEDURE p(...) or FUNCTION f(...)
+  // RETURNS ..., TRIGGER ... FOR EACH ROW, EVENT e; the characteristics or
+  // event clauses after it; DO before an event's body; the body.
+  struct Routine_parts {
+    std::vector<Piece> head;
+    std::vector<std::vector<Piece>> clauses;
+    Piece intro;
+    Piece body;
+    uint32_t params = npos;  // the first token of the parameter list
+  };
+
+  void routine_parts(uint32_t n, Routine_parts *r) {
+    const int parent = symbol(n);
+    for (const uint32_t k : t_.children(n)) {
+      const int sym = symbol(k);
+      if (sym == s_.sp_tail_standalone || sym == s_.sf_c_chistics_and_body_standalone) {
+        routine_parts(k, r);
+        continue;
+      }
+      if (sym == s_.sp_c_chistics) {
+        for (const auto &c : left_recursive(k)) {
+          Piece p = build(c.back());
+          if (p.empty()) continue;
+          r->clauses.push_back({});
+          r->clauses.back().push_back(std::move(p));
+        }
+        continue;
+      }
+      if (sym == s_.sp_proc_stmt || sym == s_.ev_sql_stmt || sym == s_.sp_proc_stmt_in_returns_clause) {
+        r->body = body_statement(k);
+        continue;
+      }
+      Piece p = build(k);
+      if (p.empty()) continue;
+      if (sym == s_.do_ && parent == s_.event_tail) {
+        r->intro = std::move(p);
+      } else if (contains(s_.event_clauses, sym) || (sym == s_.on && parent == s_.event_tail)) {
+        r->clauses.push_back({});
+        r->clauses.back().push_back(std::move(p));
+      } else if (!r->clauses.empty()) {
+        r->clauses.back().push_back(std::move(p));  // SCHEDULE ... after ON
+      } else {
+        if (sym == s_.sp_parenthesized_pdparam_list || sym == s_.sf_parameters) r->params = p.first;
+        r->head.push_back(std::move(p));
+      }
+    }
+  }
+
+  // The header on its line; the characteristics or clauses one level
+  // deeper on lines of their own when the statement breaks; the body on a
+  // line of its own, a block at the header's level, any other statement one
+  // level deeper; an event's DO at the header's level, its body after it.
+  Piece routine(uint32_t n) {
+    Routine_parts r;
+    routine_parts(n, &r);
+    std::vector<uint32_t> firsts;
+    for (const Piece &p : r.head) firsts.push_back(p.first);
+    // No space before the parameter list: p(IN a INT).
+    Piece out = join(std::move(r.head), [&](size_t k) { return firsts[k] == r.params ? Sep::none : Sep::space; });
+    if (out.empty() || r.body.empty()) return children(n);
+    std::vector<Doc> parts{std::move(out.doc)};
+    for (auto &c : r.clauses) {
+      Piece clause = join(std::move(c), [](size_t) { return Sep::space; });
+      if (clause.empty()) continue;
+      parts.push_back(nest(o_.indent, concat({separator(clause.first, Sep::line), std::move(clause.doc)})));
+    }
+    if (!r.intro.empty()) {
+      parts.push_back(separator(r.intro.first, Sep::line));
+      parts.push_back(std::move(r.intro.doc));
+      parts.push_back(separator(r.body.first, Sep::space));
+      parts.push_back(std::move(r.body.doc));
+    } else if (block_starts_[r.body.first]) {
+      parts.push_back(separator(r.body.first, Sep::line));
+      parts.push_back(std::move(r.body.doc));
+    } else {
+      parts.push_back(nest(o_.indent, concat({separator(r.body.first, Sep::line), std::move(r.body.doc)})));
+    }
+    out.doc = concat(std::move(parts));
+    return out;
+  }
+
+  // A routine's ( parameters ): on the header's line when they fit, else
+  // one per line one level deeper, the parenthesis closing at the header's
+  // level.
+  Piece parameters(uint32_t n) {
+    const auto kids = t_.children(n);
+    if (kids.size() < 3) return children(n);
+    const uint32_t params = t_.find(n, symbol(n) == s_.sp_parenthesized_pdparam_list ? s_.sp_pdparams : s_.sp_fdparams);
+    Piece lp = build(kids.front());
+    Piece rp = build(kids.back());
+    if (params == npos || lp.empty() || rp.empty()) return children(n);
+    std::vector<Doc> inner;
+    for (Piece &p : items(params)) {
+      if (p.empty()) continue;
+      inner.push_back(separator(p.first, inner.empty() ? Sep::soft : Sep::line));
+      inner.push_back(std::move(p.doc));
+    }
+    Piece out;
+    out.first = lp.first;
+    out.doc = group(concat({std::move(lp.doc), nest(o_.indent, concat(std::move(inner))),
+                            separator(rp.first, Sep::soft), std::move(rp.doc)}));
+    return out;
+  }
+
+  // The groups of children of the left-recursive list n (n: n x y ... |
+  // x y ...), in order.
+  std::vector<std::vector<uint32_t>> left_recursive(uint32_t n) const {
+    const int sym = symbol(n);
+    std::vector<std::vector<uint32_t>> groups;
+    uint32_t at = n;
+    while (true) {
+      const auto kids = t_.children(at);
+      if (!kids.empty() && symbol(kids[0]) == sym) {
+        groups.emplace_back(kids.begin() + 1, kids.end());
+        at = kids[0];
+      } else {
+        if (!kids.empty()) groups.emplace_back(kids.begin(), kids.end());
+        break;
+      }
+    }
+    std::reverse(groups.begin(), groups.end());
+    return groups;
+  }
+
+  // The statements of a statement list, each with its ';'.
+  std::vector<Piece> statements(uint32_t n) {
+    std::vector<Piece> out;
+    for (const auto &g : left_recursive(n)) {
+      std::vector<Piece> parts;
+      for (const uint32_t k : g) parts.push_back(build(k));
+      out.push_back(join(std::move(parts), [](size_t) { return Sep::none; }));
+    }
+    return out;
+  }
+
+  // The words and statement lists of the compound statement n, in order,
+  // through the nodes that only group them.
+  void compound_elements(uint32_t n, std::vector<uint32_t> *out) const {
+    for (const uint32_t k : t_.children(n)) {
+      if (contains(s_.compound_parts, symbol(k))) {
+        compound_elements(k, out);
+      } else {
+        out->push_back(k);
+      }
+    }
+  }
+
+  // BEGIN ... END, IF ... THEN ... ELSE ... END IF, the loops, a WHEN arm:
+  // the words one space apart, each statement list one statement per line
+  // one level deeper, the words after it back on a line of their own.  A
+  // THEN or DO after a condition that breaks starts a line of its own.
+  Piece compound(uint32_t n) {
+    std::vector<uint32_t> elements;
+    compound_elements(n, &elements);
+    Piece out;
+    std::vector<Doc> parts;
+    bool after_list = false;
+    size_t condition = npos;  // parts: the keyword before the last condition
+    for (const uint32_t e : elements) {
+      const int sym = symbol(e);
+      if ((sym == s_.then || sym == s_.do_) && condition != npos && t_.is_token(e)) {
+        Piece p = build(e);
+        if (p.empty()) continue;
+        std::vector<Doc> head(std::make_move_iterator(parts.begin() + static_cast<std::ptrdiff_t>(condition)),
+                              std::make_move_iterator(parts.end()));
+        parts.resize(condition);
+        head.push_back(separator(p.first, Sep::line));
+        head.push_back(std::move(p.doc));
+        parts.push_back(group(concat(std::move(head))));
+        condition = npos;
+        after_list = false;
+        continue;
+      }
+
+      if (contains(s_.statement_lists, symbol(e))) {
+        parts.push_back(one_per_line(statements(e)));
+        after_list = true;
+        continue;
+      }
+      Piece p = build(e);
+      if (p.empty()) continue;
+      // The condition after IF, ELSEIF, WHEN, WHILE: from the keyword on.
+      condition = sym == s_.expr_lex && !parts.empty() && !after_list ? parts.size() - 1 : npos;
+      if (out.empty()) {
+        out.first = p.first;
+      } else {
+        parts.push_back(separator(p.first, after_list ? Sep::close : Sep::space));
+      }
+      after_list = false;
+      parts.push_back(std::move(p.doc));
+    }
+    if (out.empty()) return children(n);
+    out.doc = concat(std::move(parts));
+    return out;
+  }
+
+  // CASE [expr] WHEN ... THEN ... ELSE ... END CASE: the arms one level
+  // deeper on lines of their own, their statements one more.
+  Piece case_statement(uint32_t n) {
+    std::vector<Piece> head;
+    std::vector<Piece> arms;
+    std::vector<Piece> tail;
+    auto add_arm = [&](uint32_t arm) { arms.push_back(compound(arm)); };
+    for (const uint32_t k : t_.children(n)) {
+      const int sym = symbol(k);
+      if (sym == s_.case_stmt_body) {
+        for (const uint32_t b : t_.children(k)) {
+          if (contains(s_.when_lists, symbol(b))) {
+            for (const auto &g : left_recursive(b)) add_arm(g.back());
+          } else {
+            head.push_back(build(b));
+          }
+        }
+      } else if (sym == s_.else_clause_opt) {
+        if (first_token(k) != npos) add_arm(k);
+      } else {
+        (arms.empty() ? head : tail).push_back(build(k));
+      }
+    }
+    Piece out = join(std::move(head), [](size_t) { return Sep::space; });
+    Piece end = join(std::move(tail), [](size_t) { return Sep::space; });
+    if (out.empty() || end.empty() || arms.empty()) return children(n);
+    out.doc = concat({std::move(out.doc), one_per_line(std::move(arms)), separator(end.first, Sep::close),
+                      std::move(end.doc)});
+    return out;
+  }
+
   // AND or OR, when `n` is `expr op expr`; else -1.
   int chain_operator(uint32_t n) const {
     const auto kids = t_.children(n);
@@ -932,6 +1274,7 @@ class Builder {
   std::vector<Gap> gaps_;
   std::vector<uint32_t> leaves_;
   std::vector<bool> clause_starts_;  // by token
+  std::vector<bool> block_starts_;   // by token: a compound statement starts
   bool ok_ = true;
 };
 
@@ -1025,16 +1368,19 @@ void leading_words(std::string_view s, size_t max, bool backslash_escapes, F f) 
 
 // Whether the statement can be one the formatter lays out: a query
 // (SELECT, WITH, a parenthesized one), INSERT or REPLACE ... SELECT,
-// UPDATE, DELETE, CREATE or ALTER VIEW or TABLE.  A cheap filter before
-// the parse; `statement_node` decides on the tree, so the two take the same
-// statements.
+// UPDATE, DELETE, CREATE or ALTER VIEW or TABLE, CREATE PROCEDURE,
+// FUNCTION, TRIGGER or EVENT, a compound statement (BEGIN NOT ATOMIC, IF,
+// CASE, a loop).  A cheap filter before the parse; `statement_node` decides
+// on the tree, so the two take the same statements.
 bool may_format(std::string_view s, bool backslash_escapes) {
   // insert_head: before the table's name, which may be `value`.
   enum { start, insert_head, insert, create, yes, no } state = start;
   leading_words(s, 24, backslash_escapes, [&](std::string w) {
     if (state == start) {
       const std::string_view first = std::string_view(w).substr(w.starts_with('(') ? 1 : 0);
-      if (first == "select" || first == "with" || first == "update" || first == "delete") {
+      if (first == "select" || first == "with" || first == "update" || first == "delete" || first == "begin" ||
+          first == "if" || first == "case" || first == "loop" || first == "while" || first == "repeat" ||
+          first == "for") {
         state = yes;
       } else if (first == "insert" || first == "replace") {
         state = insert_head;
@@ -1051,9 +1397,9 @@ bool may_format(std::string_view s, bool backslash_escapes) {
       if (w == "select" || w == "with" || w == "(select" || w == "(with") state = yes;
       if (w == "values" || w == "value" || w == "set") state = no;
     } else if (state == create) {
-      if (w == "view" || w == "table") state = yes;
-      // Not the CREATE TABLE in a routine's body.
-      if (w == "procedure" || w == "function" || w == "trigger" || w == "event" || w == "begin") state = no;
+      if (w == "view" || w == "table" || w == "procedure" || w == "function" || w == "trigger" || w == "event") {
+        state = yes;
+      }
     }
     return state == yes || state == no;
   });
@@ -1062,11 +1408,16 @@ bool may_format(std::string_view s, bool backslash_escapes) {
 
 // The statement node of a tree the formatter lays out, or npos: a query,
 // INSERT or REPLACE ... SELECT, UPDATE, DELETE, CREATE or ALTER VIEW,
-// CREATE TABLE with its columns (not ... LIKE, not ... SELECT), ALTER TABLE.
-// `may_format` lets the same ones through to the parse.
+// CREATE TABLE with its columns (not ... LIKE, not ... SELECT), ALTER TABLE,
+// CREATE PROCEDURE, FUNCTION (not a UDF's SONAME), TRIGGER, EVENT, a
+// compound statement.  `may_format` lets the same ones through to the
+// parse.
 uint32_t statement_node(const Syntax_tree &tree) {
   const auto &s = syms();
-  const uint32_t verb = tree.find(tree.roots()[0], s.verb_clause);
+  const uint32_t top = tree.child(tree.roots()[0], s.directly_executable_statement);
+  if (top == npos) return npos;
+  if (const uint32_t compound = tree.child(top, s.compound_statement); compound != npos) return compound;
+  const uint32_t verb = tree.find(top, s.verb_clause);
   if (verb == npos || tree.children(verb).size() != 1) return npos;
   const uint32_t n = tree.children(verb)[0];
   const int sym = tree.node(n).symbol;
@@ -1080,6 +1431,14 @@ uint32_t statement_node(const Syntax_tree &tree) {
     return v.size() == 1 && tree.node(v[0]).symbol == s.create_select_query_expression ? n : npos;
   }
   if ((sym == s.create || sym == s.alter) && has_child(n, s.view) && has_child(n, s.view_select)) return n;
+  if (sym == s.create) {
+    const uint32_t routine = tree.child(n, s.create_routine);
+    if (routine != npos && (has_child(routine, s.sp_tail_standalone) ||
+                            has_child(routine, s.sf_c_chistics_and_body_standalone))) {
+      return n;
+    }
+    if (has_child(n, s.trigger_tail) || has_child(n, s.event_tail)) return n;
+  }
   if (sym == s.alter && has_child(n, s.table) && has_child(n, s.alter_commands)) return n;
   if (sym == s.create && has_child(n, s.table)) {
     const uint32_t body = tree.child(n, s.create_body);

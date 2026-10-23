@@ -355,6 +355,9 @@ struct Server::Impl {
   bool upper_keywords = true;
   size_t line_width = 80;                    // lineWidth
   std::string indent;                        // indentation; "": the editor's
+  bool indent_clauses = true;                // indentClauses
+  bool indent_routine_clauses = true;        // indentRoutineClauses
+  bool add_tables = true;                    // completionAddsTables
 
   // Destroyed first: their running jobs may still post and send.
   std::unique_ptr<Parser_pool> parse_pool;
@@ -828,6 +831,12 @@ struct Server::Impl {
     if (const auto v = uint_at("progressThreshold")) options.progress_threshold = *v;
     if (const auto v = uint_at("catalogRefreshSeconds")) live_interval = std::chrono::seconds(*v);
     if (const auto v = uint_at("lineWidth")) line_width = *v;
+    auto bool_at = [&](const char *name, bool *out) {
+      if (const Json *x = member(o, name); x != nullptr && x->IsBool()) *out = x->GetBool();
+    };
+    bool_at("indentClauses", &indent_clauses);
+    bool_at("indentRoutineClauses", &indent_routine_clauses);
+    bool_at("completionAddsTables", &add_tables);
     if (const Json *f = member(o, "catalogFiles"); f != nullptr && f->IsArray()) {
       catalog_entries.clear();
       for (const auto &e : f->GetArray()) {
@@ -2120,6 +2129,9 @@ struct Server::Impl {
     o.snippets = snippets;
     o.line_width = line_width;
     o.indent = indent;
+    o.indent_clauses = indent_clauses;
+    o.indent_routine_clauses = indent_routine_clauses;
+    o.add_tables = add_tables;
     // '/' is a trigger for SOURCE paths only; elsewhere it is a division.
     const bool slash = string_at(params, {"context", "triggerCharacter"}).value_or("") == "/";
     const std::string folder = d != nullptr ? source_folder(file_uri_to_path(d->uri)) : "";
@@ -2227,6 +2239,8 @@ struct Server::Impl {
     Format_options o;
     o.upper_case_keywords = upper_keywords;
     o.line_width = line_width;
+    o.indent_clauses = indent_clauses;
+    o.indent_routine_clauses = indent_routine_clauses;
     const Json *spaces = path(params, {"options", "insertSpaces"});
     const Json *size = path(params, {"options", "tabSize"});
     if (!indent.empty()) {

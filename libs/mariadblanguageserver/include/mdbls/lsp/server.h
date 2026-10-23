@@ -56,7 +56,8 @@ struct Server_options {
 // may override the options: sqlMode, serverVersion, delimiter, debounceMs,
 // maxDiagnostics, semanticTokensFullLimit, progressThreshold; and set
 // catalogFiles, connection, shellBinary, shellBinDir, credentialStoreHelper,
-// catalogRefreshSeconds and keywordCase (docs/language-server.md).
+// catalogRefreshSeconds, keywordCase, lineWidth, indentation, indentClauses,
+// indentRoutineClauses and completionAddsTables (docs/language-server.md).
 //
 // Threads: one reads `in`, one writes `out`, the caller's thread runs the
 // event loop that owns the documents, a small pool answers requests and the

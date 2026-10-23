@@ -73,7 +73,7 @@ struct Result {
 // Completes at the '|' in `sql`, which follows the schema above.
 Result complete_at(const std::string &sql, bool with_schema = true, size_t max_items = 2000,
                    bool snippets = false, size_t line_width = 80, bool upper_case_keywords = true,
-                   const std::string &indent = "") {
+                   const std::string &indent = "", bool indent_clauses = true, bool add_tables = true) {
   static Parser_pool pool(2);
   Result r;
   r.text = (with_schema ? std::string(k_schema) : std::string()) + sql;
@@ -94,6 +94,8 @@ Result complete_at(const std::string &sql, bool with_schema = true, size_t max_i
   o.line_width = line_width;
   o.upper_case_keywords = upper_case_keywords;
   o.indent = indent;
+  o.indent_clauses = o.indent_routine_clauses = indent_clauses;
+  o.add_tables = add_tables;
   r.list = complete(r.text, index, r.cursor, view, cache, o);
   return r;
 }
@@ -470,7 +472,7 @@ TEST(Completion, a_schema_then_its_tables) {
 TEST(Completion, a_column_brings_its_table_into_from) {
   const auto r = complete_at(std::string(k_fk_schema) + "SELECT test_schema.t1.|;", false);
   EXPECT_EQ(sorted(r.labels()), (std::vector<std::string>{"id", "name"}));
-  EXPECT_EQ(pick(r, "id"), "SELECT t.id FROM test_schema.t1 AS t;");
+  EXPECT_EQ(pick(r, "id"), "SELECT t.id\n  FROM test_schema.t1 AS t;");
 }
 
 TEST(Completion, after_a_comma_the_columns_in_scope_then_related_tables) {
@@ -499,13 +501,13 @@ TEST(Completion, a_from_clause_right_after_the_column_is_part_of_its_snippet) {
   const auto *id = r.item("id");
   ASSERT_NE(id, nullptr);
   EXPECT_TRUE(id->snippet);
-  EXPECT_EQ(id->insert_text, "id$0 FROM test_schema.t1 AS t");
+  EXPECT_EQ(id->insert_text, "id$0\n  FROM test_schema.t1 AS t");
   ASSERT_EQ(id->additional_edits.size(), 1u);
   EXPECT_EQ(id->additional_edits[0].text, "t.");
   // Not at the end of the select list: an additional edit as before.
   const auto m = complete_at(std::string(k_fk_schema) + "SELECT test_schema.t1.|, 1;", false, 2000, true);
   EXPECT_FALSE(m.item("id")->snippet);
-  EXPECT_EQ(pick(m, "id"), "SELECT t.id, 1 FROM test_schema.t1 AS t;");
+  EXPECT_EQ(pick(m, "id"), "SELECT t.id, 1\n  FROM test_schema.t1 AS t;");
 }
 
 TEST(Completion, a_second_table_is_joined_on_its_foreign_key) {
@@ -579,7 +581,7 @@ TEST(Completion, with_a_current_schema_its_tables_come_first_unqualified) {
   EXPECT_EQ(r.item("t1")->insert_text, "t1.");
   EXPECT_TRUE(r.has("other"));
   const auto c = complete_at(std::string(k_fk_schema) + "USE test_schema;\nSELECT t1.|;", false);
-  EXPECT_EQ(pick(c, "id"), "SELECT t.id FROM t1 AS t;");
+  EXPECT_EQ(pick(c, "id"), "SELECT t.id\n  FROM t1 AS t;");
 }
 
 TEST(Completion, a_table_is_not_added_where_the_rest_of_the_statement_is_unknown) {
@@ -591,9 +593,17 @@ TEST(Completion, a_table_is_not_added_where_the_rest_of_the_statement_is_unknown
 }
 
 TEST(Completion, a_statement_on_several_lines_gets_its_clauses_on_lines_of_their_own) {
-  // FROM at the indentation of the SELECT line, a JOIN one level deeper.
-  const auto f = complete_at(std::string(k_fk_schema) + "  SELECT 1,\n    test_schema.t1.|;", false);
-  EXPECT_EQ(pick(f, "id"), "  SELECT 1,\n    t.id\n  FROM test_schema.t1 AS t;");
+  // FROM one level deeper than the statement's first line, as the
+  // formatter puts clauses; at its indentation without indentClauses; a
+  // JOIN one level deeper than FROM.
+  const std::string sql = std::string(k_fk_schema) + "  SELECT 1,\n    test_schema.t1.|;";
+  EXPECT_EQ(pick(complete_at(sql, false), "id"), "  SELECT 1,\n    t.id\n    FROM test_schema.t1 AS t;");
+  EXPECT_EQ(pick(complete_at(sql, false, 2000, false, 80, true, "", false), "id"),
+            "  SELECT 1,\n    t.id\n  FROM test_schema.t1 AS t;");
+  // A subquery's FROM goes at its SELECT line's indentation.
+  const auto s = complete_at(std::string(k_fk_schema) + "SELECT *\n  FROM x\n  WHERE a IN (\n    SELECT test_schema.t1.|\n  );",
+                             false);
+  EXPECT_EQ(pick(s, "id"), "SELECT *\n  FROM x\n  WHERE a IN (\n    SELECT t.id\n    FROM test_schema.t1 AS t\n  );");
   const auto j = complete_at(
       std::string(k_fk_schema) + "SELECT t.id,\n       test_schema.t2.|\n  FROM test_schema.t1 AS t;", false);
   EXPECT_EQ(pick(j, "t1_id"),
@@ -607,6 +617,20 @@ TEST(Completion, a_statement_on_several_lines_gets_its_clauses_on_lines_of_their
   EXPECT_EQ(pick(k, "t1_id"),
             "SELECT t.id, t2.t1_id\nFROM test_schema.t1 AS t\n    CROSS JOIN test_schema.t3 AS z\n"
             "    LEFT OUTER JOIN test_schema.t2 AS t2 ON t2.t1_id = t.id;");
+}
+
+TEST(Completion, a_from_starts_a_line_of_its_own_and_can_be_left_out) {
+  const std::string sql = std::string(k_fk_schema) + "SELECT test_schema.t1.|;";
+  EXPECT_EQ(pick(complete_at(sql, false, 2000, false, 80, true, "", false), "id"),
+            "SELECT t.id\nFROM test_schema.t1 AS t;");
+  // Without adding tables, the column comes as it is, and no table to join.
+  const auto r = complete_at(sql, false, 2000, false, 80, true, "", true, false);
+  ASSERT_TRUE(r.has("id"));
+  EXPECT_TRUE(r.item("id")->additional_edits.empty());
+  const auto j = complete_at(std::string(k_fk_schema) + "SELECT t.id, | FROM test_schema.t1 AS t;", false, 2000,
+                             false, 80, true, "", true, false);
+  EXPECT_FALSE(j.has("t2"));
+  EXPECT_TRUE(complete_at(std::string(k_fk_schema) + "SELECT t.id, | FROM test_schema.t1 AS t;", false).has("t2"));
 }
 
 TEST(Completion, the_indentation_setting_sets_one_level) {
@@ -629,7 +653,7 @@ TEST(Completion, a_query_in_a_routine_body_keeps_its_indentation) {
                                  "END//\n",
                              false);
   EXPECT_EQ(pick(r, "id"),
-            "DELIMITER //\nCREATE PROCEDURE p()\nBEGIN\n\tSELECT 1, t.id\n\tFROM test_schema.t1 AS t;\nEND//\n");
+            "DELIMITER //\nCREATE PROCEDURE p()\nBEGIN\n\tSELECT 1, t.id\n\t\tFROM test_schema.t1 AS t;\nEND//\n");
 }
 
 TEST(Completion, an_on_past_the_width_goes_on_the_next_line) {
@@ -670,7 +694,7 @@ TEST(Completion, a_function_name_is_escaped_in_its_snippet) {
 
 TEST(Completion, added_keywords_follow_the_keyword_case) {
   const auto f = complete_at(std::string(k_fk_schema) + "SELECT test_schema.t1.|;", false, 2000, false, 80, false);
-  EXPECT_EQ(pick(f, "id"), "SELECT t.id from test_schema.t1 as t;");
+  EXPECT_EQ(pick(f, "id"), "SELECT t.id\n  from test_schema.t1 as t;");
   const auto j = complete_at(
       std::string(k_fk_schema) + "SELECT t.id, test_schema.t2.| FROM test_schema.t1 AS t;", false, 2000, false, 80,
       false);
@@ -684,7 +708,7 @@ TEST(Completion, a_snippet_may_carry_the_from_on_a_line_of_its_own) {
   const auto *id = r.item("id");
   ASSERT_NE(id, nullptr);
   EXPECT_TRUE(id->snippet);
-  EXPECT_EQ(id->insert_text, "id$0\nFROM test_schema.t1 AS t");
+  EXPECT_EQ(id->insert_text, "id$0\n  FROM test_schema.t1 AS t");
 }
 
 }  // namespace mdbls

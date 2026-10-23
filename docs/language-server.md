@@ -36,7 +36,7 @@ connections through the client instead of connecting itself, see [MCP mode](#mcp
 | `textDocument/documentHighlight` | the references within the statement at the cursor; the defining one is a write |
 | `textDocument/prepareRename`, `rename` | aliases, CTEs, variables, and tables, views, columns and routines the document or a file it includes defines; the edits cover the document and the files it includes, and the new name is quoted when it has to be |
 | `textDocument/signatureHelp` | the call forms of a built-in function, or a stored function's or procedure's parameters, with the active parameter; trigger characters `(` and `,` |
-| `textDocument/formatting`, `rangeFormatting` | lays out queries (see [Formatting](#formatting)): the whole document, or the statements the range touches; one edit per statement that changes |
+| `textDocument/formatting`, `rangeFormatting` | lays out queries, tables and routines (see [Formatting](#formatting)): the whole document, or the statements the range touches; one edit per statement that changes |
 | `workspace/symbol` | tables, views, routines, triggers, events, sequences and schemas of the open documents (with the files they include) and the workspace catalog whose name contains the query; columns too when the query is not empty |
 | `workspace/didChangeConfiguration` | `settings.mariadb` takes the same keys as the initialization options; the workspace catalog is read again when `catalogFiles` changed, the documents that did not set a `connection` of their own through `mariadb/documentContext` move to the new `connection`, and a changed `sqlMode` or `serverVersion` applies to the open documents that did not set their own; a changed `catalogRefreshSeconds` applies to the connections already read, counted from their last read |
 | `textDocument/didSave` | saving one of the workspace catalog's files reads the catalog again |
@@ -69,7 +69,10 @@ first statement of each run in that mode.
 | `catalogRefreshSeconds` | `0` | read a connection's catalog again this often; 0 reads it on demand only |
 | `keywordCase` | `"upper"` | `"lower"` completes keywords and built-in functions in lower case, and writes the FROM and JOIN a column brings in lower case |
 | `indentation` | `"editor"` | one level of indentation for formatting and for the lines completion adds: `"tab"`, `"2 spaces"` or `"4 spaces"`; `"editor"` takes the formatting request's `tabSize`/`insertSpaces`, and for completion a tab when the line's indentation has tabs, else two spaces |
-| `lineWidth` | `80` | characters; the FROM and JOIN a column brings start lines of their own when the line would grow past this, and formatting keeps lines within it where a break can; 0 = no limit |
+| `lineWidth` | `80` | characters; the JOIN a column brings starts a line of its own when the line would grow past this, and formatting keeps lines within it where a break can; 0 = no limit |
+| `indentClauses` | `true` | formatting puts the lines of a query's or DML statement's clauses (FROM, WHERE, SET, ...) one level deeper than its first line; `false`: at its level. The FROM completion adds follows it |
+| `indentRoutineClauses` | `true` | the same for the statements in a routine's body |
+| `completionAddsTables` | `true` | completing a column of a table the query does not have adds the table (FROM, or a JOIN) and offers the schema's tables to join; `false`: the column only |
 
 The client's `textDocument.completion.completionItem.snippetSupport` makes function
 completions snippets (`CONCAT($0)`).
@@ -136,7 +139,8 @@ opens at once. Picking a column of a table that is not in scope adds that table:
 - the qualifiers typed become an alias, the table's first letter, numbered when taken
   (`c`, `c2`): `SELECT shop.customer.name` becomes `SELECT c.name FROM shop.customer AS c`,
   the schema left out when it is the current one;
-- with no FROM yet, ` FROM <table> AS <alias>` goes after the select list;
+- with no FROM yet, `FROM <table> AS <alias>` goes after the select list, on a line of its
+  own;
 - with one, ` LEFT OUTER JOIN <table> AS <alias> ON ...` goes after its tables, on the first
   foreign key between the new table and a table in scope (either direction, in the order
   the tables are listed); with none, through a table that has a foreign key to each (n:m:
@@ -145,11 +149,13 @@ opens at once. Picking a column of a table that is not in scope adds that table:
   either, ` CROSS JOIN <table> AS <alias>`;
 - a table already in scope is only renamed to its alias.
 
-The added clauses follow the statement's layout. They stay on the line, one space apart,
-unless the statement already spans lines or the line would pass `lineWidth` (the column
-being inserted counts, taken at the table's longest column name). Then each clause starts
-a line of its own: `FROM` at the indentation of the line holding the query's `SELECT`,
-a JOIN one level deeper than the FROM line, or at the indentation of the last line of the
+`completionAddsTables: false` turns all of this off. The added clauses follow the statement's layout. A FROM always starts a line of its own:
+one level deeper than the first line of the query's statement (`indentClauses`,
+`indentRoutineClauses` in a routine's body), at the indentation of the line holding the
+query's `SELECT` for a query in parentheses or with the setting off. A JOIN stays on the
+line, one space apart, unless the statement already spans lines or the line would pass
+`lineWidth` (the column being inserted counts, taken at the table's longest column name);
+then it starts a line of its own one level deeper than the FROM line, or at the indentation of the last line of the
 tables when its joins are on lines of their own; each JOIN of an n:m pair gets its own line, and an `ON` that would pass
 the width goes on the next line one level deeper (`indentation`; by default two spaces, a
 tab when the indentation has tabs). Lines end in `\r\n` when the statement's do. The keywords follow `keywordCase`.
@@ -170,15 +176,17 @@ key to or from a table in scope first.
 ## Formatting
 
 `textDocument/formatting` and `rangeFormatting` lay out queries, the statements built
-around them, and table definitions, when they parse whole: `SELECT`, `WITH` (or a
-parenthesized query), `INSERT`/`REPLACE ... SELECT`, `UPDATE`, `DELETE`,
-`CREATE`/`ALTER VIEW`, `CREATE TABLE` with its columns and `ALTER TABLE`. Every other
-statement (`INSERT ... VALUES`/`SET`, `CREATE TABLE ... LIKE` and `... SELECT`,
-routines, the rest of DDL), and any statement that holds a versioned comment
-(`/*!NNNNN`), is left as it is, so routines and the data and versioned parts of
-mysqldump files keep their own layout (a dump's CREATE TABLEs, already one column per
-line, only get their keywords recased); a scan of the first words skips those without
-parsing them. A range formats each
+around them, table definitions and routines, when they parse whole: `SELECT`, `WITH`
+(or a parenthesized query), `INSERT`/`REPLACE ... SELECT`, `UPDATE`, `DELETE`,
+`CREATE`/`ALTER VIEW`, `CREATE TABLE` with its columns, `ALTER TABLE`,
+`CREATE PROCEDURE`/`FUNCTION`/`TRIGGER`/`EVENT`, and compound statements
+(`BEGIN NOT ATOMIC`, `IF`, `CASE`, the loops). Every other statement
+(`INSERT ... VALUES`/`SET`, `CREATE TABLE ... LIKE` and `... SELECT`, the rest of DDL),
+and any statement that holds a versioned comment (`/*!NNNNN`), is left as it is, so the
+data and versioned parts of mysqldump files keep their own layout (a dump's CREATE
+TABLEs, already one column per line, only get their keywords recased); a scan of the
+first words skips those without parsing them. Inside a routine's body every statement
+is laid out, by the rules below. A range formats each
 statement it touches, whole. `keywordCase` sets the keywords' case, `lineWidth` the
 width, and `indentation` one level of indentation, by default the request's
 `tabSize`/`insertSpaces` (a tab when `insertSpaces` is false). A line comment that ends
@@ -188,18 +196,23 @@ a clause keyword's line puts what follows one level deeper than the keyword
 ```sql
 SELECT f.title, c.name AS category, count(r.rental_id) AS rentals,
        sum(p.amount) revenue
-FROM film f
-  JOIN film_category fc ON fc.film_id = f.film_id
-  LEFT JOIN inventory i ON i.film_id = f.film_id
-WHERE f.rating IN ('PG', 'PG-13') AND f.length > 90
-GROUP BY f.title, c.name
-ORDER BY revenue DESC
-LIMIT 20;
+  FROM film f
+    JOIN film_category fc ON fc.film_id = f.film_id
+    LEFT JOIN inventory i ON i.film_id = f.film_id
+  WHERE f.rating IN ('PG', 'PG-13') AND f.length > 90
+  GROUP BY f.title, c.name
+  ORDER BY revenue DESC
+  LIMIT 20;
 ```
 
 - **Clauses** (FROM, WHERE, GROUP BY, HAVING, WINDOW, ORDER BY, LIMIT, INTO, FOR UPDATE,
   UNION and its kin) stay on one line when the query fits there and the statement was on
-  one line; otherwise each starts a line of its own at the statement's indentation.
+  one line; otherwise each starts a line of its own, one level deeper than the
+  statement's first line, and what they hold (joins, AND chains) deeper from there. With
+  `indentClauses` (`indentRoutineClauses` in a routine's body) off, they start at the
+  statement's indentation instead. This covers queries, INSERT, REPLACE, UPDATE, DELETE,
+  views and a cursor's query; the other statements keep their kept line breaks one level
+  deeper either way.
 - **Other statements** follow the same rules for their clauses: the query of an
   `INSERT ... SELECT` and of a view starts a line of its own under the header
   (`INSERT INTO t (a, b)`, `CREATE VIEW v AS`); `SET`, `ON DUPLICATE KEY UPDATE`,
@@ -214,6 +227,39 @@ LIMIT 20;
   subpartitions) one per line like the columns.
   `ALTER TABLE` with several changes puts each on a line one level deeper; a single
   change stays on the statement's line. Inside a column the words keep their spacing.
+- **Routines:** the header stays on its line (`CREATE PROCEDURE p(IN a INT)`, a
+  function's `RETURNS` too), its parameters as well when they fit, else one per line
+  one level deeper with `)` back at the header's level. The characteristics
+  (`DETERMINISTIC`, `READS SQL DATA`, `COMMENT ...`) and an event's clauses
+  (`ON SCHEDULE`, `ON COMPLETION`, `ENABLE`, `COMMENT`) go one level deeper, each on a
+  line of its own, when the statement breaks. A `BEGIN ... END` body starts a line at
+  the header's level (an event's after `DO`, `DO BEGIN`); a body of one other statement
+  stays on the header's line when the routine fits there, else goes one level deeper.
+- **Blocks:** in `BEGIN ... END`, `IF`, `CASE`, `LOOP`, `WHILE`, `REPEAT` and `FOR`
+  each declaration and statement goes on a line of its own one level deeper, laid out on
+  its own by these rules (its clauses break when it does not fit or was on several
+  lines); `END`, `ELSEIF`, `ELSE` and `UNTIL ... END REPEAT` come back to the block's
+  level, a CASE's `WHEN` arms go one level deeper with their statements one more. When an
+  `IF`, `ELSEIF`, `WHEN` or `WHILE` condition breaks, `THEN` or `DO` starts a line of its
+  own at the keyword's level. A handler's block starts on its line
+  (`DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN`), a cursor's query like a view's. One
+  empty line between statements (and between table columns) stays; comments before
+  `END` or `ELSE` stay with the statements before them.
+
+```sql
+CREATE PROCEDURE p(IN a INT)
+  READS SQL DATA
+BEGIN
+  DECLARE n INT DEFAULT 0;
+  IF a > 0 THEN
+    UPDATE film_text
+      SET title = 'x'
+      WHERE film_id = a;
+  ELSE
+    SET n = -1;
+  END IF;
+END
+```
 - **Lists** of select items, GROUP BY and ORDER BY items, `SET` and `ON DUPLICATE KEY
   UPDATE` assignments, and the column lists of INSERT and CREATE VIEW continue after the comma on the
   same line up to the width, then on the next, aligned with the first item.
@@ -235,7 +281,8 @@ LIMIT 20;
 
 Formatting a layout again changes nothing: a statement on several lines keeps its
 clauses apart, which is also what makes completion's inserted FROM and JOIN agree with
-the formatter (JOIN one level under FROM, `ON` on its line). Completion's inserts take two
+the formatter (FROM where the clause settings put it, JOIN one level under FROM, `ON` on
+its line). Completion's inserts take two
 spaces (a tab when the statement's indentation has tabs) as the level; formatting takes
 the editor's `tabSize`.
 
