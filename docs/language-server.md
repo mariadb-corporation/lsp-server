@@ -495,8 +495,9 @@ The live-connection tests deploy a throwaway server with MariaDB Shell
 a binary or an installation directory), run their SQL through the shell, and keep a
 private secret store through the shell's `mariadb-secret-store-login-path` helper, with a
 login file of its own (`MYSQL_TEST_LOGIN_FILE`), never `~/.mylogin.cnf`. The shell is
-found in `MDBLS_SHELL_BIN_DIR` (a CMake cache variable; by default the directory of the
-`mariadb-shell` on `PATH`, else `../mariadb-shell/build/bin`). Without the shell or a
+found in `MDBLS_SHELL_BIN_DIR` (a CMake cache variable; unless set, looked up at every
+configure: the directory of the `mariadb-shell` on `PATH`, else
+`../mariadb-shell/build/bin`). Without the shell or a
 `mariadbd`, they are skipped; without the shell, so are the unit tests of the secret
 store. No MariaDB client tools are needed.
 

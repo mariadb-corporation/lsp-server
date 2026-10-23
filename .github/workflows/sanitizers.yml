@@ -76,6 +76,7 @@ jobs:
           restore-keys: ccache-${{ runner.os }}-sanitizers-x64-linux-dynamic-
 
       - name: Restore vcpkg binary cache
+        id: vcpkg
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
@@ -114,9 +115,10 @@ jobs:
             -DWITH_FUZZERS=ON -DMDBLS_FUZZ_SECONDS="$FUZZ_SECONDS"
 
       # The vcpkg ports configure built (OpenSSL takes minutes), also those
-      # of a configure that failed later.
+      # of a configure that failed later; only when no entry of this
+      # vcpkg.json was restored, since then nothing new was built.
       - name: Save vcpkg binary cache
-        if: always()
+        if: always() && !startsWith(steps.vcpkg.outputs.cache-matched-key, format('vcpkg-{0}-x64-linux-dynamic-{1}-', runner.os, hashFiles('vcpkg.json')))
         uses: actions/cache/save@v4
         with:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}

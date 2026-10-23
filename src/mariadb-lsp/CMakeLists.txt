@@ -62,16 +62,16 @@ add_test(NAME mariadb-lsp.tree COMMAND mariadb-lsp tree "${_fixtures}/mrs_gramma
 # and MariaDB Shell in MDBLS_SHELL_BIN_DIR.
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
-  if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$" AND
-     NOT WITH_ASAN AND NOT WITH_UBSAN)
-    set(_p95 20)
-  else()
-    set(_p95 100)
-  endif()
   # Several times slower under the sanitizers.
-  if(WITH_ASAN OR WITH_UBSAN)
+  if(MDBLS_SANITIZERS)
+    set(_p95 100)
     set(_e2e_timeout 900)
   else()
+    if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$")
+      set(_p95 20)
+    else()
+      set(_p95 100)
+    endif()
     set(_e2e_timeout 300)
   endif()
   add_test(NAME mariadb-lsp.e2e

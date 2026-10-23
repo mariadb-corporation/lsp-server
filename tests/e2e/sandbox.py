@@ -102,23 +102,23 @@ class Sandbox:
             raise RuntimeError("mariadb-shell %s: %s" % (" ".join(args[:4]), r.stderr.strip()))
         return r.stdout
 
-    def sql(self, statements):
+    def sql(self, statements, *options):
         return self.run("--sql", "--uri", "root@127.0.0.1:%d" % self.port,
-                        "--password=" + ROOT_PASSWORD, "-e", statements)
+                        "--password=" + ROOT_PASSWORD, *options, "-e", statements)
 
     def query(self, statement):
         """The last column of the first row, as text."""
-        out = self.run("--sql", "--uri", "root@127.0.0.1:%d" % self.port,
-                       "--password=" + ROOT_PASSWORD, "--json=raw", "-e", statement)
-        for line in out.splitlines():
+        for line in self.sql(statement, "--json=raw").splitlines():
             rows = json.loads(line).get("rows")
             if rows:
                 return str(list(rows[0].values())[-1])
         return ""
 
     def stop(self):
-        subprocess.run([self.shell, "--", "sandbox", "kill", str(self.port),
-                        "--sandboxDir=" + self.dir], capture_output=True, env=self.env)
+        try:
+            self.run("--", "sandbox", "kill", str(self.port), "--sandboxDir=" + self.dir)
+        except RuntimeError:
+            pass
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
@@ -126,18 +126,16 @@ class Secret_store:
     """A private secret store; sets the environment the server and the CLI
     inherit."""
 
-    VARIABLES = ("MARIADB_SHELL_USER_CONFIG_HOME", "MARIADB_SHELL_CREDENTIAL_STORE_HELPER",
-                 "MYSQL_TEST_LOGIN_FILE")
-
     def __init__(self):
         self.bin = shell_bin_dir()
         if self.bin is None:
             raise RuntimeError("no MariaDB Shell with its login-path helper")
         self.dir = tempfile.mkdtemp(prefix="mdbls-secrets-")
-        self.saved = {k: os.environ.get(k) for k in self.VARIABLES}
-        os.environ["MARIADB_SHELL_USER_CONFIG_HOME"] = self.dir
-        os.environ["MARIADB_SHELL_CREDENTIAL_STORE_HELPER"] = HELPER
-        os.environ["MYSQL_TEST_LOGIN_FILE"] = os.path.join(self.dir, "login.cnf")
+        values = {"MARIADB_SHELL_USER_CONFIG_HOME": self.dir,
+                  "MARIADB_SHELL_CREDENTIAL_STORE_HELPER": HELPER,
+                  "MYSQL_TEST_LOGIN_FILE": os.path.join(self.dir, "login.cnf")}
+        self.saved = {k: os.environ.get(k) for k in values}
+        os.environ.update(values)
 
     def store(self, secret_type, secret_id, secret):
         subprocess.run([program(self.bin, "mariadb-secret-store-" + HELPER), "store"],

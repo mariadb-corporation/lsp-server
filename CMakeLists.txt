@@ -93,18 +93,22 @@ enable_testing()
 
 # MariaDB Shell's binary directory: the secret store and live-connection
 # tests use its mariadb-secret-store-login-path helper (and the shell's
-# sandboxes), and are skipped without it.  By default the directory of the
+# sandboxes), and are skipped without it.  Unless set, looked up at every
+# configure (so a shell installed later is found): the directory of the
 # mariadb-shell on the PATH (an installed shell), else a build of the shell
-# next to this checkout.
-find_program(MDBLS_SHELL_PROGRAM mariadb-shell)
-if(MDBLS_SHELL_PROGRAM)
-  file(REAL_PATH "${MDBLS_SHELL_PROGRAM}" _shell)
-  get_filename_component(_shell_bin_dir "${_shell}" DIRECTORY)
-else()
-  set(_shell_bin_dir "${PROJECT_SOURCE_DIR}/../mariadb-shell/build/bin")
+# next to this checkout.  The normal variable set here, which the
+# subdirectories see, holds the directory found.
+set(MDBLS_SHELL_BIN_DIR "" CACHE PATH
+    "Directory of MariaDB Shell's binaries, for the secret store and live-connection tests (empty: looked up)")
+if(NOT MDBLS_SHELL_BIN_DIR)
+  find_program(MDBLS_SHELL_PROGRAM mariadb-shell)
+  if(MDBLS_SHELL_PROGRAM)
+    file(REAL_PATH "${MDBLS_SHELL_PROGRAM}" _shell)
+    get_filename_component(MDBLS_SHELL_BIN_DIR "${_shell}" DIRECTORY)
+  else()
+    set(MDBLS_SHELL_BIN_DIR "${PROJECT_SOURCE_DIR}/../mariadb-shell/build/bin")
+  endif()
 endif()
-set(MDBLS_SHELL_BIN_DIR "${_shell_bin_dir}" CACHE PATH
-    "Directory of MariaDB Shell's binaries, for the secret store and live-connection tests")
 
 add_subdirectory(libs/mariadbparser)
 add_subdirectory(libs/sqlsplitter)

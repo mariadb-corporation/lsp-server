@@ -27,6 +27,8 @@ function(mdbls_add_fuzzer target)
   mdbls_target_warnings(${target})
   mdbls_sanitizer_defaults(${target})
   target_link_libraries(${target} PRIVATE mariadblanguageserver)
+  # statement_index_check.h, shared with the unit tests.
+  target_include_directories(${target} PRIVATE "${PROJECT_SOURCE_DIR}/unittest/mariadblanguageserver")
   target_compile_options(${target} PRIVATE -fsanitize=fuzzer)
   target_link_options(${target} PRIVATE -fsanitize=fuzzer)
   set_target_properties(${target} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

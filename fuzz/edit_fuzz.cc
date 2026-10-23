@@ -40,6 +40,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *bytes, size_t size) {
   const auto &pieces = fuzz::edit_pieces();
 
   auto index = Statement_index::build(text, options);
+  auto flat = test::flatten(index);
   Document doc(text, 1, options);
   for (int n = 0; n < 64 && data.remaining_bytes() > 0; ++n) {
     const auto at = data.ConsumeIntegralInRange<uint32_t>(0, static_cast<uint32_t>(text.size()));
@@ -53,25 +54,15 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *bytes, size_t size) {
       inserted = data.ConsumeRandomLengthString(16);
     }
 
-    const auto before = fuzz::flatten(index);
     text.replace(at, removed, inserted);
     Index_splice splice;
     index = Statement_index::update(index, text, at, removed, static_cast<uint32_t>(inserted.size()),
                                     options, &splice);
     const auto built = Statement_index::build(text, options);
-    MDBLS_FUZZ_CHECK(fuzz::same_index(index, built));
-
-    const auto got = fuzz::flatten(index);
-    MDBLS_FUZZ_CHECK(splice.first + splice.removed <= before.size());
-    MDBLS_FUZZ_CHECK(before.size() - splice.removed + splice.added == got.size());
-    for (size_t i = 0; i < splice.first; ++i) MDBLS_FUZZ_CHECK(got[i] == before[i]);
-    for (size_t i = splice.first + splice.removed; i < before.size(); ++i) {
-      auto f = before[i];
-      std::get<0>(f) = static_cast<uint32_t>(std::get<0>(f) + splice.delta);
-      std::get<1>(f) = static_cast<uint32_t>(std::get<1>(f) + splice.delta);
-      std::get<2>(f) = static_cast<uint32_t>(std::get<2>(f) + splice.delta);
-      MDBLS_FUZZ_CHECK(got[i - splice.removed + splice.added] == f);
-    }
+    auto got = test::flatten(index);
+    MDBLS_FUZZ_CHECK(got == test::flatten(built) && test::same_ends(index, built));
+    MDBLS_FUZZ_CHECK(test::splice_mismatch(flat, got, splice).empty());
+    flat = std::move(got);
 
     // The document's positions are UTF-16 code units; on text that is not
     // UTF-8 they may land elsewhere than `at`, so its text is compared with
@@ -79,7 +70,9 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *bytes, size_t size) {
     const auto from = doc.position(at);
     const auto to = doc.position(at + removed);
     doc.change(std::make_pair(from, to), inserted);
-    MDBLS_FUZZ_CHECK(fuzz::same_index(doc.index(), Statement_index::build(doc.text(), options)));
+    MDBLS_FUZZ_CHECK(doc.text() == text
+                         ? test::same_index(doc.index(), built)
+                         : test::same_index(doc.index(), Statement_index::build(doc.text(), options)));
     MDBLS_FUZZ_CHECK(doc.checks().size() == doc.index().statements().size());
   }
   return 0;

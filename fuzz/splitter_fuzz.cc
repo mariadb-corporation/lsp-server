@@ -53,6 +53,6 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *bytes, size_t size) {
   }
   MDBLS_FUZZ_CHECK(index.find(static_cast<uint32_t>(text.size())) == statements.size());
 
-  MDBLS_FUZZ_CHECK(fuzz::same_index(Statement_index::build_parallel(text, options, threads, chunk), index));
+  MDBLS_FUZZ_CHECK(test::same_index(Statement_index::build_parallel(text, options, threads, chunk), index));
   return 0;
 }

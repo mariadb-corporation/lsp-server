@@ -25,6 +25,7 @@
 
 #include "mdbls/statement_index.h"
 #include "mysqlshdk/libs/utils/utils_mysql_parsing.h"
+#include "statement_index_check.h"
 #include "test_util.h"
 
 namespace mdbls {
@@ -206,44 +207,23 @@ TEST(Statement_index, mysqldump_modes) {
   EXPECT_EQ("STRICT_TRANS_TABLES", index.modes()[index.statements().back().mode].mode);
 }
 
-namespace {
+namespace test {
 
-// The index as values, so that two indexes compare regardless of the order
-// their modes and delimiters were interned in.
-struct Flat {
-  uint32_t begin, body_end, end;
-  std::string delimiter, active_delimiter, mode;
-  bool known;
-  Statement_kind kind;
-  bool mentions;
-  bool clean_after;
-  bool operator==(const Flat &) const = default;
-};
-
-void PrintTo(const Flat &f, std::ostream *os) {
+void PrintTo(const Flat_statement &f, std::ostream *os) {
   *os << "[" << f.begin << "," << f.body_end << "," << f.end << " delim '" << f.delimiter
       << "' active '" << f.active_delimiter << "' mode '" << f.mode << "'"
       << (f.known ? "" : " unknown") << (f.kind == Statement_kind::comment ? " comment" : "")
       << (f.mentions ? " mentions" : "") << (f.clean_after ? "" : " open") << "]";
 }
 
-std::vector<Flat> flatten(const Statement_index &index) {
-  std::vector<Flat> out;
-  for (const auto &s : index.statements()) {
-    const auto &m = index.modes()[s.mode];
-    out.push_back({s.begin, s.body_end, s.end, index.delimiters()[s.delimiter],
-                   index.delimiters()[s.active_delimiter], m.mode, m.known, s.kind,
-                   s.mentions_sql_mode, s.clean_after});
-  }
-  return out;
-}
+}  // namespace test
+
+namespace {
+
+using test::flatten;
 
 void check_update_matches_build(std::string text, unsigned seed, int edits) {
-  static const std::vector<std::string> pieces = {
-      ";", ";\n", "\n", " ", "x", "SELECT 1", "'", "\"", "`", "/*", "*/", "-- ", "#",
-      "DELIMITER $$\n", "\nDELIMITER ;\n", "$$", "\\G", "/*!40101 ", "/*M!100100 ",
-      "SET sql_mode='ANSI_QUOTES';\n", "SET sql_mode='NO_BACKSLASH_ESCAPES';\n",
-      "SET @m = @@sql_mode;\n", "SET sql_mode = @m;\n", "\\'", "BEGIN SELECT 1; END"};
+  const auto &pieces = test::edit_pieces();
   std::mt19937 rng(seed);
   const Index_options options;
   Statement_index index = Statement_index::build(text, options);
@@ -271,17 +251,7 @@ void check_update_matches_build(std::string text, unsigned seed, int edits) {
     ASSERT_EQ(updated.open_at_end(), built.open_at_end()) << "seed " << seed;
     ASSERT_EQ(updated.errors(), built.errors()) << "seed " << seed;
 
-    // The splice: an unchanged prefix, a replaced middle, a shifted suffix.
-    ASSERT_LE(splice.first + splice.removed, before.size());
-    ASSERT_EQ(before.size() - splice.removed + splice.added, got.size());
-    for (size_t i = 0; i < splice.first; ++i) ASSERT_EQ(got[i], before[i]);
-    for (size_t i = splice.first + splice.removed; i < before.size(); ++i) {
-      Flat f = before[i];
-      f.begin = static_cast<uint32_t>(f.begin + splice.delta);
-      f.body_end = static_cast<uint32_t>(f.body_end + splice.delta);
-      f.end = static_cast<uint32_t>(f.end + splice.delta);
-      ASSERT_EQ(got[i - splice.removed + splice.added], f);
-    }
+    ASSERT_EQ(test::splice_mismatch(before, got, splice), "") << "seed " << seed << " edit " << n;
     index = updated;
   }
 }
@@ -338,10 +308,7 @@ TEST(Statement_index, build_parallel_equals_build) {
       "SET sql_mode='';\n", "SET @m=@@sql_mode;\n", "SET sql_mode=@m;\n",
       "SET sql_mode='NO_BACKSLASH_ESCAPES';\n", "SELECT 'x\\';\n", "/*!40101 SET a=1 */;\n",
       "/*!40101 SELECT 1;\n", "*/;\n", "x", "\n", "'", "SELECT 3\\G\n"};
-  auto same = [](const Statement_index &a, const Statement_index &b) {
-    return flatten(a) == flatten(b) && a.final_delimiter() == b.final_delimiter() &&
-           a.open_at_end() == b.open_at_end() && a.errors() == b.errors();
-  };
+  const auto same = test::same_index;
   for (unsigned seed = 1; seed <= 2000; ++seed) {
     std::mt19937 rng(seed);
     std::string text;
