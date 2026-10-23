@@ -21,6 +21,7 @@
 
 #include "mdbls/keywords.h"
 #include "mdbparse.h"
+#include "statement_kinds.h"
 #include "text_util.h"
 
 namespace mdbls {
@@ -48,7 +49,7 @@ struct Name_syms {
   S(table_primary_ident) S(table_primary_derived) S(table_name_with_opt_use_partition)
   S(delete_single_table) S(select_item) S(select_item_list) S(expr) S(sp_param_name_and_mode)
   S(query_specification_start) S(from_clause) S(table_reference_list) S(DUAL_SYM)
-  S(verb_clause) S(select) S(select_into) S(sp_proc_stmt) S(sp_decl)
+  S(verb_clause) S(sp_proc_stmt) S(sp_decl)
   // tokens
   S(TABLE_SYM) S(VIEW_SYM) S(SEQUENCE_SYM) S(INDEX_SYM) S(DATABASE)
 #undef S
@@ -748,10 +749,8 @@ Query_shape Statement_names::query_at(uint32_t offset) const {
       break;
     }
     if (sym != s.verb_clause) continue;
-    const uint32_t st = kids.size() == 1 ? kids[0] : npos;
-    const int ss = st == npos ? -1 : m_tree.node(st).symbol;
-    if (ss == s.select || ss == s.select_into || ss == s.insert || ss == s.replace || ss == s.update ||
-        ss == s.delete_ || ((ss == s.create || ss == s.alter) && m_tree.child(st, s.VIEW_SYM) != npos)) {
+    if (kids.size() == 1 && has_clauses(m_tree, kids[0])) {
+      const uint32_t st = kids[0];
       out.statement_begin = m_tree.begin(st);
       out.in_routine = ancestor(a, s.sp_proc_stmt) != npos;
     }

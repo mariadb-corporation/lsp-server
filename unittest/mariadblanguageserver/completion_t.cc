@@ -623,6 +623,12 @@ TEST(Completion, a_from_starts_a_line_of_its_own_and_can_be_left_out) {
   const std::string sql = std::string(k_fk_schema) + "SELECT test_schema.t1.|;";
   EXPECT_EQ(pick(complete_at(sql, false, 2000, false, 80, true, "", false), "id"),
             "SELECT t.id\nFROM test_schema.t1 AS t;");
+  // Where the formatter puts the clauses of EXPLAIN and CREATE TABLE ... AS
+  // too.
+  EXPECT_EQ(pick(complete_at(std::string(k_fk_schema) + "EXPLAIN SELECT test_schema.t1.|;", false), "id"),
+            "EXPLAIN SELECT t.id\n  FROM test_schema.t1 AS t;");
+  EXPECT_EQ(pick(complete_at(std::string(k_fk_schema) + "CREATE TABLE c AS SELECT test_schema.t1.|;", false), "id"),
+            "CREATE TABLE c AS SELECT t.id\n  FROM test_schema.t1 AS t;");
   // Without adding tables, the column comes as it is, and no table to join.
   const auto r = complete_at(sql, false, 2000, false, 80, true, "", true, false);
   ASSERT_TRUE(r.has("id"));
