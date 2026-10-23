@@ -58,7 +58,8 @@ add_test(NAME mariadb-lsp.tree COMMAND mariadb-lsp tree "${_fixtures}/mrs_gramma
 # large-file tests open; MDBLS_LARGE_TESTS adds a run at 256 MB.  The
 # completion latency bound is P5's 20 ms (p95 at 1 MB) for optimized builds
 # without sanitizers.
-# The live-connection tests need mariadbd on PATH and MDBLS_SHELL_BIN_DIR.
+# The live-connection tests need mariadbd on PATH (or MDBLS_TEST_MARIADBD)
+# and MariaDB Shell in MDBLS_SHELL_BIN_DIR.
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
   if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$" AND

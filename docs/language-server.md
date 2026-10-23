@@ -490,11 +490,15 @@ Debug and sanitizer ones. By hand:
 MARIADB_LSP=bld/bin/mariadb-lsp python3 -m unittest discover -s tests/e2e -v
 ```
 
-The live-connection tests start a throwaway server with the `mariadbd` on `PATH` (or
-`MDBLS_TEST_MARIADBD`), as MariaDB Shell's sandboxes do, and keep a private secret store
-through MariaDB Shell's `mariadb-secret-store-plaintext` helper, found in
-`MDBLS_SHELL_BIN_DIR` (a CMake cache variable, default `../mariadb-shell/build/bin`).
-Without either, they are skipped; so are the unit tests of the secret store.
+The live-connection tests deploy a throwaway server with MariaDB Shell
+(`mariadb-shell -- sandbox deploy`, with the `mariadbd` on `PATH` or `MDBLS_TEST_MARIADBD`,
+a binary or an installation directory), run their SQL through the shell, and keep a
+private secret store through the shell's `mariadb-secret-store-login-path` helper, with a
+login file of its own (`MYSQL_TEST_LOGIN_FILE`), never `~/.mylogin.cnf`. The shell is
+found in `MDBLS_SHELL_BIN_DIR` (a CMake cache variable; by default the directory of the
+`mariadb-shell` on `PATH`, else `../mariadb-shell/build/bin`). Without the shell or a
+`mariadbd`, they are skipped; without the shell, so are the unit tests of the secret
+store. No MariaDB client tools are needed.
 
 ### Sanitizers and fuzzing
 
