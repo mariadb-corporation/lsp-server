@@ -49,9 +49,13 @@ struct Format_options {
 // statement is laid out when it is a query (SELECT, WITH, a parenthesized
 // query), one built around a query or clauses (INSERT or REPLACE ...
 // SELECT, UPDATE, DELETE, CREATE or ALTER VIEW), CREATE TABLE with its
-// columns, ALTER TABLE, a routine (CREATE PROCEDURE, FUNCTION, TRIGGER,
-// EVENT) or a compound statement (BEGIN NOT ATOMIC, IF, CASE, a loop); it
-// is left as it is when it is none of those,
+// columns or AS SELECT, ALTER TABLE, EXPLAIN or ANALYZE of one of those,
+// INSERT or REPLACE ... VALUES or SET (up to 64 KB, and only when the text
+// formatted is up to 4 MB: a dump's rows are left alone), a routine (CREATE
+// PROCEDURE, FUNCTION, TRIGGER, EVENT; ALTER EVENT, PROCEDURE, FUNCTION), a
+// compound statement (BEGIN NOT ATOMIC, IF, CASE, a loop), GRANT, REVOKE,
+// CREATE or ALTER USER, or REST SQL (as SHOW CREATE REST writes it); it is
+// left as it is when it is none of those,
 // does not parse whole, holds a versioned comment, or the layout would not
 // keep its tokens and comments.
 //

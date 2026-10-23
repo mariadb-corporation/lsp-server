@@ -1110,8 +1110,14 @@ event clauses one level deeper on lines of their own; empty lines between statem
 kept. Clauses one level deeper than their statement's first line by default, at the top
 level and in bodies, each switchable (`indentClauses`, `indentRoutineClauses`, the user's
 choice 2026-10-23); completion's added FROM always on a line of its own, placed by the
-same settings, and `completionAddsTables` to turn the added tables off. Open: other DDL,
-Oracle-mode routines (`AS BEGIN ... END`, packages: left as they
+same settings, and `completionAddsTables` to turn the added tables off. **2026-10-23:
+more statements**: EXPLAIN/ANALYZE of a query, CREATE TABLE ... AS SELECT (the query
+under the header, as a view's), INSERT ... VALUES/SET (rows fill the line aligned after
+VALUES, the user's choice; up to 64 KB per statement and 4 MB of formatted text, so
+dumps stay untouched and fast), GRANT/REVOKE/CREATE and ALTER USER clauses, ALTER
+EVENT/PROCEDURE/FUNCTION as routines, REST SQL as MariaDB Shell's SHOW CREATE REST
+writes it (the user's choice). Open: other DDL (short; recasing at most),
+Oracle-mode routines (the parser does not take sql_mode=ORACLE) (`AS BEGIN ... END`, packages: left as they
 are), the original relative indentation of line breaks inside other constructs (they all
 continue one level deeper), `onTypeFormatting`.
 

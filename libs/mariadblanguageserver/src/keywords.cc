@@ -134,6 +134,10 @@ bool is_name_wrapper(int symbol) {
       grammar::symbol("IDENT_sys"),      grammar::symbol("IDENT_cli"),
       grammar::symbol("ident_cli_func"), grammar::symbol("ident_cli_set_usual_case"),
       grammar::symbol("label_ident"),
+      // REST SQL: names, request path segments and GraphQL keys, any of
+      // which may be a keyword.
+      grammar::symbol("mrs_identifier"), grammar::symbol("mrs_path_segment"),
+      grammar::symbol("mrs_graphql_allowed_keyword"), grammar::symbol("mrs_vendor"),
   };
   if (std::find(wrappers.begin(), wrappers.end(), symbol) != wrappers.end()) return true;
   return !grammar::is_terminal(symbol) && std::string_view(grammar::name(symbol)).starts_with("keyword");
