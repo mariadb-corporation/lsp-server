@@ -25,6 +25,7 @@
 #include "mdbls/keywords.h"
 #include "mdbls/syntax_tree.h"
 #include "mdbparse.h"
+#include "statement_kinds.h"
 #include "text_util.h"
 
 namespace mdbls {
@@ -72,6 +73,17 @@ Doc concat(std::vector<Doc> parts) {
   d.hard = std::any_of(parts.begin(), parts.end(), [](const Doc &p) { return p.hard; });
   d.parts = std::move(parts);
   return d;
+}
+
+// The parts given, moved in: a braced list would copy each (and all of
+// what it holds) out of its const initializer_list.
+template <typename... Parts>
+  requires(sizeof...(Parts) > 1 && (std::is_same_v<Parts, Doc> && ...))
+Doc concat(Parts &&...parts) {
+  std::vector<Doc> v;
+  v.reserve(sizeof...(parts));
+  (v.push_back(std::move(parts)), ...);
+  return concat(std::move(v));
 }
 
 Doc wrap(Doc::Kind kind, Doc inner) {
@@ -323,6 +335,7 @@ struct Symbols {
   int else_clause_opt = grammar::symbol("else_clause_opt");
   int do_ = grammar::symbol("DO_SYM");
   int sp_cursor_stmt = grammar::symbol("sp_cursor_stmt");
+  int sp_decl_body = grammar::symbol("sp_decl_body");
   // An event's clauses besides ON SCHEDULE, each on a line of its own.
   std::vector<int> event_clauses = {
       grammar::symbol("opt_ev_on_completion"),
@@ -393,7 +406,7 @@ struct Symbols {
       {grammar::symbol("opt_create_partitioning"), create_body},
       {grammar::symbol("opt_partitioning"), alter_commands},
       {grammar::symbol("remove_partitioning"), alter_commands},
-      {grammar::symbol("sp_cursor_stmt"), grammar::symbol("sp_decl_body")},
+      {sp_cursor_stmt, sp_decl_body},
   };
   // Each starts a line of its own when its query breaks.
   std::vector<int> clauses = {
@@ -519,7 +532,8 @@ class Builder {
   // clauses one level deeper than its first.
   Doc statement(uint32_t root, bool multiline) {
     Doc d = group(build(root).doc, multiline);
-    return o_.indent_clauses && has_clauses(root) ? nest(o_.indent, std::move(d)) : d;
+    if (o_.indent_clauses && has_clauses(t_, root)) return nest(o_.indent, std::move(d));
+    return d;
   }
 
  private:
@@ -592,7 +606,10 @@ class Builder {
     };
     const bool blanks = kind == Sep::hard || kind == Sep::close;
     // A line break, and an empty line before it when `blank`.
-    auto lines = [&](Doc d, bool blank) { return blanks && blank ? concat({hardline(), std::move(d)}) : d; };
+    auto lines = [&](Doc d, bool blank) {
+      if (blanks && blank) return concat(hardline(), std::move(d));
+      return d;
+    };
     if (g.comments.empty()) {
       switch (kind) {
         case Sep::keep:
@@ -630,7 +647,7 @@ class Builder {
     if (kind == Sep::soft && !g.comments.back().line_after) parts.push_back(softline());
     if (kind == Sep::close) {
       parts.pop_back();  // what followed the last comment
-      return concat({nest(o_.indent, concat(std::move(parts))), hardline()});
+      return concat(nest(o_.indent, concat(std::move(parts))), hardline());
     }
     return concat(std::move(parts));
   }
@@ -729,20 +746,27 @@ class Builder {
     return p;
   }
 
+  // Along the nodes that only wrap it: no search of the statement's
+  // subtree, which for a block holds every statement in it.
   bool indents_its_clauses(uint32_t n) const {
-    if (symbol(n) == s_.sp_decl) return t_.find(n, s_.sp_cursor_stmt) != npos;
-    const uint32_t verb = t_.find(n, s_.verb_clause);
-    if (verb == npos || t_.children(verb).size() != 1 || first_token(verb) != first_token(n)) return false;
-    return has_clauses(t_.children(verb)[0]);
+    if (symbol(n) == s_.sp_decl) {
+      const uint32_t body = t_.child(n, s_.sp_decl_body);
+      return body != npos && t_.child(body, s_.sp_cursor_stmt) != npos;
+    }
+    uint32_t at = n;
+    while (at != npos && symbol(at) != s_.verb_clause) at = only_child(at);
+    return at != npos && t_.children(at).size() == 1 && has_clauses(t_, t_.children(at)[0]);
   }
 
-  // A query, INSERT or REPLACE, UPDATE, DELETE, CREATE or ALTER VIEW: the
-  // statements whose clauses start lines.
-  bool has_clauses(uint32_t n) const {
-    const int sym = symbol(n);
-    if (sym == s_.create || sym == s_.alter) return t_.child(n, s_.view) != npos;
-    return sym == s_.select || sym == s_.select_into || sym == s_.insert || sym == s_.replace ||
-           sym == s_.update || sym == s_.delete_;
+  // The one child of n with tokens, or npos.
+  uint32_t only_child(uint32_t n) const {
+    uint32_t out = npos;
+    for (const uint32_t k : t_.children(n)) {
+      if (first_token(k) == npos) continue;
+      if (out != npos) return npos;
+      out = k;
+    }
+    return out;
   }
 
   bool has_comma(uint32_t n) const {
@@ -807,9 +831,9 @@ class Builder {
     if (body.empty()) return join({std::move(lp), std::move(rp)}, [](size_t) { return Sep::none; });
     Piece out;
     out.first = lp.first;
-    out.doc = group(concat({std::move(lp.doc),
-                            nest(o_.indent, concat({separator(body.first, Sep::soft), std::move(body.doc)})),
-                            separator(rp.first, Sep::soft), std::move(rp.doc)}));
+    out.doc = group(concat(std::move(lp.doc),
+                            nest(o_.indent, concat(separator(body.first, Sep::soft), std::move(body.doc))),
+                            separator(rp.first, Sep::soft), std::move(rp.doc)));
     return out;
   }
 
@@ -824,32 +848,16 @@ class Builder {
   // The items of the comma list `n` (left-recursive: n ',' item), each with
   // the comma after it.
   std::vector<Piece> items(uint32_t n) {
-    const int sym = symbol(n);
-    std::vector<std::vector<uint32_t>> groups;
-    std::vector<uint32_t> commas;
-    uint32_t at = n;
-    while (true) {
-      const auto kids = t_.children(at);
-      if (kids.size() > 1 && symbol(kids[0]) == sym && symbol(kids[1]) == s_.comma) {
-        groups.emplace_back(kids.begin() + 2, kids.end());
-        commas.push_back(kids[1]);
-        at = kids[0];
-      } else {
-        groups.emplace_back(kids.begin(), kids.end());
-        break;
-      }
-    }
-    std::reverse(groups.begin(), groups.end());
-    std::reverse(commas.begin(), commas.end());
+    // Every group but the first starts with its comma.
+    const auto groups = left_recursive(n, s_.comma);
     std::vector<Piece> out;
     for (size_t i = 0; i < groups.size(); ++i) {
       std::vector<Piece> parts;
-      for (const uint32_t c : groups[i]) parts.push_back(build(c));
-      if (i < commas.size()) parts.push_back(build(commas[i]));
+      for (size_t k = i == 0 ? 0 : 1; k < groups[i].size(); ++k) parts.push_back(build(groups[i][k]));
+      const bool comma = i + 1 < groups.size();
+      if (comma) parts.push_back(build(groups[i + 1][0]));
       const size_t last = parts.size() - 1;
-      out.push_back(join(std::move(parts), [&](size_t k) {
-        return i < commas.size() && k == last ? Sep::none : Sep::keep;
-      }));
+      out.push_back(join(std::move(parts), [&](size_t k) { return comma && k == last ? Sep::none : Sep::keep; }));
     }
     return out;
   }
@@ -876,8 +884,8 @@ class Builder {
     if (lp.empty() || rp.empty()) return children(n);
     Piece out;
     out.first = lp.first;
-    out.doc = concat({std::move(lp.doc), one_per_line(items(kids[1])), separator(rp.first, Sep::close),
-                      std::move(rp.doc)});
+    out.doc = concat(std::move(lp.doc), one_per_line(items(kids[1])), separator(rp.first, Sep::close),
+                      std::move(rp.doc));
     return out;
   }
 
@@ -984,8 +992,8 @@ class Builder {
         Piece on = build(kids[k]);
         // The condition is ON's clause: after a comment ending the ON line
         // it goes one level deeper than ON.
-        joined.push_back(group(concat({nest(o_.indent, separator(on.first, Sep::line)), std::move(on.doc),
-                                       nest(o_.indent, separator(tail.first, Sep::space)), std::move(tail.doc)})));
+        joined.push_back(group(concat(nest(o_.indent, separator(on.first, Sep::line)), std::move(on.doc),
+                                       nest(o_.indent, separator(tail.first, Sep::space)), std::move(tail.doc))));
       } else {
         joined.push_back(separator(tail.first, Sep::space));
         joined.push_back(std::move(tail.doc));
@@ -993,7 +1001,7 @@ class Builder {
     }
     // The JOIN lines break with the query's clauses; in parentheses, (a
     // JOIN b ON ...), only when they do not fit.
-    out.doc = concat({std::move(out.doc), nest(o_.indent, concat(std::move(joined)))});
+    out.doc = concat(std::move(out.doc), nest(o_.indent, concat(std::move(joined))));
     const uint32_t before = previous_token(out.first);
     if (before != npos && is_left_paren(token(before).symbol)) out.doc = group(std::move(out.doc));
     return out;
@@ -1004,12 +1012,33 @@ class Builder {
   // The parts of a routine: CREATE ... PROCEDURE p(...) or FUNCTION f(...)
   // RETURNS ..., TRIGGER ... FOR EACH ROW, EVENT e; the characteristics or
   // event clauses after it; DO before an event's body; the body.
-  struct Routine_parts {
+  // A header and the clauses after it, as pieces.
+  struct Clauses {
     std::vector<Piece> head;
     std::vector<std::vector<Piece>> clauses;
+    // `p` after what came before; `starts`: it starts a clause.
+    void add(Piece p, bool starts) {
+      if (p.empty()) return;
+      if (starts) clauses.emplace_back();
+      (clauses.empty() ? head : clauses.back()).push_back(std::move(p));
+    }
+  };
+
+  // Each clause one level deeper on a line of its own when the statement
+  // breaks, its words one space apart.
+  void append_clauses(std::vector<std::vector<Piece>> clauses, std::vector<Doc> *parts) const {
+    for (auto &c : clauses) {
+      Piece clause = join(std::move(c), [](size_t) { return Sep::space; });
+      if (clause.empty()) continue;
+      parts->push_back(nest(o_.indent, concat(separator(clause.first, Sep::line), std::move(clause.doc))));
+    }
+  }
+
+  struct Routine_parts {
+    Clauses words;
     Piece intro;
     Piece body;
-    uint32_t params = npos;  // the first token of the parameter list
+    size_t params = SIZE_MAX;  // the parameter list's place in the head
   };
 
   void routine_parts(uint32_t n, Routine_parts *r) {
@@ -1021,12 +1050,7 @@ class Builder {
         continue;
       }
       if (sym == s_.sp_c_chistics) {
-        for (const auto &c : left_recursive(k)) {
-          Piece p = build(c.back());
-          if (p.empty()) continue;
-          r->clauses.push_back({});
-          r->clauses.back().push_back(std::move(p));
-        }
+        for (Piece &p : joined_groups(k, Sep::space)) r->words.add(std::move(p), true);
         continue;
       }
       if (sym == s_.sp_proc_stmt || sym == s_.ev_sql_stmt || sym == s_.sp_proc_stmt_in_returns_clause) {
@@ -1037,15 +1061,13 @@ class Builder {
       if (p.empty()) continue;
       if (sym == s_.do_ && parent == s_.event_tail) {
         r->intro = std::move(p);
-      } else if (contains(s_.event_clauses, sym) || (sym == s_.on && parent == s_.event_tail)) {
-        r->clauses.push_back({});
-        r->clauses.back().push_back(std::move(p));
-      } else if (!r->clauses.empty()) {
-        r->clauses.back().push_back(std::move(p));  // SCHEDULE ... after ON
-      } else {
-        if (sym == s_.sp_parenthesized_pdparam_list || sym == s_.sf_parameters) r->params = p.first;
-        r->head.push_back(std::move(p));
+        continue;
       }
+      if ((sym == s_.sp_parenthesized_pdparam_list || sym == s_.sf_parameters) && r->words.clauses.empty()) {
+        r->params = r->words.head.size();
+      }
+      // SCHEDULE ... goes with the ON before it.
+      r->words.add(std::move(p), contains(s_.event_clauses, sym) || (sym == s_.on && parent == s_.event_tail));
     }
   }
 
@@ -1056,17 +1078,11 @@ class Builder {
   Piece routine(uint32_t n) {
     Routine_parts r;
     routine_parts(n, &r);
-    std::vector<uint32_t> firsts;
-    for (const Piece &p : r.head) firsts.push_back(p.first);
     // No space before the parameter list: p(IN a INT).
-    Piece out = join(std::move(r.head), [&](size_t k) { return firsts[k] == r.params ? Sep::none : Sep::space; });
+    Piece out = join(std::move(r.words.head), [&](size_t k) { return k == r.params ? Sep::none : Sep::space; });
     if (out.empty() || r.body.empty()) return children(n);
     std::vector<Doc> parts{std::move(out.doc)};
-    for (auto &c : r.clauses) {
-      Piece clause = join(std::move(c), [](size_t) { return Sep::space; });
-      if (clause.empty()) continue;
-      parts.push_back(nest(o_.indent, concat({separator(clause.first, Sep::line), std::move(clause.doc)})));
-    }
+    append_clauses(std::move(r.words.clauses), &parts);
     if (!r.intro.empty()) {
       parts.push_back(separator(r.intro.first, Sep::line));
       parts.push_back(std::move(r.intro.doc));
@@ -1076,7 +1092,7 @@ class Builder {
       parts.push_back(separator(r.body.first, Sep::line));
       parts.push_back(std::move(r.body.doc));
     } else {
-      parts.push_back(nest(o_.indent, concat({separator(r.body.first, Sep::line), std::move(r.body.doc)})));
+      parts.push_back(nest(o_.indent, concat(separator(r.body.first, Sep::line), std::move(r.body.doc))));
     }
     out.doc = concat(std::move(parts));
     return out;
@@ -1100,20 +1116,21 @@ class Builder {
     }
     Piece out;
     out.first = lp.first;
-    out.doc = group(concat({std::move(lp.doc), nest(o_.indent, concat(std::move(inner))),
-                            separator(rp.first, Sep::soft), std::move(rp.doc)}));
+    out.doc = group(concat(std::move(lp.doc), nest(o_.indent, concat(std::move(inner))),
+                            separator(rp.first, Sep::soft), std::move(rp.doc)));
     return out;
   }
 
   // The groups of children of the left-recursive list n (n: n x y ... |
-  // x y ...), in order.
-  std::vector<std::vector<uint32_t>> left_recursive(uint32_t n) const {
+  // x y ...), in order.  With `sep`, only n `sep` x y ... recurses, and the
+  // groups after the first start with their `sep`.
+  std::vector<std::vector<uint32_t>> left_recursive(uint32_t n, int sep = -1) const {
     const int sym = symbol(n);
     std::vector<std::vector<uint32_t>> groups;
     uint32_t at = n;
     while (true) {
       const auto kids = t_.children(at);
-      if (!kids.empty() && symbol(kids[0]) == sym) {
+      if (!kids.empty() && symbol(kids[0]) == sym && (sep < 0 || (kids.size() > 1 && symbol(kids[1]) == sep))) {
         groups.emplace_back(kids.begin() + 1, kids.end());
         at = kids[0];
       } else {
@@ -1125,13 +1142,14 @@ class Builder {
     return groups;
   }
 
-  // The statements of a statement list, each with its ';'.
-  std::vector<Piece> statements(uint32_t n) {
+  // Each group of the left-recursive list n, its parts `sep` apart: a
+  // statement and its ';', a characteristic.
+  std::vector<Piece> joined_groups(uint32_t n, Sep sep) {
     std::vector<Piece> out;
     for (const auto &g : left_recursive(n)) {
       std::vector<Piece> parts;
       for (const uint32_t k : g) parts.push_back(build(k));
-      out.push_back(join(std::move(parts), [](size_t) { return Sep::none; }));
+      out.push_back(join(std::move(parts), [sep](size_t) { return sep; }));
     }
     return out;
   }
@@ -1176,7 +1194,7 @@ class Builder {
       }
 
       if (contains(s_.statement_lists, symbol(e))) {
-        parts.push_back(one_per_line(statements(e)));
+        parts.push_back(one_per_line(joined_groups(e, Sep::none)));
         after_list = true;
         continue;
       }
@@ -1203,19 +1221,18 @@ class Builder {
     std::vector<Piece> head;
     std::vector<Piece> arms;
     std::vector<Piece> tail;
-    auto add_arm = [&](uint32_t arm) { arms.push_back(compound(arm)); };
     for (const uint32_t k : t_.children(n)) {
       const int sym = symbol(k);
       if (sym == s_.case_stmt_body) {
         for (const uint32_t b : t_.children(k)) {
           if (contains(s_.when_lists, symbol(b))) {
-            for (const auto &g : left_recursive(b)) add_arm(g.back());
+            for (const auto &g : left_recursive(b)) arms.push_back(compound(g.back()));
           } else {
             head.push_back(build(b));
           }
         }
       } else if (sym == s_.else_clause_opt) {
-        if (first_token(k) != npos) add_arm(k);
+        if (first_token(k) != npos) arms.push_back(compound(k));
       } else {
         (arms.empty() ? head : tail).push_back(build(k));
       }
@@ -1223,8 +1240,8 @@ class Builder {
     Piece out = join(std::move(head), [](size_t) { return Sep::space; });
     Piece end = join(std::move(tail), [](size_t) { return Sep::space; });
     if (out.empty() || end.empty() || arms.empty()) return children(n);
-    out.doc = concat({std::move(out.doc), one_per_line(std::move(arms)), separator(end.first, Sep::close),
-                      std::move(end.doc)});
+    out.doc = concat(std::move(out.doc), one_per_line(std::move(arms)), separator(end.first, Sep::close),
+                      std::move(end.doc));
     return out;
   }
 
@@ -1263,7 +1280,7 @@ class Builder {
       rest.push_back(separator(e.first, Sep::keep));
       rest.push_back(std::move(e.doc));
     }
-    out.doc = group(concat({std::move(out.doc), nest(o_.indent, concat(std::move(rest)))}));
+    out.doc = group(concat(std::move(out.doc), nest(o_.indent, concat(std::move(rest)))));
     return out;
   }
 

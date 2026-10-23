@@ -39,6 +39,7 @@ add_library(mariadblanguageserver STATIC
   src/source_include.cc
   src/sql_mode.cc
   src/sql_names.cc
+  src/statement_kinds.cc
   src/statement_index.cc
   src/parser_pool.cc
   src/syntax_check.cc
