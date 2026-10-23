@@ -364,7 +364,6 @@ struct Symbols {
   int user = grammar::symbol("USER_SYM");
   int describe = grammar::symbol("describe");
   int analyze_stmt_command = grammar::symbol("analyze_stmt_command");
-  int explainable_command = grammar::symbol("explainable_command");
   int grant = grammar::symbol("grant");
   int revoke = grammar::symbol("revoke");
   int create_like = grammar::symbol("create_like");
@@ -481,8 +480,8 @@ struct Symbols {
       grammar::symbol("partition"), grammar::symbol("part_definition"),
       describe, analyze_stmt_command, grammar::symbol("table_value_constructor"),
       grant, grammar::symbol("grant_command"), grant_privileges_command,
-      grammar::symbol("grant_privileges"), revoke, grammar::symbol("revoke_privileges_or_proxy"),
-      revoke_privileges,
+      grammar::symbol("grant_privileges"), grammar::symbol("grant_role_command"), revoke,
+      grammar::symbol("revoke_privileges_or_proxy"), revoke_privileges, grammar::symbol("revoke_role"),
   };
   // Clauses of those statements, as {clause, the statement part it is a
   // clause of}: each starts a line of its own when the statement breaks.
@@ -869,9 +868,12 @@ class Builder {
       if (out.empty()) {
         out.first = p.first;
       } else {
-        const Sep kind = clause_starts_[p.first]                ? Sep::line
-                         : block_starts_[p.first] != Block::none ? Sep::space
-                                                                 : sep(k);
+        Sep kind = clause_starts_[p.first]                ? Sep::line
+                   : block_starts_[p.first] != Block::none ? Sep::space
+                                                           : sep(k);
+        // An indented piece nests the break a comment forces before it
+        // itself: not once more inside the separator (Sep::space would).
+        if (p.indented && kind == Sep::space) kind = Sep::word;
         Doc s = separator(p.first, kind);
         if (p.indented) {
           parts.push_back(nest(o_.indent, concat(std::move(s), std::move(p.doc))));
@@ -1028,7 +1030,8 @@ class Builder {
           continue;
         }
       }
-      Sep sep = spaced ? Sep::space : Sep::keep;
+      // No space before a comma (REVOKE ALL PRIVILEGES, GRANT OPTION ...).
+      Sep sep = !spaced ? Sep::keep : t_.is_token(kids[k]) && symbol(kids[k]) == s_.comma ? Sep::none : Sep::space;
       if (is_clause(kids[k], n) || symbol(kids[k]) == s_.unit_type_decl || previous == s_.unit_type_decl ||
           previous == s_.with_clause || previous == s_.opt_with_clause) {
         sep = Sep::line;
@@ -1788,16 +1791,9 @@ uint32_t statement_node(const Syntax_tree &tree) {
     return n;
   }
   auto has_child = [&](uint32_t x, int symbol) { return tree.child(x, symbol) != npos; };
-  // EXPLAIN or ANALYZE of a query or DML statement.
-  if (sym == s.describe || sym == s.analyze_stmt_command) {
-    const uint32_t cmd = tree.child(n, s.explainable_command);
-    if (cmd == npos || tree.children(cmd).size() != 1) return npos;
-    const int c = tree.node(tree.children(cmd)[0]).symbol;
-    return c == s.select || c == s.select_into || c == s.insert || c == s.replace || c == s.update ||
-                   c == s.delete_
-               ? n
-               : npos;
-  }
+  // EXPLAIN or ANALYZE of a query or DML statement (not DESCRIBE t, not
+  // EXPLAIN FOR CONNECTION): the ones with clauses.
+  if (sym == s.describe || sym == s.analyze_stmt_command) return has_clauses(tree, n) ? n : npos;
   if ((sym == s.create || sym == s.alter) && has_child(n, s.user)) return n;
   if (is_alter_routine(tree, n)) return n;
   if ((sym == s.create || sym == s.alter) && has_child(n, s.view) && has_child(n, s.view_select)) return n;

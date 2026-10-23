@@ -252,7 +252,8 @@ SELECT f.title, c.name AS category, count(r.rental_id) AS rentals,
   breaks. A handler's block starts on its line
   (`DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN`), a cursor's query like a view's, and a
   `FOR` loop's `IN (SELECT ...)` like a subquery. One empty line between statements (and
-  between table columns) stays, none right after `BEGIN`, `THEN` or `(`; comments before
+  between table columns) stays, none right after `BEGIN`, `THEN` or `(` or before an
+  `ALTER TABLE`'s first change; comments before
   `END` or `ELSE` stay with the statements before them.
 
 ```sql

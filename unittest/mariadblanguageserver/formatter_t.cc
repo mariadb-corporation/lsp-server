@@ -811,6 +811,11 @@ TEST(Formatter, a_query_inside_explain_or_create_table_is_laid_out) {
             "CREATE TABLE t3 (\n  a INT\n) AS\n  SELECT a\n  FROM t\n  WHERE b = 1;");
   EXPECT_EQ(with_clauses("create table t3 (a int) as select a from t where b = 1;", false, false),
             "CREATE TABLE t3 (\n  a INT\n) AS\nSELECT a\nFROM t\nWHERE b = 1;");
+  // A comment before AS puts it on a line one level deeper, with the query.
+  EXPECT_EQ(with_clauses("CREATE TABLE t (a INT) -- c\nAS SELECT 1;", true, true),
+            "CREATE TABLE t (\n  a INT\n) -- c\n  AS\n  SELECT 1;");
+  EXPECT_EQ(with_clauses("CREATE TABLE t (a INT)\n-- own line\nAS SELECT 1;", true, true),
+            "CREATE TABLE t (\n  a INT\n)\n  -- own line\n  AS\n  SELECT 1;");
 }
 
 TEST(Formatter, rows_fill_the_line_after_values) {
@@ -863,6 +868,12 @@ TEST(Formatter, grant_revoke_and_users_put_their_clauses_on_lines) {
             "  WITH GRANT OPTION;");
   EXPECT_EQ(with_clauses("REVOKE SELECT, INSERT ON db.t\nFROM 'app'@'%';", true, true),
             "REVOKE SELECT, INSERT\n  ON db.t\n  FROM 'app'@'%';");
+  // The comma of REVOKE ALL PRIVILEGES, GRANT OPTION is the statement's own;
+  // a role's GRANT and REVOKE space their words like the privileges'.
+  EXPECT_EQ(with_clauses("revoke all privileges , grant option from u;", true, true),
+            "REVOKE ALL PRIVILEGES, GRANT OPTION FROM u;");
+  EXPECT_EQ(with_clauses("grant   r1   to   u  with  admin  option;\nrevoke   r1   from   u;", true, true),
+            "GRANT r1 TO u WITH ADMIN OPTION;\nREVOKE r1 FROM u;");
   EXPECT_EQ(with_clauses("create user 'u'@'%' identified by 'p' require ssl with max_queries_per_hour 10 password "
                          "expire account lock;",
                          true, true),
