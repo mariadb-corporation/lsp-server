@@ -90,7 +90,10 @@ completions snippets (`CONCAT($0)`).
 | `window/showMessage` | server to client | a connection that cannot be used ("connection not configured", a failed login, an SSH URI, a URI holding a password), once per connection and message until it is read; a `connection` that is not a URI, which is refused (and never shown as given, since it may hold a password) |
 
 When the client announces `window.workDoneProgress`, a large document's check is also
-reported as work done progress ("Checking SQL").
+reported as work done progress ("Checking SQL"). The server creates a token with
+`window/workDoneProgress/create` and reports nothing until the client accepts it; a token
+accepted after the check is over is begun and ended at once, and one the client declines
+(an error answer) is never used.
 
 ## Completion
 

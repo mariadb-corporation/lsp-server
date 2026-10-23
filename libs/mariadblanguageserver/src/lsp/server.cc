@@ -341,6 +341,9 @@ struct Server::Impl {
   bool watch_files = false;      // the client registers file watchers for us
   std::shared_ptr<Include_texts> include_texts = std::make_shared<Include_texts>();
   uint64_t next_request = 1;     // ids of our requests to the client
+  // workDoneProgress tokens whose check ended before the client answered
+  // their window/workDoneProgress/create: begun and ended when it accepts.
+  std::set<std::string> unanswered_progress;
 
   // Catalogs (loop thread).
   std::vector<std::string> catalog_entries;  // initializationOptions.catalogFiles
@@ -926,11 +929,32 @@ struct Server::Impl {
       promise->set_value(std::move(r));
       return;
     }
-    // The client accepted a workDoneProgress token: begin reporting.
+    // The client's answer to a workDoneProgress token: an error declines
+    // it, and nothing is reported with it.
+    const Json *err = member(msg, "error");
+    const bool accepted = err == nullptr || err->IsNull();
+    if (unanswered_progress.erase(id) > 0) {
+      // Its check is over: begun and ended at once, so that the client
+      // does not keep a token that never ends.
+      if (accepted) {
+        notify_progress(id, "begin", [](Json_writer &w) {
+          w.Key("title");
+          w.String("Checking SQL");
+          w.Key("percentage");
+          w.Uint(100);
+        });
+        notify_progress(id, "end", [](Json_writer &) {});
+      }
+      return;
+    }
     for (auto &[uri, d] : documents) {
       if (d->progress == Open_document::Progress::none && id == d->progress_token) {
-        d->progress = Open_document::Progress::accepted;
-        progress(*d, true);
+        if (accepted) {
+          d->progress = Open_document::Progress::accepted;
+          progress(*d, true);
+        } else {
+          d->progress_token.clear();
+        }
       }
     }
   }
@@ -1698,6 +1722,9 @@ struct Server::Impl {
     progress(d, true);
     if (d.progress != Open_document::Progress::none) {
       notify_progress(d.progress_token, "end", [](Json_writer &) {});
+    } else if (!d.progress_token.empty()) {
+      // Created, but the client has not answered yet.
+      unanswered_progress.insert(d.progress_token);
     }
     d.progress_token.clear();
     d.progress = Open_document::Progress::none;
