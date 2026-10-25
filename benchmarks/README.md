@@ -12,28 +12,28 @@ script, without a database connection, two ways:
 
 ## Results
 
-Apple M4 Pro, 14 cores, 64 GB, macOS 26.6, 2026-10-25
-([stdio](results/2026-10-25-mac-mini.md), [VS Code](results/2026-10-25-mac-mini-vscode.json)).
+Apple M5 Pro, 18 cores, 64 GB, macOS 27.0.1, 2026-10-25
+([stdio](results/2026-10-25-workbook-pro.md), [VS Code](results/2026-10-25-workbook-pro-vscode.json)).
 Lower is better; times on a log scale.
 
-![Open a 1 MB file to its syntax errors, over LSP](results/2026-10-25-mac-mini-open-1mb.svg)
+![Open a 1 MB file to its syntax errors, over LSP](results/2026-10-25-workbook-pro-open-1mb.svg)
 
-![Open a 10 MB file to its syntax errors, over LSP](results/2026-10-25-mac-mini-open-10mb.svg)
+![Open a 10 MB file to its syntax errors, over LSP](results/2026-10-25-workbook-pro-open-10mb.svg)
 
-![Edit in a 10 MB file to the error, over LSP](results/2026-10-25-mac-mini-edit-10mb.svg)
+![Edit in a 10 MB file to the error, over LSP](results/2026-10-25-workbook-pro-edit-10mb.svg)
 
-![Memory with a 10 MB file open, over LSP](results/2026-10-25-mac-mini-memory-10mb.svg)
+![Memory with a 10 MB file open, over LSP](results/2026-10-25-workbook-pro-memory-10mb.svg)
 
-![Open a 10 MB file to its syntax errors, inside VS Code](results/2026-10-25-mac-mini-vscode-open-10mb.svg)
+![Open a 10 MB file to its syntax errors, inside VS Code](results/2026-10-25-workbook-pro-vscode-open-10mb.svg)
 
-![Memory with a 10 MB file open, inside VS Code](results/2026-10-25-mac-mini-vscode-memory-10mb.svg)
+![Memory with a 10 MB file open, inside VS Code](results/2026-10-25-workbook-pro-vscode-memory-10mb.svg)
 
 The Markdown summary beside each results file holds every measure at every
 size, with notes on what did not run and why. `charts.py` draws the charts
 from a results file:
 
 ```bash
-python3 benchmarks/charts.py benchmarks/results/2026-10-25-mac-mini
+python3 benchmarks/charts.py benchmarks/results/2026-10-25-workbook-pro
 ```
 
 ## The servers

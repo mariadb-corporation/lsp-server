@@ -1,0 +1,373 @@
+{
+  "date": "2026-10-25",
+  "vscode": "1.143.1",
+  "machine": "Apple M5 Pro, 18 cores",
+  "extensions": {
+    "mariadb": {
+      "label": "MariaDB Shell for VS Code (MariaDB LSP)",
+      "version": "26.10.1",
+      "sizes": {
+        "10K": {
+          "language": "mariadb-sql",
+          "open_ms": 65.31,
+          "memory_after_open_mb": 6.2,
+          "edit_appear_ms": 52.44,
+          "edit_clear_ms": 52.66,
+          "edit_rounds": 10,
+          "completion_ms": 0.73,
+          "completion_items": [
+            10,
+            36
+          ],
+          "memory_end_mb": 82
+        },
+        "100K": {
+          "language": "mariadb-sql",
+          "open_ms": 63.98,
+          "memory_after_open_mb": 6.8,
+          "edit_appear_ms": 52.35,
+          "edit_clear_ms": 52.54,
+          "edit_rounds": 10,
+          "completion_ms": 0.97,
+          "completion_items": [
+            36,
+            98
+          ],
+          "memory_end_mb": 10.2
+        },
+        "1M": {
+          "language": "mariadb-sql",
+          "open_ms": 75.2,
+          "memory_after_open_mb": 10.1,
+          "edit_appear_ms": 53.99,
+          "edit_clear_ms": 52.97,
+          "edit_rounds": 10,
+          "completion_ms": 3.12,
+          "completion_items": [
+            36,
+            500
+          ],
+          "formatting_ms": 255.8,
+          "formatting_edits": 13804,
+          "memory_end_mb": 35.4
+        },
+        "10M": {
+          "language": "mariadb-sql",
+          "open_ms": 246.39,
+          "memory_after_open_mb": 122.6,
+          "edit_appear_ms": 85.34,
+          "edit_clear_ms": 101.72,
+          "edit_rounds": 5,
+          "completion_ms": 11.51,
+          "completion_items": [
+            36,
+            500
+          ],
+          "memory_end_mb": 288.9
+        }
+      },
+      "cold_start_ms": 27
+    },
+    "oracle": {
+      "label": "Oracle SQL Developer for VS Code",
+      "version": "26.3.0",
+      "sizes": {
+        "10K": {
+          "language": "oracle-sql",
+          "open_ms": 95.21,
+          "memory_after_open_mb": 422.7,
+          "edit_appear_ms": 66.46,
+          "edit_clear_ms": 76.74,
+          "edit_rounds": 10,
+          "completion_ms": 160.66,
+          "completion_items": [
+            218,
+            218
+          ],
+          "memory_end_mb": 1406.7
+        },
+        "100K": {
+          "language": "oracle-sql",
+          "open_ms": 390.62,
+          "memory_after_open_mb": 763.6,
+          "edit_appear_ms": 133.8,
+          "edit_clear_ms": 191.91,
+          "edit_rounds": 10,
+          "completion_ms": 4.86,
+          "completion_items": [
+            346,
+            346
+          ],
+          "memory_end_mb": 1711.5
+        },
+        "1M": {
+          "language": "oracle-sql",
+          "open_ms": 2092.63,
+          "memory_after_open_mb": 1697.3,
+          "edit_appear_ms": 707.23,
+          "edit_clear_ms": 1262.18,
+          "edit_rounds": 10,
+          "completion_ms": 13.8,
+          "completion_items": [
+            1200,
+            1200
+          ],
+          "formatting_ms": 1538.1,
+          "formatting_edits": 0,
+          "memory_end_mb": 4939.1
+        },
+        "10M": {
+          "language": "oracle-sql",
+          "open_ms": 14255.11,
+          "memory_after_open_mb": 8444.1,
+          "cut_off_after_s": 60
+        }
+      },
+      "cold_start_ms": 1538
+    },
+    "mssql": {
+      "label": "SQL Server (mssql)",
+      "version": "1.47.0",
+      "sizes": {
+        "10K": {
+          "language": "sql",
+          "open_ms": 824.63,
+          "memory_after_open_mb": 232.8,
+          "edit_appear_ms": 808.83,
+          "edit_clear_ms": 809.24,
+          "edit_rounds": 10,
+          "completion_ms": 7.89,
+          "completion_items": [
+            553,
+            553
+          ],
+          "memory_end_mb": 253.1
+        },
+        "100K": {
+          "language": "sql",
+          "open_ms": 885.87,
+          "memory_after_open_mb": 243.2,
+          "edit_appear_ms": 823.51,
+          "edit_clear_ms": 824.69,
+          "edit_rounds": 10,
+          "completion_ms": 6.46,
+          "completion_items": [
+            553,
+            553
+          ],
+          "memory_end_mb": 263.8
+        },
+        "1M": {
+          "language": "sql",
+          "open_ms": 1236.5,
+          "memory_after_open_mb": 300.8,
+          "edit_appear_ms": 922.74,
+          "edit_clear_ms": 925.13,
+          "edit_rounds": 10,
+          "completion_ms": 22.26,
+          "completion_items": [
+            553,
+            553
+          ],
+          "formatting_ms": 407.8,
+          "formatting_edits": 0,
+          "memory_end_mb": 380.4
+        },
+        "10M": {
+          "language": "sql",
+          "open_ms": 3001.92,
+          "memory_after_open_mb": 765.8,
+          "edit_appear_ms": 1856.28,
+          "edit_clear_ms": 1842.73,
+          "edit_rounds": 5,
+          "completion_ms": 161.16,
+          "completion_items": [
+            553,
+            553
+          ],
+          "memory_end_mb": 990.2
+        }
+      },
+      "cold_start_ms": 1505
+    },
+    "sqltools": {
+      "label": "SQLTools",
+      "version": "0.28.6",
+      "sizes": {
+        "10K": {
+          "language": "sql",
+          "no_diagnostics": true,
+          "memory_after_open_mb": 83.1,
+          "completion_ms": 15.35,
+          "completion_items": [
+            2,
+            54
+          ],
+          "memory_end_mb": 106.3
+        },
+        "100K": {
+          "language": "sql",
+          "no_diagnostics": true,
+          "memory_after_open_mb": 83,
+          "completion_ms": 146.01,
+          "completion_items": [
+            2,
+            142
+          ],
+          "memory_end_mb": 231.7
+        },
+        "1M": {
+          "language": "sql",
+          "no_diagnostics": true,
+          "memory_after_open_mb": 86.4,
+          "completion_ms": 215.26,
+          "completion_items": [
+            2,
+            996
+          ],
+          "formatting_ms": 3333,
+          "formatting_edits": 1,
+          "memory_end_mb": 477.6
+        },
+        "10M": {
+          "cut_off_after_s": 60
+        }
+      },
+      "cold_start_ms": null
+    },
+    "pgsql": {
+      "label": "PostgreSQL (Microsoft)",
+      "version": "1.33.0",
+      "sizes": {
+        "10K": {
+          "language": "sql",
+          "no_diagnostics": true,
+          "memory_after_open_mb": 50.1,
+          "completion_ms": 0.94,
+          "completion_items": [
+            68,
+            68
+          ],
+          "memory_end_mb": 72.7
+        },
+        "100K": {
+          "language": "sql",
+          "no_diagnostics": true,
+          "memory_after_open_mb": 152.5,
+          "completion_ms": 2.07,
+          "completion_items": [
+            156,
+            156
+          ],
+          "memory_end_mb": 179.6
+        },
+        "1M": {
+          "language": "sql",
+          "no_diagnostics": true,
+          "memory_after_open_mb": 188.5,
+          "completion_ms": 12.35,
+          "completion_items": [
+            1010,
+            1010
+          ],
+          "formatting_ms": 1,
+          "formatting_edits": 0,
+          "memory_end_mb": 192.9
+        },
+        "10M": {
+          "language": "sql",
+          "no_diagnostics": true,
+          "memory_after_open_mb": 265.8,
+          "completion_ms": 111.87,
+          "completion_items": [
+            9432,
+            9432
+          ],
+          "memory_end_mb": 300.3
+        }
+      },
+      "cold_start_ms": null
+    },
+    "snowflake": {
+      "label": "Snowflake",
+      "version": "1.42.3",
+      "sizes": {
+        "10K": {
+          "language": "snowflake-sql",
+          "no_diagnostics": true,
+          "memory_after_open_mb": 167,
+          "completion_ms": 8.86,
+          "completion_items": [
+            8,
+            495
+          ],
+          "memory_end_mb": 195.9
+        },
+        "100K": {
+          "language": "snowflake-sql",
+          "no_diagnostics": true,
+          "memory_after_open_mb": 185.7,
+          "completion_ms": 32.54,
+          "completion_items": [
+            8,
+            495
+          ],
+          "memory_end_mb": 287.3
+        },
+        "1M": {
+          "language": "snowflake-sql",
+          "no_diagnostics": true,
+          "memory_after_open_mb": 246.4,
+          "completion_ms": 224.23,
+          "completion_items": [
+            8,
+            495
+          ],
+          "formatting_ms": 0.6,
+          "formatting_edits": 0,
+          "memory_end_mb": 317
+        },
+        "10M": {
+          "language": "snowflake-sql",
+          "no_diagnostics": true,
+          "memory_after_open_mb": 392.2,
+          "cut_off_after_s": 60
+        }
+      },
+      "cold_start_ms": null
+    },
+    "sqlfluff": {
+      "label": "sqlfluff",
+      "version": "4.0.2",
+      "sizes": {
+        "10K": {
+          "language": "sql",
+          "open_ms": 1009.2,
+          "memory_after_open_mb": 2,
+          "edit_appear_ms": 755.88,
+          "edit_clear_ms": 945.53,
+          "edit_rounds": 10,
+          "completion_ms": 1.48,
+          "completion_items": [
+            54,
+            54
+          ],
+          "memory_end_mb": 77.3
+        },
+        "100K": {
+          "language": "sql",
+          "open_ms": null,
+          "memory_after_open_mb": 2,
+          "open_timed_out_s": 30,
+          "completion_ms": 2.34,
+          "completion_items": [
+            142,
+            142
+          ],
+          "memory_end_mb": 2
+        }
+      },
+      "cold_start_ms": 1070
+    }
+  }
+}
