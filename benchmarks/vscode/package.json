@@ -1,0 +1,12 @@
+{
+  "name": "lsp-benchmark-vscode",
+  "private": true,
+  "description": "Measures SQL language extensions inside VS Code (benchmarks/README.md)",
+  "license": "GPL-2.0-only",
+  "scripts": {
+    "bench": "node run.js"
+  },
+  "devDependencies": {
+    "@vscode/test-electron": "3.1.0"
+  }
+}
