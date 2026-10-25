@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="354" viewBox="0 0 760 354" role="img" aria-labelledby="t d">
+<title id="t">Memory with a 10 MB file open, over LSP</title>
+<desc id="d">MariaDB LSP: 40 MB; postgres-language-server: 381 MB; SQL Tools Service (mssql): 804 MB; sql-language-server: no errors within 30 s at 1 MB; sqls: killed at 100 KB (busy after 60 s); sqruff (lints only): not run: from 1 MB on it stops with one warning; squawk: no errors within 30 s</desc>
+<style>
+.surface{fill:#fcfcfb}.t1{fill:#0b0b0b}.t2{fill:#52514e}.t3{fill:#6f6e69}
+.grid{stroke:#e6e5e1}.axis{stroke:#c9c8c2}.hl{fill:#2a78d6}.ctx{fill:#84837a}
+.halo{stroke:#fcfcfb;stroke-width:5px;paint-order:stroke;stroke-linejoin:round}
+@media (prefers-color-scheme: dark){
+.surface{fill:#1a1a19}.t1{fill:#f0efec}.t2{fill:#c3c2b7}.t3{fill:#9d9c95}
+.grid{stroke:#2e2e2c}.axis{stroke:#4a4a46}.hl{fill:#3987e5}.ctx{fill:#76756d}
+.halo{stroke:#1a1a19}}
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+</style>
+<rect class="surface" width="760" height="354" rx="8"/>
+<text class="t1" x="20" y="30" font-size="16" font-weight="600">Memory with a 10 MB file open, over LSP</text>
+<text class="t2" x="20" y="50" font-size="12">MB resident, all the server's processes · Apple M5 Pro, 2026-10-25 · lower is better</text>
+<line class="grid" x1="250.0" y1="64" x2="250.0" y2="308" stroke-width="1"/>
+<text class="t3" x="250.0" y="326" font-size="11" text-anchor="middle">0 MB</text>
+<line class="grid" x1="330.0" y1="64" x2="330.0" y2="308" stroke-width="1"/>
+<text class="t3" x="330.0" y="326" font-size="11" text-anchor="middle">200 MB</text>
+<line class="grid" x1="410.0" y1="64" x2="410.0" y2="308" stroke-width="1"/>
+<text class="t3" x="410.0" y="326" font-size="11" text-anchor="middle">400 MB</text>
+<line class="grid" x1="490.0" y1="64" x2="490.0" y2="308" stroke-width="1"/>
+<text class="t3" x="490.0" y="326" font-size="11" text-anchor="middle">600 MB</text>
+<line class="grid" x1="570.0" y1="64" x2="570.0" y2="308" stroke-width="1"/>
+<text class="t3" x="570.0" y="326" font-size="11" text-anchor="middle">800 MB</text>
+<line class="grid" x1="650.0" y1="64" x2="650.0" y2="308" stroke-width="1"/>
+<text class="t3" x="650.0" y="326" font-size="11" text-anchor="middle">1,000 MB</text>
+<line class="axis" x1="250" y1="64" x2="250" y2="308" stroke-width="1"/>
+<text class="t1" x="238" y="91.0" font-size="13" text-anchor="end" font-weight="600">MariaDB LSP</text>
+<path class="hl" d="M250.0,79.0h11.9a4,4 0 0 1 4,4v8.0a4,4 0 0 1 -4,4h-11.9z"/>
+<text class="t2 halo" x="273.9" y="91.0" font-size="12" font-weight="600">40 MB</text>
+<text class="t1" x="238" y="125.0" font-size="13" text-anchor="end">postgres-language-server</text>
+<path class="ctx" d="M250.0,113.0h148.5a4,4 0 0 1 4,4v8.0a4,4 0 0 1 -4,4h-148.5z"/>
+<text class="t2 halo" x="410.5" y="125.0" font-size="12">381 MB</text>
+<text class="t1" x="238" y="159.0" font-size="13" text-anchor="end">SQL Tools Service (mssql)</text>
+<path class="ctx" d="M250.0,147.0h317.4a4,4 0 0 1 4,4v8.0a4,4 0 0 1 -4,4h-317.4z"/>
+<text class="t2 halo" x="579.4" y="159.0" font-size="12">804 MB</text>
+<text class="t1" x="238" y="193.0" font-size="13" text-anchor="end">sql-language-server</text>
+<text class="t3 halo" x="258" y="193.0" font-size="12" font-style="italic">no errors within 30 s at 1 MB</text>
+<text class="t1" x="238" y="227.0" font-size="13" text-anchor="end">sqls</text>
+<text class="t3 halo" x="258" y="227.0" font-size="12" font-style="italic">killed at 100 KB (busy after 60 s)</text>
+<text class="t1" x="238" y="261.0" font-size="13" text-anchor="end">sqruff (lints only)</text>
+<text class="t3 halo" x="258" y="261.0" font-size="12" font-style="italic">not run: from 1 MB on it stops with one warning</text>
+<text class="t1" x="238" y="295.0" font-size="13" text-anchor="end">squawk</text>
+<text class="t3 halo" x="258" y="295.0" font-size="12" font-style="italic">no errors within 30 s</text>
+</svg>
