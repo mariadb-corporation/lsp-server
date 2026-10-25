@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="354" viewBox="0 0 760 354" role="img" aria-labelledby="t d">
+<title id="t">Open a 1 MB file → its syntax errors, over LSP</title>
+<desc id="d">MariaDB LSP: 27 ms; postgres-language-server: 205 ms; SQL Tools Service (mssql): 1.3 s; squawk: 1.8 s; sql-language-server: no errors within 30 s; sqruff (lints only): not run: from 1 MB on it stops with one warning; sqls: no errors without a database</desc>
+<style>
+.surface{fill:#fcfcfb}.t1{fill:#0b0b0b}.t2{fill:#52514e}.t3{fill:#6f6e69}
+.grid{stroke:#e6e5e1}.axis{stroke:#c9c8c2}.hl{fill:#2a78d6}.ctx{fill:#84837a}
+.halo{stroke:#fcfcfb;stroke-width:5px;paint-order:stroke;stroke-linejoin:round}
+@media (prefers-color-scheme: dark){
+.surface{fill:#1a1a19}.t1{fill:#f0efec}.t2{fill:#c3c2b7}.t3{fill:#9d9c95}
+.grid{stroke:#2e2e2c}.axis{stroke:#4a4a46}.hl{fill:#3987e5}.ctx{fill:#76756d}
+.halo{stroke:#1a1a19}}
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+</style>
+<rect class="surface" width="760" height="354" rx="8"/>
+<text class="t1" x="20" y="30" font-size="16" font-weight="600">Open a 1 MB file → its syntax errors, over LSP</text>
+<text class="t2" x="20" y="50" font-size="12">ms, log scale · Apple M4 Pro, 2026-10-25 · lower is better</text>
+<line class="grid" x1="250.0" y1="64" x2="250.0" y2="308" stroke-width="1"/>
+<text class="t3" x="250.0" y="326" font-size="11" text-anchor="middle">10 ms</text>
+<line class="grid" x1="383.3" y1="64" x2="383.3" y2="308" stroke-width="1"/>
+<text class="t3" x="383.3" y="326" font-size="11" text-anchor="middle">100 ms</text>
+<line class="grid" x1="516.7" y1="64" x2="516.7" y2="308" stroke-width="1"/>
+<text class="t3" x="516.7" y="326" font-size="11" text-anchor="middle">1 s</text>
+<line class="grid" x1="650.0" y1="64" x2="650.0" y2="308" stroke-width="1"/>
+<text class="t3" x="650.0" y="326" font-size="11" text-anchor="middle">10 s</text>
+<line class="axis" x1="250" y1="64" x2="250" y2="308" stroke-width="1"/>
+<text class="t1" x="238" y="91.0" font-size="13" text-anchor="end" font-weight="600">MariaDB LSP</text>
+<path class="hl" d="M250.0,79.0h52.5a4,4 0 0 1 4,4v8.0a4,4 0 0 1 -4,4h-52.5z"/>
+<text class="t2 halo" x="314.5" y="91.0" font-size="12" font-weight="600">27 ms</text>
+<text class="t1" x="238" y="125.0" font-size="13" text-anchor="end">postgres-language-server</text>
+<path class="ctx" d="M250.0,113.0h171.0a4,4 0 0 1 4,4v8.0a4,4 0 0 1 -4,4h-171.0z"/>
+<text class="t2 halo" x="433.0" y="125.0" font-size="12">205 ms</text>
+<text class="t1" x="238" y="159.0" font-size="13" text-anchor="end">SQL Tools Service (mssql)</text>
+<path class="ctx" d="M250.0,147.0h277.5a4,4 0 0 1 4,4v8.0a4,4 0 0 1 -4,4h-277.5z"/>
+<text class="t2 halo" x="539.5" y="159.0" font-size="12">1.3 s</text>
+<text class="t1" x="238" y="193.0" font-size="13" text-anchor="end">squawk</text>
+<path class="ctx" d="M250.0,181.0h295.8a4,4 0 0 1 4,4v8.0a4,4 0 0 1 -4,4h-295.8z"/>
+<text class="t2 halo" x="557.8" y="193.0" font-size="12">1.8 s</text>
+<text class="t1" x="238" y="227.0" font-size="13" text-anchor="end">sql-language-server</text>
+<text class="t3 halo" x="258" y="227.0" font-size="12" font-style="italic">no errors within 30 s</text>
+<text class="t1" x="238" y="261.0" font-size="13" text-anchor="end">sqruff (lints only)</text>
+<text class="t3 halo" x="258" y="261.0" font-size="12" font-style="italic">not run: from 1 MB on it stops with one warning</text>
+<text class="t1" x="238" y="295.0" font-size="13" text-anchor="end">sqls</text>
+<text class="t3 halo" x="258" y="295.0" font-size="12" font-style="italic">no errors without a database</text>
+</svg>

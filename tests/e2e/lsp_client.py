@@ -40,13 +40,15 @@ class Request_error(Exception):
 
 
 class Client:
-    def __init__(self, binary=None, args=(), log=None):
-        binary = binary or os.environ["MARIADB_LSP"]
-        cmd = [binary, "lsp"] + list(args)
-        if log:
-            cmd += ["--log", log]
+    def __init__(self, binary=None, args=(), log=None, cmd=None, cwd=None, stderr=subprocess.PIPE):
+        """Starts `binary lsp args`, or `cmd` as it is (another language
+        server, for the benchmarks), in `cwd`."""
+        if cmd is None:
+            cmd = [binary or os.environ["MARIADB_LSP"], "lsp"] + list(args)
+            if log:
+                cmd += ["--log", log]
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=subprocess.PIPE)
+                                     stderr=stderr, cwd=cwd)
         self.next_id = 1
         self.received = 0  # messages read so far: their sequence numbers
         self.last_response_seq = None  # sequence number of the last awaited response
@@ -57,7 +59,12 @@ class Client:
         # it returns the result, or raises Request_error.  Else they are
         # answered with null.
         self.request_handler = None
+        self.eof = False  # the server closed its output: nothing more will come
         self.cond = threading.Condition()
+        # Writes take this lock, never `cond`: a write blocked on a full pipe
+        # (a large didOpen) must not keep the reader from draining the
+        # server's output, or both sides wait for each other.
+        self.write_lock = threading.Lock()
         self.reader = threading.Thread(target=self._read, daemon=True)
         self.reader.start()
 
@@ -70,6 +77,9 @@ class Client:
             while True:
                 line = out.readline()
                 if not line:
+                    with self.cond:
+                        self.eof = True
+                        self.cond.notify_all()
                     return
                 line = line.strip()
                 if not line:
@@ -79,22 +89,26 @@ class Client:
                     length = int(value)
             body = out.read(length)
             msg = json.loads(body)
+            reply = None
             with self.cond:
                 self.received += 1
                 seq = self.received
                 if "method" in msg and "id" in msg:
                     self.server_requests.append(msg)
-                    self._answer(msg)
+                    reply = self._answer(msg)
                 elif "method" in msg:
                     self.notifications.append((seq, msg))
                 else:
                     self.responses[msg["id"]] = (seq, msg)
                 self.cond.notify_all()
+            if reply is not None:
+                self._send(reply)
 
     # What a request handler returns to leave a request unanswered.
     NO_ANSWER = object()
 
     def _answer(self, msg):
+        """The reply to a server request, None to leave it unanswered."""
         reply = {"jsonrpc": "2.0", "id": msg["id"]}
         if self.request_handler is None:
             reply["result"] = None
@@ -105,18 +119,18 @@ class Client:
                 reply["error"] = {"code": e.code, "message": str(e), "data": e.data}
             else:
                 if result is Client.NO_ANSWER:
-                    return
+                    return None
                 reply["result"] = result
-        self._send(reply)
+        return reply
 
     def _send(self, msg):
         body = json.dumps(msg).encode()
-        self.proc.stdin.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
-        self.proc.stdin.flush()
+        self.send_raw(b"Content-Length: %d\r\n\r\n" % len(body) + body)
 
     def send_raw(self, data):
-        self.proc.stdin.write(data)
-        self.proc.stdin.flush()
+        with self.write_lock:
+            self.proc.stdin.write(data)
+            self.proc.stdin.flush()
 
     # ---- messages
 
@@ -124,7 +138,7 @@ class Client:
         with self.cond:
             rid = self.next_id
             self.next_id += 1
-            self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}})
+        self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}})
         return rid
 
     def wait_response(self, rid, timeout=30):
@@ -132,7 +146,7 @@ class Client:
         with self.cond:
             while rid not in self.responses:
                 left = deadline - time.monotonic()
-                if left <= 0:
+                if left <= 0 or self.eof:
                     raise TimeoutError(f"no response to request {rid}")
                 self.cond.wait(left)
             self.last_response_seq, msg = self.responses.pop(rid)
@@ -144,8 +158,7 @@ class Client:
         return self.wait_response(self.request_async(method, params), timeout)
 
     def notify(self, method, params=None):
-        with self.cond:
-            self._send({"jsonrpc": "2.0", "method": method, "params": params or {}})
+        self._send({"jsonrpc": "2.0", "method": method, "params": params or {}})
 
     def wait_notification(self, method, predicate=lambda p: True, timeout=30, after=0):
         """The first notification `method` at index >= `after` whose params
@@ -158,7 +171,7 @@ class Client:
                     if msg["method"] == method and predicate(msg["params"]):
                         return msg["params"], self.notifications[i][0]
                 left = deadline - time.monotonic()
-                if left <= 0:
+                if left <= 0 or self.eof:
                     raise TimeoutError(f"no {method} notification")
                 self.cond.wait(left)
 
@@ -194,7 +207,10 @@ class Client:
         return params["diagnostics"]
 
     def close(self):
-        """shutdown and exit; returns the exit code."""
+        """shutdown and exit; returns the exit code.  A server that has not
+        exited 10 s later is killed (its code is then negative) before its
+        pipes are closed: closing the output the reader thread is blocked on
+        would wait for the server forever."""
         try:
             self.request("shutdown", timeout=10)
             self.notify("exit")
@@ -202,6 +218,9 @@ class Client:
             pass
         try:
             return self.proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            return self.proc.wait()
         finally:
             for f in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
                 try:

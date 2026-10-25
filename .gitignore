@@ -6,3 +6,7 @@ build-release/
 bld/
 build-asan/
 build-fuzz/
+benchmarks/.servers/
+benchmarks/.vscode-test/
+benchmarks/vscode/node_modules/
+benchmarks/.runs/

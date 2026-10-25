@@ -1,0 +1,603 @@
+{
+  "date": "2026-10-25",
+  "machine": {
+    "cpu": "Apple M4 Pro",
+    "cores": 14,
+    "memory_gb": 64,
+    "os": "macOS 26.6.2"
+  },
+  "sizes": [
+    "10K",
+    "100K",
+    "1M",
+    "10M"
+  ],
+  "servers": {
+    "mariadb-lsp": {
+      "label": "MariaDB LSP",
+      "version": "26.10.1",
+      "diagnostics": "push",
+      "sizes": {
+        "10K": {
+          "bytes": 10283,
+          "open_ms_runs": [
+            0.93,
+            1.08,
+            1.02
+          ],
+          "startup_ms_runs": [
+            2.73,
+            3.58,
+            2.95
+          ],
+          "memory_after_open_mb": 3.5,
+          "edit_appear_ms": 0.08,
+          "edit_clear_ms": 0.06,
+          "edit_rounds": 10,
+          "completion_ms": 0.37,
+          "completion_items": [
+            10,
+            36
+          ],
+          "memory_end_mb": 5.3,
+          "startup_ms": 2.95,
+          "open_ms": 1.02
+        },
+        "100K": {
+          "bytes": 101697,
+          "open_ms_runs": [
+            7.24,
+            7.39,
+            7.11
+          ],
+          "startup_ms_runs": [
+            3.01,
+            3.55,
+            2.68
+          ],
+          "memory_after_open_mb": 4.2,
+          "edit_appear_ms": 0.08,
+          "edit_clear_ms": 0.06,
+          "edit_rounds": 10,
+          "completion_ms": 0.69,
+          "completion_items": [
+            36,
+            98
+          ],
+          "memory_end_mb": 7.0,
+          "startup_ms": 3.01,
+          "open_ms": 7.24
+        },
+        "1M": {
+          "bytes": 1001564,
+          "open_ms_runs": [
+            26.51,
+            26.56,
+            26.42
+          ],
+          "startup_ms_runs": [
+            2.61,
+            3.08,
+            2.68
+          ],
+          "memory_after_open_mb": 7.3,
+          "edit_appear_ms": 0.14,
+          "edit_clear_ms": 0.12,
+          "edit_rounds": 10,
+          "completion_ms": 1.39,
+          "completion_items": [
+            36,
+            500
+          ],
+          "formatting_ms": 260.8,
+          "formatting_edits": 9044,
+          "memory_end_mb": 29.6,
+          "startup_ms": 2.68,
+          "open_ms": 26.51
+        },
+        "10M": {
+          "bytes": 10001595,
+          "open_ms_runs": [
+            114.34,
+            106.6,
+            109.15
+          ],
+          "startup_ms_runs": [
+            3.29,
+            3.04,
+            3.29
+          ],
+          "memory_after_open_mb": 39.5,
+          "edit_appear_ms": 0.76,
+          "edit_clear_ms": 0.75,
+          "edit_rounds": 5,
+          "completion_ms": 7.91,
+          "completion_items": [
+            36,
+            500
+          ],
+          "memory_end_mb": 126.0,
+          "startup_ms": 3.29,
+          "open_ms": 109.15
+        }
+      }
+    },
+    "sqltoolsservice": {
+      "label": "SQL Tools Service (mssql)",
+      "version": "6.0.20261023.1",
+      "diagnostics": "push",
+      "sizes": {
+        "10K": {
+          "bytes": 10283,
+          "open_ms_runs": [
+            907.08,
+            890.41,
+            891.01
+          ],
+          "startup_ms_runs": [
+            457.93,
+            280.38,
+            280.15
+          ],
+          "memory_after_open_mb": 147.9,
+          "edit_appear_ms": 756.66,
+          "edit_clear_ms": 756.24,
+          "edit_rounds": 10,
+          "completion_ms": 6.01,
+          "completion_items": [
+            535,
+            535
+          ],
+          "memory_end_mb": 165.4,
+          "startup_ms": 280.38,
+          "open_ms": 891.01
+        },
+        "100K": {
+          "bytes": 101697,
+          "open_ms_runs": [
+            938.38,
+            940.52,
+            938.47
+          ],
+          "startup_ms_runs": [
+            280.24,
+            279.61,
+            279.87
+          ],
+          "memory_after_open_mb": 156.8,
+          "edit_appear_ms": 774.49,
+          "edit_clear_ms": 773.35,
+          "edit_rounds": 10,
+          "completion_ms": 5.4,
+          "completion_items": [
+            535,
+            535
+          ],
+          "memory_end_mb": 187.2,
+          "startup_ms": 279.87,
+          "open_ms": 938.47
+        },
+        "1M": {
+          "bytes": 1001564,
+          "open_ms_runs": [
+            1290.9,
+            1294.45,
+            1292.21
+          ],
+          "startup_ms_runs": [
+            278.57,
+            279.22,
+            278.78
+          ],
+          "memory_after_open_mb": 216.1,
+          "edit_appear_ms": 884.49,
+          "edit_clear_ms": 879.07,
+          "edit_rounds": 10,
+          "completion_ms": 21.21,
+          "completion_items": [
+            535,
+            535
+          ],
+          "formatting_ms": 495.6,
+          "formatting_edits": 0,
+          "memory_end_mb": 299.5,
+          "startup_ms": 278.78,
+          "open_ms": 1292.21
+        },
+        "10M": {
+          "bytes": 10001595,
+          "open_ms_runs": [
+            3634.48,
+            3617.22,
+            3641.09
+          ],
+          "startup_ms_runs": [
+            278.14,
+            282.13,
+            283.74
+          ],
+          "memory_after_open_mb": 689.8,
+          "edit_appear_ms": 1797.19,
+          "edit_clear_ms": 1799.04,
+          "edit_rounds": 5,
+          "completion_ms": 167.88,
+          "completion_items": [
+            535,
+            535
+          ],
+          "memory_end_mb": 859.9,
+          "startup_ms": 282.13,
+          "open_ms": 3634.48
+        }
+      }
+    },
+    "postgres-language-server": {
+      "label": "postgres-language-server",
+      "version": "0.28.2",
+      "diagnostics": "push",
+      "sizes": {
+        "10K": {
+          "bytes": 10283,
+          "open_ms_runs": [
+            4.77,
+            3.0,
+            3.35
+          ],
+          "startup_ms_runs": [
+            65.14,
+            59.39,
+            58.19
+          ],
+          "memory_after_open_mb": 36.5,
+          "edit_appear_ms": 304.82,
+          "edit_clear_ms": 304.69,
+          "edit_rounds": 10,
+          "completion_ms": 0.17,
+          "completion_items": [
+            0,
+            0
+          ],
+          "memory_end_mb": 38.5,
+          "startup_ms": 59.39,
+          "open_ms": 3.35
+        },
+        "100K": {
+          "bytes": 101697,
+          "open_ms_runs": [
+            25.45,
+            24.43,
+            23.12
+          ],
+          "startup_ms_runs": [
+            59.16,
+            58.6,
+            58.04
+          ],
+          "memory_after_open_mb": 58.0,
+          "edit_appear_ms": 339.5,
+          "edit_clear_ms": 339.61,
+          "edit_rounds": 10,
+          "completion_ms": 0.2,
+          "completion_items": [
+            0,
+            0
+          ],
+          "memory_end_mb": 76.7,
+          "startup_ms": 58.6,
+          "open_ms": 24.43
+        },
+        "1M": {
+          "bytes": 1001564,
+          "open_ms_runs": [
+            205.39,
+            202.77,
+            205.78
+          ],
+          "startup_ms_runs": [
+            57.97,
+            58.39,
+            58.02
+          ],
+          "memory_after_open_mb": 163.7,
+          "edit_appear_ms": 514.43,
+          "edit_clear_ms": 516.07,
+          "edit_rounds": 10,
+          "completion_ms": 0.15,
+          "completion_items": [
+            0,
+            0
+          ],
+          "formatting_ms": 15197.7,
+          "formatting_edits": 46115,
+          "memory_end_mb": 273.5,
+          "startup_ms": 58.02,
+          "open_ms": 205.39
+        },
+        "10M": {
+          "bytes": 10001595,
+          "open_ms_runs": [
+            2048.42,
+            2072.07,
+            2067.26
+          ],
+          "startup_ms_runs": [
+            58.87,
+            59.42,
+            58.87
+          ],
+          "memory_after_open_mb": 359.3,
+          "edit_appear_ms": 2328.21,
+          "edit_clear_ms": 2338.81,
+          "edit_rounds": 5,
+          "completion_ms": 0.33,
+          "completion_items": [
+            0,
+            0
+          ],
+          "memory_end_mb": 547.9,
+          "startup_ms": 58.87,
+          "open_ms": 2067.26
+        }
+      }
+    },
+    "sql-language-server": {
+      "label": "sql-language-server",
+      "version": "1.7.1",
+      "diagnostics": "push",
+      "sizes": {
+        "10K": {
+          "bytes": 10283,
+          "open_ms_runs": [
+            8.62,
+            9.47,
+            8.26
+          ],
+          "startup_ms_runs": [
+            256.26,
+            139.36,
+            131.71
+          ],
+          "memory_after_open_mb": 92.9,
+          "edit_appear_ms": 1.34,
+          "edit_clear_ms": 1.97,
+          "edit_rounds": 10,
+          "completion_ms": 2.03,
+          "completion_items": [
+            5,
+            11
+          ],
+          "memory_end_mb": 118.8,
+          "startup_ms": 139.36,
+          "open_ms": 8.62
+        },
+        "100K": {
+          "bytes": 101697,
+          "open_ms_runs": [
+            26.42,
+            23.92,
+            23.82
+          ],
+          "startup_ms_runs": [
+            125.57,
+            126.55,
+            122.75
+          ],
+          "memory_after_open_mb": 119.7,
+          "edit_appear_ms": 7.9,
+          "edit_clear_ms": 13.81,
+          "edit_rounds": 10,
+          "completion_ms": 6.47,
+          "completion_items": [
+            5,
+            11
+          ],
+          "memory_end_mb": 285.1,
+          "startup_ms": 125.57,
+          "open_ms": 23.92
+        },
+        "1M": {
+          "bytes": 1001564,
+          "open_ms_runs": [
+            null
+          ],
+          "startup_ms_runs": [
+            123.64
+          ],
+          "memory_after_open_mb": 170.4,
+          "open_timed_out_s": 30,
+          "startup_ms": 123.64,
+          "open_ms": null
+        }
+      }
+    },
+    "squawk": {
+      "label": "squawk",
+      "version": "2.70.0",
+      "diagnostics": "pull",
+      "sizes": {
+        "10K": {
+          "bytes": 10283,
+          "open_ms_runs": [
+            10.17,
+            3.05,
+            2.93
+          ],
+          "startup_ms_runs": [
+            11.45,
+            4.79,
+            3.91
+          ],
+          "memory_after_open_mb": 14.7,
+          "edit_appear_ms": 2.2,
+          "edit_clear_ms": 2.1,
+          "edit_rounds": 10,
+          "completion_ms": 0.95,
+          "completion_items": [
+            4,
+            10
+          ],
+          "memory_end_mb": 17.8,
+          "startup_ms": 4.79,
+          "open_ms": 3.05
+        },
+        "100K": {
+          "bytes": 101697,
+          "open_ms_runs": [
+            36.81,
+            36.01,
+            35.09
+          ],
+          "startup_ms_runs": [
+            3.91,
+            4.49,
+            4.28
+          ],
+          "memory_after_open_mb": 33.4,
+          "edit_appear_ms": 35.53,
+          "edit_clear_ms": 35.29,
+          "edit_rounds": 10,
+          "completion_ms": 3.34,
+          "completion_items": [
+            4,
+            10
+          ],
+          "memory_end_mb": 61.1,
+          "startup_ms": 4.28,
+          "open_ms": 36.01
+        },
+        "1M": {
+          "bytes": 1001564,
+          "open_ms_runs": [
+            1773.02,
+            1791.46,
+            1765.8
+          ],
+          "startup_ms_runs": [
+            4.31,
+            4.67,
+            4.45
+          ],
+          "memory_after_open_mb": 181.6,
+          "edit_appear_ms": 1763.65,
+          "edit_clear_ms": 1757.1,
+          "edit_rounds": 10,
+          "completion_ms": 26.24,
+          "completion_items": [
+            4,
+            10
+          ],
+          "formatting_ms": 31.1,
+          "formatting_edits": 0,
+          "memory_end_mb": 975.3,
+          "startup_ms": 4.45,
+          "open_ms": 1773.02
+        },
+        "10M": {
+          "bytes": 10001595,
+          "open_ms_runs": [
+            null
+          ],
+          "startup_ms_runs": [
+            4.73
+          ],
+          "memory_after_open_mb": 439.7,
+          "open_timed_out_s": 30,
+          "startup_ms": 4.73,
+          "open_ms": null
+        }
+      }
+    },
+    "sqruff": {
+      "label": "sqruff",
+      "version": "0.43.0",
+      "diagnostics": "lint",
+      "sizes": {
+        "10K": {
+          "bytes": 10283,
+          "open_ms_runs": [
+            26.98,
+            24.13,
+            24.45
+          ],
+          "startup_ms_runs": [
+            4.55,
+            4.23,
+            4.09
+          ],
+          "memory_after_open_mb": 32.5,
+          "completion": "not offered",
+          "memory_end_mb": 32.5,
+          "startup_ms": 4.23,
+          "open_ms": 24.45
+        },
+        "100K": {
+          "bytes": 101697,
+          "open_ms_runs": [
+            332.85,
+            327.41,
+            328.61
+          ],
+          "startup_ms_runs": [
+            4.19,
+            4.18,
+            4.25
+          ],
+          "memory_after_open_mb": 191.5,
+          "completion": "not offered",
+          "memory_end_mb": 191.5,
+          "startup_ms": 4.19,
+          "open_ms": 328.61
+        },
+        "1M": {
+          "not_run": "larger than 100K: from 1 MB on it stops with one warning, \"Maximum parse node count exceeded (limit 100000)\""
+        },
+        "10M": {
+          "not_run": "larger than 100K: from 1 MB on it stops with one warning, \"Maximum parse node count exceeded (limit 100000)\""
+        }
+      }
+    },
+    "sqls": {
+      "label": "sqls",
+      "version": "0.2.48",
+      "diagnostics": null,
+      "sizes": {
+        "10K": {
+          "bytes": 10283,
+          "open_ms_runs": [
+            null,
+            null,
+            null
+          ],
+          "startup_ms_runs": [
+            548.33,
+            32.96,
+            35.46
+          ],
+          "memory_after_open_mb": 19.2,
+          "completion_ms": 133.44,
+          "completion_items": [
+            0,
+            0
+          ],
+          "memory_end_mb": 29.5,
+          "startup_ms": 35.46,
+          "open_ms": null
+        },
+        "100K": {
+          "bytes": 101697,
+          "open_ms_runs": [
+            null
+          ],
+          "startup_ms_runs": [
+            34.82
+          ],
+          "memory_after_open_mb": 20.2,
+          "completion_error": "no response to request 8",
+          "killed_after_s": 60,
+          "startup_ms": 34.82,
+          "open_ms": null
+        }
+      }
+    }
+  }
+}
