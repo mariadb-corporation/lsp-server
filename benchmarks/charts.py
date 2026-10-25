@@ -18,11 +18,13 @@
 MariaDB LSP in blue, the others in gray, each bar labelled with its value;
 times on a log scale.  Light and dark follow prefers-color-scheme.
 
-usage: charts.py results/<date>-<host>   (reads .json and -vscode.json,
-       writes <date>-<host>-<chart>.svg beside them)"""
+usage: charts.py results/<date>-<host> [--light DIR]
+       (reads .json and -vscode.json, writes <date>-<host>-<chart>.svg beside
+       them; --light: light-only charts, for slides, into DIR)"""
 
 import json
 import math
+import re
 import pathlib
 import sys
 from xml.sax.saxutils import escape
@@ -39,6 +41,8 @@ STYLE = """
 .halo{stroke:#1a1a19}}
 text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
 """
+# For slides, which are light whatever the viewer's system: no dark block.
+LIGHT_STYLE = re.sub(r"@media \(prefers-color-scheme: dark\)\{.*?\}\}", "", STYLE, flags=re.S)
 
 WIDTH, LABEL_W, VALUE_W = 760, 250, 110
 PLOT_X = LABEL_W
@@ -71,7 +75,7 @@ def bar_path(x, y, w, h, r=4):
             f"a{r},{r} 0 0 1 -{r},{r}h-{w - r:.1f}z")
 
 
-def chart(title, subtitle, rows, log, fmt, unit):
+def chart(title, subtitle, rows, log, fmt, unit, light=False):
     """rows: (label, value or None, note, highlighted); returns the SVG text."""
     values = [v for _, v, _, _ in rows if v]
     if log:
@@ -99,7 +103,7 @@ def chart(title, subtitle, rows, log, fmt, unit):
            f"<title id=\"t\">{escape(title)}</title>",
            "<desc id=\"d\">" + escape("; ".join(
                f"{label}: {fmt(v) if v else note}" for label, v, note, _ in rows)) + "</desc>",
-           f"<style>{STYLE}</style>",
+           f"<style>{LIGHT_STYLE if light else STYLE}</style>",
            f'<rect class="surface" width="{WIDTH}" height="{height}" rx="8"/>',
            f'<text class="t1" x="20" y="30" font-size="16" font-weight="600">{escape(title)}</text>',
            f'<text class="t2" x="20" y="50" font-size="12">{escape(subtitle)}</text>']
@@ -196,9 +200,15 @@ def vscode_rows(results, size, measure, sizes=("10K", "100K", "1M", "10M")):
 
 
 def main():
-    if len(sys.argv) != 2:
+    args = sys.argv[1:]
+    light_dir = None
+    if len(args) == 3 and args[1] == "--light":
+        light_dir = pathlib.Path(args[2])
+        args = args[:1]
+    if len(args) != 1:
         sys.exit(__doc__)
-    base = pathlib.Path(sys.argv[1])
+    base = pathlib.Path(args[0])
+    light = light_dir is not None
     stdio = json.loads(base.with_suffix(".json").read_text())
     vscode_file = base.parent / (base.name + "-vscode.json")
     machine = stdio["machine"]
@@ -206,28 +216,28 @@ def main():
     charts = {
         "open-1mb": chart("Open a 1 MB file → its syntax errors, over LSP",
                           f"ms, log scale · {where}",
-                          stdio_rows(stdio, "1M", "open_ms"), True, fmt_ms, "ms"),
+                          stdio_rows(stdio, "1M", "open_ms"), True, fmt_ms, "ms", light),
         "open-10mb": chart("Open a 10 MB file → its syntax errors, over LSP",
                            f"ms, log scale · {where}",
-                           stdio_rows(stdio, "10M", "open_ms"), True, fmt_ms, "ms"),
+                           stdio_rows(stdio, "10M", "open_ms"), True, fmt_ms, "ms", light),
         "edit-10mb": chart("Edit in a 10 MB file → the error appears, over LSP",
                            f"ms, log scale (MariaDB LSP without its 150 ms typing pause) · {where}",
-                           stdio_rows(stdio, "10M", "edit_appear_ms"), True, fmt_ms, "ms"),
+                           stdio_rows(stdio, "10M", "edit_appear_ms"), True, fmt_ms, "ms", light),
         "memory-10mb": chart("Memory with a 10 MB file open, over LSP",
                              f"MB resident, all the server's processes · {where}",
-                             stdio_rows(stdio, "10M", "memory_after_open_mb"), False, fmt_mb, "MB"),
+                             stdio_rows(stdio, "10M", "memory_after_open_mb"), False, fmt_mb, "MB", light),
     }
     if vscode_file.exists():
         vs = json.loads(vscode_file.read_text())
         vwhere = f"VS Code {vs['vscode']} · {stdio['date']} · lower is better"
         charts["vscode-open-10mb"] = chart("Open a 10 MB file → its syntax errors, inside VS Code",
                                            f"ms, log scale · {vwhere}",
-                                           vscode_rows(vs, "10M", "open_ms"), True, fmt_ms, "ms")
+                                           vscode_rows(vs, "10M", "open_ms"), True, fmt_ms, "ms", light)
         charts["vscode-memory-10mb"] = chart("Memory with a 10 MB file open, inside VS Code",
                                              f"MB resident, the processes the extension started · {vwhere}",
-                                             vscode_rows(vs, "10M", "memory_after_open_mb"), False, fmt_mb, "MB")
+                                             vscode_rows(vs, "10M", "memory_after_open_mb"), False, fmt_mb, "MB", light)
     for name, svg in charts.items():
-        path = base.parent / f"{base.name}-{name}.svg"
+        path = (light_dir or base.parent) / f"{base.name}-{name}.svg"
         path.write_text(svg)
         print(f"wrote {path}")
 
