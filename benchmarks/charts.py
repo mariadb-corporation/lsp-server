@@ -199,6 +199,27 @@ def vscode_rows(results, size, measure, sizes=("10K", "100K", "1M", "10M")):
     return ordered(rows)
 
 
+# The light colours as presentation attributes: some viewers (a slide deck's
+# image sanitizer) drop an SVG's <style>, which leaves every mark black.
+LIGHT_ATTRS = {
+    "surface": 'fill="#fcfcfb"', "t1": 'fill="#0b0b0b"', "t2": 'fill="#52514e"',
+    "t3": 'fill="#6f6e69"', "grid": 'stroke="#e6e5e1"', "axis": 'stroke="#c9c8c2"',
+    "hl": 'fill="#2a78d6"', "ctx": 'fill="#84837a"',
+    "halo": 'stroke="#fcfcfb" stroke-width="5" paint-order="stroke" stroke-linejoin="round"',
+}
+FONT = 'font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif"'
+
+
+def inline_light(svg):
+    """`svg` with its classes turned into attributes and no <style>."""
+    svg = re.sub(r"<style>.*?</style>", "", svg, flags=re.S)
+
+    def attrs(m):
+        return " ".join(LIGHT_ATTRS[c] for c in m.group(1).split())
+    svg = re.sub(r'class="([^"]+)"', attrs, svg)
+    return svg.replace("<text ", f"<text {FONT} ")
+
+
 def main():
     args = sys.argv[1:]
     light_dir = None
@@ -237,6 +258,8 @@ def main():
                                              f"MB resident, the processes the extension started · {vwhere}",
                                              vscode_rows(vs, "10M", "memory_after_open_mb"), False, fmt_mb, "MB", light)
     for name, svg in charts.items():
+        if light:
+            svg = inline_light(svg)
         path = (light_dir or base.parent) / f"{base.name}-{name}.svg"
         path.write_text(svg)
         print(f"wrote {path}")
