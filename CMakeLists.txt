@@ -19,6 +19,8 @@
 #
 # fetches vcpkg (into ../vcpkg unless VCPKG_ROOT says otherwise) and installs
 # the manifest in vcpkg.json; -DWITH_TESTS=0 leaves the test dependencies out.
+# Without the triplet the host's is used (arm64-osx, x64-linux, ...);
+# -DWITH_VCPKG_TRIPLET=OFF takes the dependencies from the system.
 
 cmake_minimum_required(VERSION 3.22)
 
@@ -27,6 +29,35 @@ if(NOT DEFINED WITH_TESTS)
 endif()
 if(WITH_TESTS)
   list(APPEND VCPKG_MANIFEST_FEATURES "tests")
+endif()
+
+# Without -DWITH_VCPKG_TRIPLET or a toolchain file (a plain configure after
+# checkout, or an IDE's), vcpkg is used with the host's triplet;
+# -DWITH_VCPKG_TRIPLET=OFF takes the dependencies from the system instead.
+if(NOT DEFINED WITH_VCPKG_TRIPLET AND NOT CMAKE_TOOLCHAIN_FILE
+   AND "$ENV{CMAKE_TOOLCHAIN_FILE}" STREQUAL "")
+  # CMAKE_HOST_SYSTEM_PROCESSOR is not set before project().
+  cmake_host_system_information(RESULT _mdbls_host_arch QUERY OS_PLATFORM)
+  string(TOLOWER "${_mdbls_host_arch}" _mdbls_host_arch)
+  if(_mdbls_host_arch MATCHES "^(arm64|aarch64)$")
+    set(_mdbls_host_arch arm64)
+  elseif(_mdbls_host_arch MATCHES "^(x86_64|amd64)$")
+    set(_mdbls_host_arch x64)
+  else()
+    message(FATAL_ERROR "No default vcpkg triplet for the host processor "
+      "'${_mdbls_host_arch}': pass -DWITH_VCPKG_TRIPLET=<triplet>, or "
+      "-DWITH_VCPKG_TRIPLET=OFF to use the system's packages.")
+  endif()
+  if(CMAKE_HOST_APPLE)
+    set(_mdbls_host_os osx)
+  elseif(CMAKE_HOST_WIN32)
+    set(_mdbls_host_os windows)
+  else()
+    set(_mdbls_host_os linux)
+  endif()
+  set(WITH_VCPKG_TRIPLET "${_mdbls_host_arch}-${_mdbls_host_os}" CACHE STRING
+      "vcpkg triplet to fetch the dependencies with (OFF: the system's packages)")
+  message(STATUS "WITH_VCPKG_TRIPLET not given: using the host's, '${WITH_VCPKG_TRIPLET}'")
 endif()
 
 # Must run before project(): it sets CMAKE_TOOLCHAIN_FILE.
@@ -82,6 +113,28 @@ project(mariadb-lsp-server VERSION ${_mdbls_version} LANGUAGES C CXX)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# Without vcpkg, say which package is missing rather than fail deep in a
+# subdirectory's find_package().
+if(NOT CMAKE_TOOLCHAIN_FILE MATCHES "[Vv]cpkg")
+  set(_mdbls_missing "")
+  find_package(RapidJSON CONFIG QUIET)
+  if(NOT RapidJSON_FOUND)
+    list(APPEND _mdbls_missing RapidJSON)
+  endif()
+  if(WITH_TESTS)
+    find_package(GTest CONFIG QUIET)
+    if(NOT GTest_FOUND)
+      list(APPEND _mdbls_missing "GTest (or -DWITH_TESTS=0)")
+    endif()
+  endif()
+  if(_mdbls_missing)
+    list(JOIN _mdbls_missing ", " _mdbls_missing)
+    message(FATAL_ERROR "Not found on the system: ${_mdbls_missing}.  Install them, "
+      "or leave WITH_VCPKG_TRIPLET unset (or pass -DWITH_VCPKG_TRIPLET=<triplet>) "
+      "to fetch the dependencies with vcpkg.")
+  endif()
+endif()
 
 include(compiler)
 include(bison)
