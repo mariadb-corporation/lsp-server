@@ -9,12 +9,12 @@ The implementation plan is in [docs/plans/core-implementation.md](docs/plans/cor
 The build follows MariaDB Shell's. It needs CMake 3.22 or newer, Ninja, bison 3.7.4 or newer (Homebrew bison on macOS), git, and a C++23 compiler (on Windows, Visual Studio 2022 17.13 or newer: the build uses `/std:c++23preview`).
 
 ```bash
-cmake -S . -B bld -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DWITH_VCPKG_TRIPLET=<triplet>
+cmake -S . -B bld -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build bld
 ctest --test-dir bld
 ```
 
-- `-DWITH_VCPKG_TRIPLET=<triplet>` (for example `arm64-osx`, `x64-linux-dynamic`) fetches vcpkg into `../vcpkg`, or uses `VCPKG_ROOT`, and installs the dependencies in `vcpkg.json`. `-DWITH_TESTS=0` leaves GoogleTest out.
+- The configure step fetches vcpkg into `../vcpkg`, or uses `VCPKG_ROOT`, and installs the dependencies in `vcpkg.json` for the host's triplet (`arm64-osx`, `x64-linux`, `x64-windows`, ...). `-DWITH_VCPKG_TRIPLET=<triplet>` picks another one (for example `x64-linux-dynamic`), `-DWITH_VCPKG_TRIPLET=OFF` uses the system's packages instead, and an explicit `-DCMAKE_TOOLCHAIN_FILE` is respected. `-DWITH_TESTS=0` leaves GoogleTest out.
 - The MariaDB client library is built from a MariaDB server tree, as in MariaDB Shell. Without options the configure step fetches the server at the commit `libs/mariadbparser` is pinned to into `../mariadb-server-lsp` and builds only the client targets there. To use an existing server build instead, pass `-DMARIADB_SOURCE_DIR=<src> -DMARIADB_BUILD_DIR=<bld>`, with `mariadbclient mysys mysys_ssl caching_sha2_password GenError` built in it; a tree that is not at the pin gets a warning, which `-DMDBLS_CHECK_SERVER_PIN=OFF` turns off. `-DWITH_MARIADB_CLIENT=OFF` builds without the client library.
 - `-DWITH_ASAN=ON` and `-DWITH_UBSAN=ON` build with AddressSanitizer (leaks reported too, on macOS as well) and UndefinedBehaviorSanitizer; `-DWITH_FUZZERS=ON` (clang) builds both in and adds the libFuzzer targets of `fuzz/`, run by ctest. See [Tests](docs/language-server.md#tests).
 
