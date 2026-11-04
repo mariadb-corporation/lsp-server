@@ -348,14 +348,7 @@ class Workspace(unittest.TestCase):
 
     def complete_until(self, text, pos, label, timeout=20):
         """The workspace catalog is read in the background."""
-        deadline = time.monotonic() + timeout
-        while True:
-            r = self.client.request("textDocument/completion",
-                                    {"textDocument": {"uri": URI}, "position": pos})
-            labels = [i["label"] for i in r["items"]]
-            if label in labels or time.monotonic() > deadline:
-                return labels
-            time.sleep(0.1)
+        return labels_when_read(self.client, pos, label, timeout)
 
     def test_names_from_catalog_files(self):
         self.initialize()
@@ -513,6 +506,18 @@ def mcp_call_key(params):
                                                         "object_type") if k in args)
 
 
+def labels_when_read(c, pos, want="item", timeout=30):
+    """Completion labels at `pos` once `want` is among them, or at the end."""
+    deadline = time.monotonic() + timeout
+    while True:
+        r = c.request("textDocument/completion", {"textDocument": {"uri": URI},
+                                                  "position": pos})
+        labels = [i["label"] for i in r["items"]]
+        if want in labels or time.monotonic() > deadline:
+            return labels
+        time.sleep(0.1)
+
+
 class Mcp_mode(unittest.TestCase):
     """`mariadb-lsp lsp --mcp`: the catalog of a document's connection is
     read through the client, which answers mariadb/dbCall requests from
@@ -573,6 +578,18 @@ class Mcp_mode(unittest.TestCase):
         sig = c.request("textDocument/signatureHelp", {
             "textDocument": {"uri": URI}, "position": pos})
         self.assertIsNone(sig)
+
+    def test_an_ssh_connection_comes_through_the_client(self):
+        # The client's MariaDB Shell opens the tunnel; the server asks for
+        # the URI as it is, and refuses nothing (no window/showMessage).
+        c = self.client
+        self.CONNECTION = "mariadb+ssh://app@db.internal:3306?ssh-host=bastion.example.com"
+        text, pos = split_cursor("SELECT * FROM |")
+        mark = self.connect(text)
+        self.assertIn("item", labels_when_read(c, pos))
+        with c.cond:
+            shown = [m for _, m in c.notifications[mark:] if m["method"] == "window/showMessage"]
+        self.assertEqual(shown, [])
 
     def test_a_routine_is_read_when_its_signature_is_wanted(self):
         c = self.client
@@ -816,17 +833,6 @@ class Live_connection(unittest.TestCase):
                                      lambda p: "connection not configured" in p["message"], 30)
         self.assertEqual(msg["type"], 2)
 
-    def labels_when_read(self, c, pos, want="item", timeout=30):
-        """Completion labels at `pos` once `want` is among them, or at the end."""
-        deadline = time.monotonic() + timeout
-        while True:
-            r = c.request("textDocument/completion", {"textDocument": {"uri": URI},
-                                                      "position": pos})
-            labels = [i["label"] for i in r["items"]]
-            if want in labels or time.monotonic() > deadline:
-                return labels
-            time.sleep(0.1)
-
     def test_a_password_in_the_uri_is_refused(self):
         c = self.client
         c.open(URI, "SELECT 1;")
@@ -852,7 +858,7 @@ class Live_connection(unittest.TestCase):
         self.secrets.store("generic", "MCP:CONN:" + uri, "rlate pw")
         # Asked for again: no restart needed.
         c.request("mariadb/refreshCatalog", {"textDocument": {"uri": URI}})
-        self.assertIn("item", self.labels_when_read(c, pos))
+        self.assertIn("item", labels_when_read(c, pos))
 
     def test_a_refused_password_is_not_tried_again_until_it_changes(self):
         self.server.sql("CREATE USER moved@'%' IDENTIFIED BY 'new pw';"
@@ -875,7 +881,7 @@ class Live_connection(unittest.TestCase):
                          denied)
         # The next one (10 s later) finds the new password.
         self.secrets.store("generic", "MCP:CONN:" + uri, "rnew pw")
-        self.assertIn("item", self.labels_when_read(c, pos, timeout=20))
+        self.assertIn("item", labels_when_read(c, pos, timeout=20))
 
     def test_new_secret_store_settings_reach_connections_already_named(self):
         c = Client(BINARY)
@@ -890,7 +896,7 @@ class Live_connection(unittest.TestCase):
                                 lambda p: "connection not configured" in p["message"], 30)
             c.notify("workspace/didChangeConfiguration",
                      {"settings": {"mariadb": {"shellBinDir": self.secrets.bin}}})
-            self.assertIn("item", self.labels_when_read(c, pos))
+            self.assertIn("item", labels_when_read(c, pos))
         finally:
             self.assertEqual(c.close(), 0)
 
@@ -905,6 +911,11 @@ class Live_connection(unittest.TestCase):
             self.assertEqual(r.returncode, 2)
             self.assertIn("must not hold a password", r.stderr)
             self.assertNotIn("app%20pw", r.stderr)
+            # An SSH URI is refused before any password is asked for.
+            r = subprocess.run(base + ["--connection", "mariadb+ssh://app@127.0.0.1:%d" % port,
+                                       "-p", f.name], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("SSH tunnels", r.stderr)
             r = subprocess.run(base + ["--connection", "nobody@127.0.0.1:%d" % port, "-psecret",
                                        f.name], capture_output=True, text=True)
             self.assertEqual(r.returncode, 2)

@@ -52,6 +52,9 @@ struct Connection_uri {
 bool is_protocol_scheme(std::string_view scheme);
 // An SSH tunnel: mariadb+ssh, mysql+ssh.
 bool is_ssh_scheme(std::string_view scheme);
+// Why a direct connection refuses an SSH URI: only the client's MariaDB Shell
+// opens tunnels, in MCP mode.
+std::string ssh_tunnel_refusal(std::string_view scheme);
 
 // nullopt for text the shell would not take as a URI: empty, blanks inside,
 // no host or socket, a bad port.
