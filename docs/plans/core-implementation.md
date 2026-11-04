@@ -637,7 +637,8 @@ through the editor or the LSP channel:
   user, host, port, socket and schema, SSL preferred, 5 s connect and 30 s read timeouts,
   the first statement `SET SESSION TRANSACTION READ ONLY`, then `SELECT @@sql_mode,
   VERSION()` so the document's mode and release id follow the server. SSH-tunnel URIs
-  are not supported in the first version (reported as such); they need the shell.
+  are read only through the client in MCP mode, whose MariaDB Shell opens the tunnel
+  (§5.8); a direct connection refuses them.
 - **Fetching the catalog** runs only on a background worker: `information_schema`
   queries for schemata, tables, columns, statistics, routines, parameters, triggers,
   views, events, in one pass per refresh, with backoff on failure. No LSP request and
@@ -1170,9 +1171,12 @@ order.
    The last step means a connection the user only ever opened in the shell works in the
    editor too; the MCP plugin deliberately does not read those. Keep that step, or
    restrict the server to the GUI and MCP lists like the MCP plugin?
-8. **SSH tunnels.** `mariadb+ssh://` URIs are out of the first version; the server
-   reports them as unsupported. Agree, or should the server shell out to
-   `mariadb-shell` for those?
+8. **SSH tunnels.** *Decided (2026-11-04):* `mariadb+ssh://` URIs are read through the
+   client in MCP mode, whose MariaDB Shell opens the tunnel with its session; a direct
+   connection still refuses them. Starting a `mariadb-shell` child to open a tunnel for
+   direct mode was considered and dropped, and so was attaching to a tunnel another
+   shell process opened (its listener lives in that process, on a port it does not
+   publish, and closes with that process's last session).
 
 ## 6. Out of scope for this plan
 

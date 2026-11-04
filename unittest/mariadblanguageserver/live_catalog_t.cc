@@ -76,6 +76,24 @@ const Table *table(const std::shared_ptr<const Live_snapshot> &snap, const char 
 
 }  // namespace
 
+// Through the client, an SSH URI is read as any other: the client's
+// shell opens the tunnel.
+TEST(Live_catalog, an_ssh_uri_is_read_through_the_client) {
+  const std::string uri = "mariadb+ssh://root@db.internal?ssh-host=bastion";
+  std::string asked;
+  Live_catalog_options o;
+  o.fetch = [&](const std::string &u, std::string *error, bool *permanent,
+                const std::function<bool()> &cancelled) {
+    asked = u;
+    return stub_reading(u, error, permanent, cancelled);
+  };
+  Live_catalog lc(uri, o);
+  ASSERT_TRUE(first_snapshot(lc));
+  EXPECT_EQ(lc.error(), "");
+  // As given, not normalized: the ssh-* options are the client's to read.
+  EXPECT_EQ(asked, uri);
+}
+
 TEST(Live_catalog_details, read_once_when_asked) {
   std::atomic<int> fetches{0};
   std::vector<Object_key> asked;

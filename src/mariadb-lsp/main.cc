@@ -136,7 +136,8 @@ const char *const k_usage =
     "                     and the catalog from this server (its password from the\n"
     "                     shell's secret store); check then also reports tables and\n"
     "                     columns the server does not have, as warnings.  The URI\n"
-    "                     must not hold a password\n"
+    "                     must not hold a password, and cannot use an SSH tunnel\n"
+    "                     (only lsp --mcp reads those, through the client)\n"
     "  -p, --password     with --connection: ask for the password on the terminal\n"
     "                     instead of reading the secret store (takes no value)\n"
     "  --shell-bin-dir DIR\n"
@@ -810,6 +811,12 @@ std::optional<Options> parse_args(int argc, char **argv) {
       if (uri->password) {
         std::cerr << "mariadb-lsp: --connection must not hold a password: use -p, or store it "
                      "with MariaDB Shell\n";
+        return std::nullopt;
+      }
+      // Before -p asks for a password.
+      if (mdbls::is_ssh_scheme(uri->scheme)) {
+        std::cerr << "mariadb-lsp: --connection: " << mdbls::ssh_tunnel_refusal(uri->scheme)
+                  << "\n";
         return std::nullopt;
       }
       o.connection = *v;

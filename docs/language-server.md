@@ -87,7 +87,7 @@ completions snippets (`CONCAT($0)`).
 | `mariadb/refreshCatalog` | client to server, request | `{textDocument?: {uri}}`: reads the workspace catalog again, and the catalog of the document's connection (of every connection without `textDocument`), in the background; the result is `null` at once |
 | `mariadb/parseProgress` | server to client, notification | `{uri, version, checked, total, done}` while a large document is checked |
 | `mariadb/dbCall` | server to client, request | `--mcp` only: `{connection, tool, arguments}`, a call of one `db.*` tool of MariaDB Shell's MCP server on the connection URI; the result is the tool's result as the client decoded it, or an error whose `data.permanent` says another call would fail alike (a connection that is not configured). See [MCP mode](#mcp-mode) |
-| `window/showMessage` | server to client | a connection that cannot be used ("connection not configured", a failed login, an SSH URI, a URI holding a password), once per connection and message until it is read; a `connection` that is not a URI, which is refused (and never shown as given, since it may hold a password) |
+| `window/showMessage` | server to client | a connection that cannot be used ("connection not configured", a failed login, an SSH URI outside MCP mode, a URI holding a password), once per connection and message until it is read; a `connection` that is not a URI, which is refused (and never shown as given, since it may hold a password) |
 
 When the client announces `window.workDoneProgress`, a large document's check is also
 reported as work done progress ("Checking SQL"). The server creates a token with
@@ -398,7 +398,7 @@ schedule, then only when asked, and `mariadb/refreshCatalog` or a change of
 read again at once and a changed password tried before the failure is reported; the
 refused password is not tried again on the retry schedule (that could lock the account
 under `max_password_errors`), only when it changes or on `mariadb/refreshCatalog`. An SSH
-URI (`mariadb+ssh://`, not supported) and a URI holding a password are not retried. No
+URI (`mariadb+ssh://`) outside [MCP mode](#mcp-mode) and a URI holding a password are not retried. No
 request waits for a connection: requests use the last catalog read. The password is held
 only until the connect call returns, and never logged.
 
@@ -411,6 +411,11 @@ client resolves the connection URI to the connection it has open on the MCP serv
 opens one, so the credentials stay with the client and no second MCP server runs. The
 secret store, `--shell-bin-dir`, `shellBinary`, `shellBinDir` and `credentialStoreHelper`
 are not used.
+
+SSH URIs (`mariadb+ssh://`, `mysql+ssh://`) are read in this mode only: the server passes
+the URI on unchanged, and the client's MariaDB Shell opens the tunnel with the session, so
+the tunnel's options and SSH credentials stay with the shell as well. Without `--mcp` the
+server refuses them, since it has no SSH client of its own.
 
 A reading makes these calls: `db.execute_sql` (`SELECT @@sql_mode, VERSION(),
 DATABASE()`), `db.list_schemas`, then per schema `db.list_objects` for tables and views,

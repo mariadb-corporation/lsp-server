@@ -48,6 +48,11 @@ bool is_protocol_scheme(std::string_view s) {
 
 bool is_ssh_scheme(std::string_view s) { return s == "mariadb+ssh" || s == "mysql+ssh"; }
 
+std::string ssh_tunnel_refusal(std::string_view scheme) {
+  return "SSH tunnels (" + std::string(scheme) +
+         "://) are opened only by the client in MCP mode (lsp --mcp)";
+}
+
 std::optional<Connection_uri> parse_connection_uri(std::string_view text) {
   text = trim(text);
   if (text.empty()) return std::nullopt;

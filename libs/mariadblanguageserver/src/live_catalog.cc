@@ -118,7 +118,7 @@ std::optional<Live_snapshot> fetch_live_catalog(const Connection_uri &uri, std::
     if (error != nullptr) *error = e;
     return std::nullopt;
   };
-  if (is_ssh_scheme(uri.scheme)) return fail("SSH tunnels (" + uri.scheme + "://) are not supported");
+  if (is_ssh_scheme(uri.scheme)) return fail(ssh_tunnel_refusal(uri.scheme));
   if (!is_protocol_scheme(uri.scheme)) return fail("scheme " + uri.scheme + ":// is not supported");
   Session s;
   MYSQL *m = s.get();
@@ -604,15 +604,17 @@ void Live_catalog::run() {
     if (!parsed) {
       error = "not a connection URI";
       permanent = true;
-    } else if (is_ssh_scheme(parsed->scheme)) {
-      error = "SSH tunnels (" + parsed->scheme + "://) are not supported";
-      permanent = true;
     } else if (m_options.fetch) {
+      // Through the client (--mcp), SSH URIs too: the client's MariaDB
+      // Shell opens the tunnel along with the session.
       if (m_options.log) m_options.log("live catalog " + m_normalized + ": reading through the client");
       snap = m_options.fetch(m_uri, &error, &permanent, [this] {
         std::lock_guard lock(m_mutex);
         return m_stop;
       });
+    } else if (is_ssh_scheme(parsed->scheme)) {
+      error = ssh_tunnel_refusal(parsed->scheme);
+      permanent = true;
     } else if (!live_connections_supported()) {
       error = "this build has no MariaDB client library";
       permanent = true;
