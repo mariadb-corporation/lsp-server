@@ -82,10 +82,13 @@ void fold_outline(Outline &out, std::string_view text, const Statement_index &in
   for (size_t k = 0; k < ddl.size(); ++k) {
     const uint32_t at = stmts[ddl[k]].begin;
     if (parsed[k].unsupported) {
-      out.notes.push_back({at, "not read: sql_mode " + index.modes()[stmts[ddl[k]].mode].mode +
-                                   " is not supported"});
+      out.notes.push_back({at, Note_kind::unsupported_sql_mode, false,
+                           "not read: sql_mode " + index.modes()[stmts[ddl[k]].mode].mode +
+                               " is not supported",
+                           source});
     } else if (!parsed[k].accepted) {
-      out.notes.push_back({at, "not read: the statement has a syntax error"});
+      out.notes.push_back(
+          {at, Note_kind::syntax_error, false, "not read: the statement has a syntax error", source});
     } else if (out.catalog.apply(parsed[k].tree, text)) {
       ++out.applied;
     }
@@ -94,7 +97,7 @@ void fold_outline(Outline &out, std::string_view text, const Statement_index &in
     out.notes.push_back(out.catalog.notes()[k]);
   }
   std::sort(out.notes.begin() + static_cast<std::ptrdiff_t>(first_note), out.notes.end(),
-            [](const auto &a, const auto &b) { return a.first < b.first; });
+            [](const Note &a, const Note &b) { return a.at < b.at; });
 }
 
 namespace {
@@ -118,27 +121,43 @@ void fold_expanded(Outline &out, const Source_expansion &e, const Statement_inde
     o.source = to_source(statement.source);
   });
 
+  // The notes keep their order in the script: a note from an include sorts
+  // where its directive stands.
+  std::vector<std::pair<uint32_t, size_t>> order;  // (script offset, note)
   for (size_t k = first_note; k < out.notes.size(); ++k) {
-    auto &[at, message] = out.notes[k];
-    const auto loc = e.map(at);
-    if (loc.source == 0) {
-      at = loc.offset;
-    } else {
+    Note &n = out.notes[k];
+    const auto loc = e.map(n.at);
+    n.at = loc.offset;
+    n.source = to_source(loc.source);
+    uint32_t script_at = loc.offset;
+    if (loc.source != 0) {
       const auto &inc = e.includes[loc.source - 1];
-      at = inc.directive.statement.begin;
-      message = source_location(inc, loc.offset) + ": " + message;
+      n.message = source_location(inc, loc.offset) + ": " + n.message;
+      script_at = inc.directive.statement.begin;
     }
+    order.emplace_back(script_at, k);
   }
-  for (const auto &inc : e.includes) {
+  for (size_t k = 0; k < e.includes.size(); ++k) {
+    const auto &inc = e.includes[k];
     const uint32_t at = inc.directive.statement.begin;
-    if (!inc.error.empty()) out.notes.push_back({at, "not read: " + inc.error});
+    if (!inc.error.empty()) {
+      order.emplace_back(at, out.notes.size());
+      out.notes.push_back({at, Note_kind::include_unreadable, false, "not read: " + inc.error, source});
+    }
     for (const auto &n : inc.nested) {
-      out.notes.push_back({at, source_location(inc, n.statement.begin) + ": SOURCE '" + n.file +
-                                   "' not expanded: msm expands one level only"});
+      order.emplace_back(at, out.notes.size());
+      out.notes.push_back({n.statement.begin, Note_kind::include_nested, false,
+                           source_location(inc, n.statement.begin) + ": SOURCE '" + n.file +
+                               "' not expanded: msm expands one level only",
+                           to_source(static_cast<uint32_t>(k + 1))});
     }
   }
-  std::stable_sort(out.notes.begin() + static_cast<std::ptrdiff_t>(first_note), out.notes.end(),
+  std::stable_sort(order.begin(), order.end(),
                    [](const auto &a, const auto &b) { return a.first < b.first; });
+  std::vector<Note> sorted;
+  sorted.reserve(order.size());
+  for (const auto &[_, k] : order) sorted.push_back(std::move(out.notes[k]));
+  std::move(sorted.begin(), sorted.end(), out.notes.begin() + static_cast<std::ptrdiff_t>(first_note));
 }
 
 // The including script's state where each include begins.
@@ -255,6 +274,26 @@ class Json_outline {
     for (const auto &[k, v] : opts) str(k.c_str(), v);
     w_.EndObject();
   }
+  void opt_bool(const char *key, const std::optional<bool> &v) {
+    w_.Key(key);
+    if (v) {
+      w_.Bool(*v);
+    } else {
+      w_.Null();
+    }
+  }
+  void opt_uint(const char *key, const std::optional<uint32_t> &v) {
+    w_.Key(key);
+    if (v) {
+      w_.Uint(*v);
+    } else {
+      w_.Null();
+    }
+  }
+  void boolean(const char *key, bool v) {
+    w_.Key(key);
+    w_.Bool(v);
+  }
   void named(const char *key, const std::vector<Named_object> &v) {
     w_.Key(key);
     w_.StartArray();
@@ -288,6 +327,13 @@ class Json_outline {
       opt_str("comment", c.comment);
       opt_str("collation", c.collation);
       opt_str("generated", c.generated);
+      opt_str("charset", c.charset);
+      opt_str("on_update", c.on_update);
+      boolean("invisible", c.invisible);
+      opt_str("generated_storage", c.generated_storage);
+      opt_str("generated_row", c.generated_row);
+      opt_bool("system_versioning", c.system_versioning);
+      options(c.options);
       origin(c.origin);
       w_.EndObject();
     }
@@ -298,7 +344,23 @@ class Json_outline {
       w_.StartObject();
       str_or_null("name", i.name);
       str("kind", i.kind);
-      strings("columns", i.columns);
+      strings("columns", i.columns());
+      w_.Key("key_parts");
+      w_.StartArray();
+      for (const auto &kp : i.key_parts) {
+        w_.StartObject();
+        str("column", kp.column);
+        opt_uint("length", kp.length);
+        str_or_null("order", kp.order);
+        opt_str("expression", kp.expression);
+        w_.EndObject();
+      }
+      w_.EndArray();
+      str_or_null("using", i.using_);
+      opt_str("comment", i.comment);
+      boolean("ignored", i.ignored);
+      str_or_null("without_overlaps", i.without_overlaps);
+      options(i.options);
       origin(i.origin);
       w_.EndObject();
     }
@@ -317,6 +379,8 @@ class Json_outline {
       w_.EndObject();
       str_or_null("on_delete", f.on_delete);
       str_or_null("on_update", f.on_update);
+      str_or_null("index_name", f.index_name);
+      str_or_null("match", f.match);
       origin(f.origin);
       w_.EndObject();
     }
@@ -327,7 +391,20 @@ class Json_outline {
       w_.StartObject();
       str_or_null("name", c.name);
       str("expression", c.expression);
+      str_or_null("column", c.column);
       origin(c.origin);
+      w_.EndObject();
+    }
+    w_.EndArray();
+    str_or_null("partitioning", t.partitioning);
+    boolean("system_versioning", t.system_versioning);
+    w_.Key("periods");
+    w_.StartArray();
+    for (const auto &p : t.periods) {
+      w_.StartObject();
+      str("name", p.name);
+      str("start", p.start);
+      str("end", p.end);
       w_.EndObject();
     }
     w_.EndArray();
@@ -352,6 +429,10 @@ class Json_outline {
       str("name", v.name);
       strings("columns", v.columns);
       str("definition", v.definition);
+      str_or_null("algorithm", v.algorithm);
+      str_or_null("security", v.security);
+      str_or_null("definer", v.definer);
+      str_or_null("check_option", v.check_option);
       origin(v.origin);
       w_.EndObject();
     }
@@ -373,6 +454,14 @@ class Json_outline {
       }
       w_.EndArray();
       str_or_null("returns", r.returns);
+      opt_str("body", r.body);
+      opt_bool("deterministic", r.deterministic);
+      str_or_null("data_access", r.data_access);
+      str_or_null("security", r.security);
+      str_or_null("definer", r.definer);
+      opt_str("comment", r.comment);
+      boolean("aggregate", r.aggregate);
+      opt_str("soname", r.soname);
       origin(r.origin);
       w_.EndObject();
     }
@@ -385,12 +474,54 @@ class Json_outline {
       str("timing", t.timing);
       str("events", t.events);
       str("table", t.table);
+      str("body", t.body);
+      w_.Key("order");
+      if (t.order_kind.empty()) {
+        w_.Null();
+      } else {
+        w_.StartObject();
+        str("kind", t.order_kind);
+        str("trigger", t.order_trigger);
+        w_.EndObject();
+      }
+      str_or_null("definer", t.definer);
+      strings("update_columns", t.update_columns);
       origin(t.origin);
       w_.EndObject();
     }
     w_.EndArray();
-    named("events", s.events);
-    named("sequences", s.sequences);
+    w_.Key("events");
+    w_.StartArray();
+    for (const auto &e : s.events) {
+      w_.StartObject();
+      str("name", e.name);
+      str_or_null("schedule", e.schedule);
+      opt_bool("on_completion_preserve", e.on_completion_preserve);
+      str_or_null("status", e.status);
+      opt_str("comment", e.comment);
+      str_or_null("body", e.body);
+      str_or_null("definer", e.definer);
+      origin(e.origin);
+      w_.EndObject();
+    }
+    w_.EndArray();
+    w_.Key("sequences");
+    w_.StartArray();
+    for (const auto &q : s.sequences) {
+      w_.StartObject();
+      str("name", q.name);
+      str_or_null("type", q.type);
+      str_or_null("start", q.start);
+      str_or_null("increment", q.increment);
+      str_or_null("minvalue", q.minvalue);
+      str_or_null("maxvalue", q.maxvalue);
+      str_or_null("cache", q.cache);
+      opt_bool("cycle", q.cycle);
+      options(q.options);
+      origin(q.origin);
+      w_.EndObject();
+    }
+    w_.EndArray();
     w_.EndObject();
   }
 
@@ -486,11 +617,22 @@ std::string outline_json(const Outline &outline, std::string_view text, const Li
   w.EndObject();
   w.Key("notes");
   w.StartArray();
-  for (const auto &[at, message] : outline.notes) {
+  for (const Note &n : outline.notes) {
     w.StartObject();
-    w.Key("start");
-    j.position(at);
-    j.str("message", message);
+    j.str("kind", to_string(n.kind));
+    w.Key("applied");
+    w.Bool(n.applied);
+    if (n.source > 0 && n.source <= outline.includes.size()) {
+      const auto &inc = outline.includes[n.source - 1];
+      w.Key("source");
+      w.Uint(n.source - 1);
+      w.Key("start");
+      lsp::write_position(w, inc.lines.position(inc.text, n.at));
+    } else {
+      w.Key("start");
+      j.position(n.at);
+    }
+    j.str("message", n.message);
     w.EndObject();
   }
   w.EndArray();

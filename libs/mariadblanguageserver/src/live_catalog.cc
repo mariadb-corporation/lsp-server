@@ -214,7 +214,7 @@ std::optional<Live_snapshot> fetch_live_catalog(const Connection_uri &uri, std::
             b.view_index[{sname, name}] = {si, sc.views.size()};
             sc.views.push_back(std::move(v));
           } else if (type == "SEQUENCE") {
-            sc.sequences.push_back({name, {}});
+            sc.sequences.emplace_back().name = name;
           } else {
             Table t;
             t.name = name;
@@ -268,7 +268,7 @@ std::optional<Live_snapshot> fetch_live_catalog(const Connection_uri &uri, std::
                                            : "index";
             t->indexes.push_back(std::move(ix));
           }
-          t->indexes.back().columns.push_back(str(r, 5));
+          t->indexes.back().key_parts.emplace_back().column = str(r, 5);
         });
     run("SELECT k.TABLE_SCHEMA, k.TABLE_NAME, k.CONSTRAINT_NAME, k.COLUMN_NAME, "
         "k.REFERENCED_TABLE_SCHEMA, k.REFERENCED_TABLE_NAME, k.REFERENCED_COLUMN_NAME, "
@@ -334,7 +334,7 @@ std::optional<Live_snapshot> fetch_live_catalog(const Connection_uri &uri, std::
           b.schema(str(r, 0)).triggers.push_back(std::move(tr));
         });
     run("SELECT EVENT_SCHEMA, EVENT_NAME FROM information_schema.EVENTS", [&](const Row &r) {
-      b.schema(str(r, 0)).events.push_back({str(r, 1), {}});
+      b.schema(str(r, 0)).events.emplace_back().name = str(r, 1);
     });
   } catch (const std::exception &e) {
     return fail(std::string("cannot read the catalog: ") + e.what());

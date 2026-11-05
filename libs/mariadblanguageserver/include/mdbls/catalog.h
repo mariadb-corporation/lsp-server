@@ -45,9 +45,37 @@ struct Origin {
   uint32_t source = 0;
 };
 
+// Why a statement is listed under Outline::notes.  to_string() gives the
+// `kind` of the outline JSON; docs/outline-format.md lists them all, and a
+// test checks that it does.
+enum class Note_kind {
+  syntax_error,          // not applied: the statement has a syntax error
+  unsupported_sql_mode,  // not applied: an sql_mode the parser does not support
+  unknown_table,         // ALTER TABLE, CREATE INDEX (not applied) or CREATE TABLE ... LIKE
+                         // (applied) of a table the file does not create
+  include_unreadable,    // not applied: a SOURCE file that cannot be read
+  include_nested,        // not applied: a SOURCE directive in an included text
+};
+constexpr Note_kind k_note_kinds[] = {Note_kind::syntax_error, Note_kind::unsupported_sql_mode,
+                                      Note_kind::unknown_table, Note_kind::include_unreadable,
+                                      Note_kind::include_nested};
+const char *to_string(Note_kind kind);
+
+// A remark on one statement: what the fold could not read, or applied with
+// a reservation.
+struct Note {
+  uint32_t at = 0;       // the statement's offset in the text of `source`
+  Note_kind kind = Note_kind::syntax_error;
+  bool applied = false;  // the statement changed the outline nonetheless
+  std::string message;
+  uint32_t source = 0;   // as Origin::source
+};
+
 struct Column {
   std::string name;
-  std::string type;                    // as written, blanks collapsed: "varchar(20)"
+  // as written, blanks collapsed, without CHARACTER SET and COLLATE:
+  // "varchar(20)", "INT UNSIGNED"
+  std::string type;
   bool nullable = true;
   std::optional<std::string> default_value;  // the expression as written
   bool auto_increment = false;
@@ -55,16 +83,45 @@ struct Column {
   std::optional<std::string> collation;
   std::optional<std::string> generated;      // the generation expression
   Origin origin;
+  std::optional<std::string> charset;        // lower-cased
+  std::optional<std::string> on_update;      // ON UPDATE CURRENT_TIMESTAMP(6), as written
+  bool invisible = false;
+  std::optional<std::string> generated_storage;  // VIRTUAL, PERSISTENT, STORED
+  std::optional<std::string> generated_row;  // START, END (AS ROW START / END)
+  std::optional<bool> system_versioning;     // WITH / WITHOUT SYSTEM VERSIONING
+  // Engine-defined attributes (ENCRYPTED=YES): lower-cased name, value as written.
+  std::vector<std::pair<std::string, std::string>> options;
 
-  // "varchar(20) NOT NULL DEFAULT 'x' AUTO_INCREMENT"
+  // "varchar(20) CHARACTER SET utf8mb4 NOT NULL DEFAULT 'x' AUTO_INCREMENT"
   std::string attributes() const;
+  // The whole definition after the name: attributes() plus ON UPDATE,
+  // AS (expr) VIRTUAL|PERSISTENT|STORED, AS ROW START|END and INVISIBLE.
+  std::string definition() const;
+};
+
+struct Key_part {
+  std::string column;
+  std::optional<uint32_t> length;      // a prefix length: a(10)
+  std::string order;                   // ASC, DESC, or "" when not written
+  std::optional<std::string> expression;  // never set: MariaDB has no expression key parts
 };
 
 struct Index {
   std::string name;                    // "" when unnamed
   std::string kind;                    // primary, unique, index, fulltext, spatial, vector
-  std::vector<std::string> columns;
   Origin origin;
+  std::vector<Key_part> key_parts;
+  std::string using_;                  // BTREE, HASH, RTREE, or ""
+  std::optional<std::string> comment;
+  bool ignored = false;
+  std::string without_overlaps;        // the period of WITHOUT OVERLAPS, or ""
+  // key_block_size, parser, engine-defined options: value as written.
+  std::vector<std::pair<std::string, std::string>> options;
+
+  // The key parts' columns.
+  std::vector<std::string> columns() const;
+  // An index on one whole column, as a column's PRIMARY KEY or UNIQUE makes.
+  static Index on(std::string kind, const std::string &column, Origin origin);
 };
 
 struct Foreign_key {
@@ -76,12 +133,22 @@ struct Foreign_key {
   std::string on_delete;               // "" when not given
   std::string on_update;
   Origin origin;
+  std::string index_name;              // the name after FOREIGN KEY, or ""
+  std::string match;                   // FULL, PARTIAL, SIMPLE, or ""
 };
 
 struct Check {
   std::string name;
   std::string expression;
   Origin origin;
+  std::string column;                  // the column of a column-level CHECK, else ""
+};
+
+// PERIOD FOR SYSTEM_TIME (s, e) has the name SYSTEM_TIME.
+struct Period {
+  std::string name;
+  std::string start;
+  std::string end;
 };
 
 struct Table {
@@ -98,6 +165,9 @@ struct Table {
   // here: a live catalog read through MCP reads the rest when a request
   // first needs it (see Live_catalog::details).
   bool stub = false;
+  std::string partitioning;            // the PARTITION BY clause as written, or ""
+  bool system_versioning = false;      // WITH SYSTEM VERSIONING
+  std::vector<Period> periods;
 
   Column *column(std::string_view name);
   const Column *column(std::string_view name) const;
@@ -109,6 +179,10 @@ struct View {
   std::string definition;              // the SELECT as written
   Origin origin;
   bool stub = false;                   // as Table::stub: no columns yet
+  std::string algorithm;               // UNDEFINED, MERGE, TEMPTABLE, or ""
+  std::string security;                // DEFINER, INVOKER, or ""
+  std::string definer;                 // user@host, CURRENT_USER, or ""
+  std::string check_option;            // CASCADED, LOCAL, or ""
 };
 
 struct Parameter {
@@ -124,6 +198,14 @@ struct Routine {
   std::string returns;                 // functions only
   Origin origin;
   bool stub = false;                   // as Table::stub: no parameters yet
+  std::optional<std::string> body;     // as written, not collapsed
+  std::optional<bool> deterministic;
+  std::string data_access;             // CONTAINS SQL, NO SQL, READS SQL DATA, MODIFIES SQL DATA
+  std::string security;                // DEFINER, INVOKER, or ""
+  std::string definer;
+  std::optional<std::string> comment;
+  bool aggregate = false;              // CREATE AGGREGATE FUNCTION
+  std::optional<std::string> soname;   // a UDF's library
 
   // "IN a INT, b TEXT"
   std::string parameter_list() const;
@@ -135,11 +217,42 @@ struct Trigger {
   std::string events;                  // INSERT, UPDATE OR DELETE, ...
   std::string table;
   Origin origin;
+  std::string body;                    // as written, not collapsed
+  std::string order_kind;              // FOLLOWS, PRECEDES, or ""
+  std::string order_trigger;
+  std::string definer;
+  std::vector<std::string> update_columns;  // UPDATE OF a, b
 };
 
 struct Named_object {
   std::string name;
   Origin origin;
+};
+
+struct Event {
+  std::string name;
+  Origin origin;
+  std::string schedule;                // AT ... / EVERY ... [STARTS ...] [ENDS ...]
+  std::optional<bool> on_completion_preserve;
+  std::string status;                  // ENABLE, DISABLE, DISABLE ON SLAVE, or ""
+  std::optional<std::string> comment;
+  std::string body;                    // as written, not collapsed
+  std::string definer;
+};
+
+struct Sequence {
+  std::string name;
+  Origin origin;
+  // As written; "" when not written.  NO MINVALUE / NOMAXVALUE leave theirs
+  // empty, NOCACHE gives cache "0".
+  std::string type;                    // AS BIGINT UNSIGNED
+  std::string start;
+  std::string increment;
+  std::string minvalue;
+  std::string maxvalue;
+  std::string cache;
+  std::optional<bool> cycle;
+  std::vector<std::pair<std::string, std::string>> options;  // as Table::options
 };
 
 // A table, view or routine of a live catalog whose details a request wants.
@@ -159,8 +272,8 @@ struct Schema {
   std::vector<View> views;
   std::vector<Routine> routines;
   std::vector<Trigger> triggers;
-  std::vector<Named_object> events;
-  std::vector<Named_object> sequences;
+  std::vector<Event> events;
+  std::vector<Sequence> sequences;
   Origin origin;
 
   Table *table(std::string_view name);
@@ -223,8 +336,8 @@ class Catalog {
   static Catalog from_schemas(std::vector<Schema> schemas);
 
   // Things the fold could not apply, such as ALTER TABLE of a table the
-  // script never created: (statement offset, message).
-  const std::vector<std::pair<uint32_t, std::string>> &notes() const { return m_notes; }
+  // script never created.
+  const std::vector<Note> &notes() const { return m_notes; }
 
  private:
   Schema &schema(const std::string &name);
@@ -239,7 +352,7 @@ class Catalog {
   std::vector<Named_object> m_auth_apps;
   std::vector<Named_object> m_roles;
   std::vector<Named_object> m_users;
-  std::vector<std::pair<uint32_t, std::string>> m_notes;
+  std::vector<Note> m_notes;
   uint32_t m_source = 0;
 
   friend class Catalog_fold;

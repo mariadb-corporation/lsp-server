@@ -37,8 +37,10 @@ struct Outline {
   Catalog catalog;
   size_t ddl_statements = 0;  // statements that may change the catalog
   size_t applied = 0;         // of those, the ones that did
-  // (statement offset, message): DDL that could not be applied
-  std::vector<std::pair<uint32_t, std::string>> notes;
+  // DDL that could not be applied, or was applied with a reservation, in
+  // the order of the statements (a note from an include where its
+  // directive stands)
+  std::vector<Note> notes;
   // The SOURCE directives of a document's outline: an origin with source k
   // points into the text of includes[k - 1].
   std::vector<Source_include> includes;
@@ -85,9 +87,10 @@ Outline build_outline(Source_expansion expansion, Parser_pool &pool,
 
 // fold_outline for an expanded text: origins in the including text get
 // `source`, those in include k get include_sources[k - 1].  A note on an
-// included statement moves to its directive and names the file and line;
-// an include that could not be read, and a directive msm does not expand
-// because it is in an included text, get a note at their directive too.
+// included statement keeps its place in that file (Note::source) and its
+// message names the file and line; an include that could not be read gets
+// a note at its directive, a directive msm does not expand because it is
+// in an included text one where it stands.
 void fold_outline(Outline &outline, const Source_expansion &expansion, Parser_pool &pool,
                   const Index_options &index_options, const Outline_options &options,
                   uint32_t source, const std::vector<uint32_t> &include_sources);

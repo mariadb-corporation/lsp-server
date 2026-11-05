@@ -307,23 +307,50 @@ TEST(Source_include, outline_of_an_msm_script) {
   EXPECT_EQ(0u, proc.find("CREATE PROCEDURE restore_roles()"));
   EXPECT_NE(std::string_view::npos, proc.find("SOURCE './sections/170_roles.sql';\nEND"));
 
-  // Notes: an ALTER of an unknown table in an include sits on its directive
-  // and names the file and line; so does a directive msm does not expand.
+  // Notes: an ALTER of an unknown table in an include keeps its place in
+  // that file and names the file and line; so does a directive msm does not
+  // expand.
   ASSERT_EQ(2u, outline.notes.size());
-  const auto at_directive = [&](size_t k) { return outline.includes[k].directive.statement.begin; };
-  EXPECT_EQ(at_directive(0), outline.notes[0].first);
-  EXPECT_EQ(0u, outline.notes[0].second.find("140_tables.sql:13: ")) << outline.notes[0].second;
-  EXPECT_EQ(at_directive(3), outline.notes[1].first);
+  const Note &alter = outline.notes[0];
+  EXPECT_EQ(Note_kind::unknown_table, alter.kind);
+  EXPECT_FALSE(alter.applied);
+  EXPECT_EQ(1u, alter.source);
+  EXPECT_EQ(tables.text.find("ALTER TABLE missing"), alter.at);
+  EXPECT_EQ(0u, alter.message.find("140_tables.sql:13: ")) << alter.message;
+  const Note &nested = outline.notes[1];
+  EXPECT_EQ(Note_kind::include_nested, nested.kind);
+  EXPECT_FALSE(nested.applied);
+  EXPECT_EQ(4u, nested.source);
+  EXPECT_EQ(outline.includes[3].text.find("SOURCE"), nested.at);
   EXPECT_EQ("180_extra.sql:2: SOURCE './deeper.sql' not expanded: msm expands one level only",
-            outline.notes[1].second);
+            nested.message);
+
+  // In the JSON, `source` and `start` place them in their files.
+  const std::string json = outline_json(outline, text, Line_map(text));
+  EXPECT_NE(std::string::npos,
+            json.find("{\"kind\":\"unknown-table\",\"applied\":false,\"source\":0,"
+                      "\"start\":{\"line\":12,\"character\":0},\"message\":\"140_tables.sql:13: "))
+      << json;
+  EXPECT_NE(std::string::npos,
+            json.find("{\"kind\":\"include-nested\",\"applied\":false,\"source\":3,"
+                      "\"start\":{\"line\":1,\"character\":0},"))
+      << json;
 }
 
 TEST(Source_include, outline_notes_unreadable_include) {
   const std::string text = "USE s;\nSOURCE 'missing.sql';\nCREATE TABLE t (a INT);\n";
   const auto outline = build_outline(expand_sources(text, "/nowhere"), pool(), Index_options{});
   ASSERT_EQ(1u, outline.notes.size());
-  EXPECT_EQ(text.find("SOURCE"), outline.notes[0].first);
-  EXPECT_EQ("not read: cannot read /nowhere/missing.sql", outline.notes[0].second);
+  EXPECT_EQ(Note_kind::include_unreadable, outline.notes[0].kind);
+  EXPECT_FALSE(outline.notes[0].applied);
+  EXPECT_EQ(0u, outline.notes[0].source);
+  EXPECT_EQ(text.find("SOURCE"), outline.notes[0].at);
+  EXPECT_EQ("not read: cannot read /nowhere/missing.sql", outline.notes[0].message);
+  const std::string json = outline_json(outline, text, Line_map(text));
+  EXPECT_NE(std::string::npos,
+            json.find("{\"kind\":\"include-unreadable\",\"applied\":false,"
+                      "\"start\":{\"line\":1,\"character\":0},"))
+      << json;
   const Schema *s = outline.catalog.find("s");
   ASSERT_NE(nullptr, s);
   ASSERT_EQ(1u, s->tables.size());

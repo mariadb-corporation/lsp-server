@@ -229,16 +229,433 @@ TEST(Catalog, named_key_replaces_its_namesake) {
   ASSERT_NE(nullptr, t);
   ASSERT_EQ(3u, t->indexes.size());  // k once, the two unnamed keys both kept
   EXPECT_EQ("k", t->indexes[0].name);
-  EXPECT_EQ(std::vector<std::string>{"b"}, t->indexes[0].columns);
+  EXPECT_EQ(std::vector<std::string>{"b"}, t->indexes[0].columns());
 }
 
+// Every note has a kind and says whether its statement was applied
+// nonetheless; msm_plugin fails a release on a note that was not.
 TEST(Catalog, notes_for_what_cannot_be_applied) {
   const auto o = outline_of(
       "ALTER TABLE missing ADD COLUMN x INT;\n"
-      "CREATE TABLE broken (a INT,);\n");
-  ASSERT_EQ(2u, o.notes.size());
-  EXPECT_NE(std::string::npos, o.notes[0].second.find("does not create this table"));
-  EXPECT_NE(std::string::npos, o.notes[1].second.find("syntax error"));
+      "CREATE TABLE broken (a INT,);\n"
+      "CREATE INDEX i ON missing (a);\n"
+      "CREATE TABLE copy LIKE missing;\n"
+      "SET sql_mode = ORACLE;\n"
+      "CREATE TABLE o (a INT);\n");
+  ASSERT_EQ(5u, o.notes.size());
+  EXPECT_EQ(Note_kind::unknown_table, o.notes[0].kind);
+  EXPECT_FALSE(o.notes[0].applied);
+  EXPECT_NE(std::string::npos, o.notes[0].message.find("does not create this table"));
+  EXPECT_EQ(Note_kind::syntax_error, o.notes[1].kind);
+  EXPECT_FALSE(o.notes[1].applied);
+  EXPECT_NE(std::string::npos, o.notes[1].message.find("syntax error"));
+  EXPECT_EQ(Note_kind::unknown_table, o.notes[2].kind);
+  EXPECT_FALSE(o.notes[2].applied);
+  EXPECT_EQ(Note_kind::unknown_table, o.notes[3].kind);
+  EXPECT_TRUE(o.notes[3].applied);  // the LIKE creates the table
+  EXPECT_NE(nullptr, table(o, "", "copy"));
+  EXPECT_EQ(Note_kind::unsupported_sql_mode, o.notes[4].kind);
+  EXPECT_FALSE(o.notes[4].applied);
+  EXPECT_EQ("not read: sql_mode ORACLE is not supported", o.notes[4].message);
+  EXPECT_EQ(nullptr, table(o, "", "o"));
+  for (const Note &n : o.notes) EXPECT_EQ(0u, n.source);
+  EXPECT_EQ(5u, o.ddl_statements);
+  EXPECT_EQ(1u, o.applied);  // the LIKE
+
+  const std::string json = outline_json(o, "", Line_map(""));
+  EXPECT_NE(std::string::npos,
+            json.find("{\"kind\":\"unknown-table\",\"applied\":false,\"start\":{\"line\":0,\"character\":0},"
+                      "\"message\":\"ALTER TABLE missing: the script does not create this table\"}"))
+      << json;
+  EXPECT_NE(std::string::npos, json.find("{\"kind\":\"unknown-table\",\"applied\":true,")) << json;
+}
+
+// docs/outline-format.md lists every kind of note the server can write.
+TEST(Catalog, every_note_kind_is_documented) {
+  const std::string doc = test::read_fixture("../../../docs/outline-format.md");
+  ASSERT_FALSE(doc.empty());
+  const size_t section = doc.find("\n## Notes\n");
+  ASSERT_NE(std::string::npos, section);
+  const size_t end = doc.find("\n## ", section + 1);
+  std::string notes = doc.substr(section, end == std::string::npos ? end : end - section);
+  const size_t kinds = notes.find("\n| Kind |");  // the table of kinds, after the members' table
+  ASSERT_NE(std::string::npos, kinds);
+  notes = notes.substr(kinds);
+  size_t rows = 0;
+  for (size_t at = notes.find("\n| `"); at != std::string::npos; at = notes.find("\n| `", at + 1)) ++rows;
+  EXPECT_EQ(std::size(k_note_kinds), rows);
+  for (const Note_kind kind : k_note_kinds) {
+    EXPECT_NE(std::string::npos, notes.find("\n| `" + std::string(to_string(kind)) + "` |")) << to_string(kind);
+  }
+}
+
+// Column attributes the outline keeps (they make the schema snapshot of an
+// MSM project).  CHARACTER SET and COLLATE are not part of the type.
+TEST(Catalog, column_attributes) {
+  const auto o = outline_of(
+      "CREATE TABLE t (\n"
+      "  a VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,\n"
+      "  ts TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) INVISIBLE,\n"
+      "  g INT AS (a + 1) PERSISTENT, g2 INT GENERATED ALWAYS AS (2) STORED, g3 INT AS (3),\n"
+      "  v INT WITHOUT SYSTEM VERSIONING, w INT WITH SYSTEM VERSIONING,\n"
+      "  b CHAR(3) BINARY, x ENUM('a','b') CHARSET latin1, y TEXT ASCII, z CHAR(2) UNICODE,\n"
+      "  u INT UNSIGNED ZEROFILL, e INT ENCRYPTED=YES,\n"
+      "  rs TIMESTAMP(6) AS ROW START, re TIMESTAMP(6) AS ROW END\n"
+      ");\n");
+  const Table *t = table(o, "", "t");
+  ASSERT_NE(nullptr, t);
+  ASSERT_EQ(15u, t->columns.size());
+  const auto &c = t->columns;
+  EXPECT_EQ("VARCHAR(255)", c[0].type);
+  EXPECT_EQ("utf8mb4", c[0].charset);
+  EXPECT_EQ("utf8mb4_bin", c[0].collation);
+  EXPECT_EQ("CURRENT_TIMESTAMP(6)", c[1].on_update);
+  EXPECT_TRUE(c[1].invisible);
+  EXPECT_FALSE(c[0].invisible);
+  EXPECT_EQ(std::nullopt, c[0].on_update);
+  EXPECT_EQ("PERSISTENT", c[2].generated_storage);
+  EXPECT_EQ("STORED", c[3].generated_storage);
+  EXPECT_EQ(std::nullopt, c[4].generated_storage);  // not written
+  EXPECT_EQ("(3)", c[4].generated);
+  EXPECT_EQ(std::nullopt, c[0].generated_storage);
+  EXPECT_EQ(false, c[5].system_versioning);
+  EXPECT_EQ(true, c[6].system_versioning);
+  EXPECT_EQ(std::nullopt, c[0].system_versioning);
+  EXPECT_EQ("CHAR(3) BINARY", c[7].type);
+  EXPECT_EQ(std::nullopt, c[7].charset);
+  EXPECT_EQ("ENUM('a','b')", c[8].type);
+  EXPECT_EQ("latin1", c[8].charset);
+  EXPECT_EQ("TEXT", c[9].type);
+  EXPECT_EQ("latin1", c[9].charset);  // ASCII
+  EXPECT_EQ("CHAR(2)", c[10].type);
+  EXPECT_EQ("ucs2", c[10].charset);  // UNICODE
+  EXPECT_EQ("INT UNSIGNED ZEROFILL", c[11].type);
+  ASSERT_EQ(1u, c[12].options.size());
+  EXPECT_EQ("encrypted", c[12].options[0].first);
+  EXPECT_EQ("YES", c[12].options[0].second);
+  EXPECT_EQ("START", c[13].generated_row);
+  EXPECT_EQ("END", c[14].generated_row);
+  EXPECT_EQ(std::nullopt, c[13].generated);
+  // Completion shows attributes(), hover definition(): both keep CHARACTER SET and COLLATE.
+  EXPECT_EQ("VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL", c[0].attributes());
+  EXPECT_EQ("TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) INVISIBLE",
+            c[1].definition());
+  EXPECT_EQ("INT AS (a + 1) PERSISTENT", c[2].definition());
+}
+
+TEST(Catalog, quoted_collation_reads_alike_everywhere) {
+  const auto o = outline_of("CREATE TABLE t (a CHAR(1) COLLATE 'utf8mb4_bin', b CHAR(1) NOT NULL COLLATE 'utf8mb4_bin');\n");
+  const Table *t = table(o, "", "t");
+  ASSERT_NE(nullptr, t);
+  ASSERT_EQ(2u, t->columns.size());
+  EXPECT_EQ("utf8mb4_bin", t->columns[0].collation);
+  EXPECT_EQ("utf8mb4_bin", t->columns[1].collation);
+}
+
+TEST(Catalog, column_check_is_a_table_check) {
+  const auto o = outline_of(
+      "CREATE TABLE t (j JSON CHECK (JSON_VALID(j)), k INT, CONSTRAINT ck CHECK (k > 0));\n"
+      "ALTER TABLE t MODIFY k INT CHECK (k < 9);\n"
+      "ALTER TABLE t ADD CONSTRAINT IF NOT EXISTS ck2 CHECK (k <> 5);\n");
+  const Table *t = table(o, "", "t");
+  ASSERT_NE(nullptr, t);
+  ASSERT_EQ(4u, t->checks.size());
+  EXPECT_EQ("", t->checks[0].name);
+  EXPECT_EQ("j", t->checks[0].column);
+  EXPECT_EQ("JSON_VALID(j)", t->checks[0].expression);
+  EXPECT_EQ("ck", t->checks[1].name);
+  EXPECT_EQ("", t->checks[1].column);
+  EXPECT_EQ("k", t->checks[2].column);
+  EXPECT_EQ("k < 9", t->checks[2].expression);
+  EXPECT_EQ("ck2", t->checks[3].name);
+
+  // MODIFY replaces the column's own check; DROP COLUMN drops it.
+  const auto o2 = outline_of(
+      "CREATE TABLE t (j JSON CHECK (JSON_VALID(j)), k INT);\n"
+      "ALTER TABLE t MODIFY j JSON;\n"
+      "ALTER TABLE t MODIFY k INT CHECK (k > 1);\n"
+      "ALTER TABLE t DROP COLUMN k;\n");
+  const Table *t2 = table(o2, "", "t");
+  ASSERT_NE(nullptr, t2);
+  EXPECT_TRUE(t2->checks.empty());
+}
+
+// DROP COLUMN takes the column out of its indexes; an index left without
+// key parts goes with it, as on the server.
+TEST(Catalog, drop_column_leaves_its_indexes) {
+  const auto o = outline_of(
+      "CREATE TABLE t (a INT, b INT, KEY k (a, b), KEY ka (a), UNIQUE u (b));\n"
+      "ALTER TABLE t DROP COLUMN a;\n");
+  const Table *t = table(o, "", "t");
+  ASSERT_NE(nullptr, t);
+  ASSERT_EQ(2u, t->indexes.size());
+  EXPECT_EQ("k", t->indexes[0].name);
+  EXPECT_EQ(std::vector<std::string>{"b"}, t->indexes[0].columns());
+  EXPECT_EQ("u", t->indexes[1].name);
+}
+
+TEST(Catalog, index_details) {
+  const auto o = outline_of(
+      "CREATE TABLE t (a VARCHAR(20), b INT, g GEOMETRY NOT NULL, s DATE, e DATE, txt TEXT,\n"
+      "  PERIOD FOR p (s, e),\n"
+      "  KEY k1 (a(10) DESC, b ASC) USING HASH COMMENT 'it''s' IGNORED,\n"
+      "  KEY k2 USING BTREE (b) KEY_BLOCK_SIZE=8 NOT IGNORED,\n"
+      "  SPATIAL KEY sg (g),\n"
+      "  UNIQUE KEY u (b, p WITHOUT OVERLAPS),\n"
+      "  FULLTEXT KEY ft (txt) WITH PARSER ngram);\n"
+      "ALTER TABLE t ADD INDEX ai TYPE RTREE (b), ALTER INDEX k2 IGNORED;\n"
+      "CREATE UNIQUE INDEX ci USING HASH ON t (a(4) DESC) COMMENT 'c' IGNORED;\n");
+  const Table *t = table(o, "", "t");
+  ASSERT_NE(nullptr, t);
+  ASSERT_EQ(7u, t->indexes.size());
+  const Index &k1 = t->indexes[0];
+  EXPECT_EQ((std::vector<std::string>{"a", "b"}), k1.columns());
+  ASSERT_EQ(2u, k1.key_parts.size());
+  EXPECT_EQ("a", k1.key_parts[0].column);
+  EXPECT_EQ(10u, k1.key_parts[0].length);
+  EXPECT_EQ("DESC", k1.key_parts[0].order);
+  EXPECT_EQ(std::nullopt, k1.key_parts[1].length);
+  EXPECT_EQ("ASC", k1.key_parts[1].order);
+  EXPECT_EQ(std::nullopt, k1.key_parts[0].expression);
+  EXPECT_EQ("HASH", k1.using_);
+  EXPECT_EQ("it's", k1.comment);
+  EXPECT_TRUE(k1.ignored);
+  const Index &k2 = t->indexes[1];
+  EXPECT_EQ("BTREE", k2.using_);
+  EXPECT_TRUE(k2.ignored);  // ALTER INDEX k2 IGNORED
+  ASSERT_EQ(1u, k2.options.size());
+  EXPECT_EQ("key_block_size", k2.options[0].first);
+  EXPECT_EQ("8", k2.options[0].second);
+  const Index &sg = t->indexes[2];
+  EXPECT_EQ("spatial", sg.kind);
+  EXPECT_EQ(std::vector<std::string>{"g"}, sg.columns());
+  ASSERT_EQ(1u, sg.key_parts.size());
+  EXPECT_EQ("p", t->indexes[3].without_overlaps);
+  EXPECT_EQ(std::vector<std::string>{"b"}, t->indexes[3].columns());
+  ASSERT_EQ(1u, t->indexes[4].options.size());
+  EXPECT_EQ("parser", t->indexes[4].options[0].first);
+  EXPECT_EQ("ngram", t->indexes[4].options[0].second);
+  EXPECT_EQ("RTREE", t->indexes[5].using_);
+  EXPECT_FALSE(t->indexes[5].ignored);
+  const Index &ci = t->indexes[6];
+  EXPECT_EQ("ci", ci.name);
+  EXPECT_EQ("unique", ci.kind);
+  EXPECT_EQ("HASH", ci.using_);
+  EXPECT_EQ("c", ci.comment);
+  EXPECT_TRUE(ci.ignored);
+  ASSERT_EQ(1u, ci.key_parts.size());
+  EXPECT_EQ(4u, ci.key_parts[0].length);
+  EXPECT_EQ("DESC", ci.key_parts[0].order);
+}
+
+TEST(Catalog, foreign_key_names_and_match) {
+  const auto o = outline_of(
+      "CREATE TABLE c (pid INT, pid2 INT, pid3 INT REFERENCES p (id) MATCH FULL,\n"
+      "  CONSTRAINT fk_c1 FOREIGN KEY (pid) REFERENCES p (id) MATCH SIMPLE,\n"
+      "  CONSTRAINT fk_c2 FOREIGN KEY fkidx (pid2) REFERENCES p (id2),\n"
+      "  FOREIGN KEY fk3 (pid) REFERENCES p (id));\n"
+      "ALTER TABLE c ADD CONSTRAINT fk4 FOREIGN KEY ix4 (pid2) REFERENCES p (id2) MATCH PARTIAL;\n"
+      "ALTER TABLE c DROP FOREIGN KEY fk_c2;\n");
+  const Table *c = table(o, "", "c");
+  ASSERT_NE(nullptr, c);
+  ASSERT_EQ(4u, c->foreign_keys.size());
+  const auto &f = c->foreign_keys;
+  EXPECT_EQ("", f[0].name);
+  EXPECT_EQ("FULL", f[0].match);
+  EXPECT_EQ("fk_c1", f[1].name);
+  EXPECT_EQ("", f[1].index_name);
+  EXPECT_EQ("SIMPLE", f[1].match);
+  EXPECT_EQ("fk3", f[2].name);  // fk_c2 (index fkidx) was dropped by its constraint name
+  EXPECT_EQ("fk3", f[2].index_name);
+  EXPECT_EQ("", f[2].match);
+  EXPECT_EQ("fk4", f[3].name);
+  EXPECT_EQ("ix4", f[3].index_name);
+  EXPECT_EQ("PARTIAL", f[3].match);
+}
+
+TEST(Catalog, table_partitioning_versioning_periods) {
+  const auto o = outline_of(
+      "CREATE TABLE t (a INT, s DATE, e DATE, rs TIMESTAMP(6) AS ROW START,\n"
+      "  re TIMESTAMP(6) AS ROW END, PERIOD FOR SYSTEM_TIME (rs, re), PERIOD FOR app (s, e))\n"
+      "  ENGINE=InnoDB WITH SYSTEM VERSIONING PAGE_COMPRESSED=1 UNION=(x, y)\n"
+      "  PARTITION BY HASH (a)\n  PARTITIONS 4;\n"
+      "CREATE TABLE u (a INT) PARTITION BY RANGE (a) (PARTITION p0 VALUES LESS THAN (10));\n"
+      "ALTER TABLE u REMOVE PARTITIONING;\n"
+      "CREATE TABLE w (a INT);\n"
+      "ALTER TABLE w ADD SYSTEM VERSIONING, ADD COLUMN b INT PARTITION BY KEY (a) PARTITIONS 2;\n"
+      "ALTER TABLE t DROP PERIOD FOR app;\n");
+  const Table *t = table(o, "", "t");
+  ASSERT_NE(nullptr, t);
+  EXPECT_EQ("PARTITION BY HASH (a) PARTITIONS 4", t->partitioning);
+  EXPECT_TRUE(t->system_versioning);
+  ASSERT_EQ(1u, t->periods.size());
+  EXPECT_EQ("SYSTEM_TIME", t->periods[0].name);
+  EXPECT_EQ("rs", t->periods[0].start);
+  EXPECT_EQ("re", t->periods[0].end);
+  auto option = [](const Table &x, const std::string &k) {
+    for (const auto &[key, v] : x.options)
+      if (key == k) return v;
+    return std::string("<none>");
+  };
+  EXPECT_EQ("1", option(*t, "page_compressed"));
+  EXPECT_EQ("(x, y)", option(*t, "union"));
+  const Table *u = table(o, "", "u");
+  ASSERT_NE(nullptr, u);
+  EXPECT_EQ("", u->partitioning);
+  EXPECT_FALSE(u->system_versioning);
+  const Table *w = table(o, "", "w");
+  ASSERT_NE(nullptr, w);
+  EXPECT_TRUE(w->system_versioning);
+  EXPECT_EQ("PARTITION BY KEY (a) PARTITIONS 2", w->partitioning);
+}
+
+TEST(Catalog, alter_keeps_column_members) {
+  const auto o = outline_of(
+      "CREATE TABLE t (a INT, b INT, KEY k (a), CHECK (a > 0));\n"
+      "ALTER TABLE t MODIFY a VARCHAR(5) CHARACTER SET latin1 COLLATE latin1_bin NOT NULL\n"
+      "  INVISIBLE COMMENT 'x';\n"
+      "ALTER TABLE t CHANGE b b2 TIMESTAMP ON UPDATE CURRENT_TIMESTAMP WITHOUT SYSTEM VERSIONING;\n"
+      "ALTER TABLE t ADD COLUMN g INT AS (1) VIRTUAL INVISIBLE;\n"
+      "ALTER TABLE t ALTER COLUMN a SET DEFAULT 'q';\n"
+      "ALTER TABLE t RENAME COLUMN a TO a2;\n");
+  const Table *t = table(o, "", "t");
+  ASSERT_NE(nullptr, t);
+  ASSERT_EQ(3u, t->columns.size());
+  const auto &a = t->columns[0];
+  EXPECT_EQ("a2", a.name);
+  EXPECT_EQ("VARCHAR(5)", a.type);
+  EXPECT_EQ("latin1", a.charset);
+  EXPECT_EQ("latin1_bin", a.collation);
+  EXPECT_TRUE(a.invisible);
+  EXPECT_EQ("'q'", a.default_value);
+  const auto &b = t->columns[1];
+  EXPECT_EQ("b2", b.name);
+  EXPECT_EQ("CURRENT_TIMESTAMP", b.on_update);
+  EXPECT_EQ(false, b.system_versioning);
+  EXPECT_EQ(std::nullopt, b.charset);
+  const auto &g = t->columns[2];
+  EXPECT_EQ("VIRTUAL", g.generated_storage);
+  EXPECT_TRUE(g.invisible);
+  ASSERT_EQ(1u, t->indexes.size());
+  EXPECT_EQ(std::vector<std::string>{"a2"}, t->indexes[0].columns());  // follows the rename
+  EXPECT_EQ("a2", t->indexes[0].key_parts[0].column);
+}
+
+TEST(Catalog, view_routine_trigger_event_sequence_details) {
+  const auto o = outline_of(
+      "CREATE TABLE t (a INT, b INT);\n"
+      "CREATE OR REPLACE ALGORITHM=MERGE DEFINER=`root`@`localhost` SQL SECURITY INVOKER\n"
+      "  VIEW v AS SELECT a FROM t WITH LOCAL CHECK OPTION;\n"
+      "CREATE VIEW v2 AS SELECT a FROM t WITH CHECK OPTION;\n"
+      "CREATE VIEW v3 AS SELECT 1;\n"
+      "DELIMITER //\n"
+      "CREATE DEFINER=root@'%' FUNCTION f(x INT) RETURNS INT DETERMINISTIC READS SQL DATA\n"
+      "  SQL SECURITY INVOKER COMMENT 'it''s' RETURN x + 1//\n"
+      "CREATE PROCEDURE p() NOT DETERMINISTIC MODIFIES SQL DATA\n"
+      "BEGIN\n  SELECT   1;  -- kept\nEND//\n"
+      "CREATE TRIGGER tr1 BEFORE INSERT ON t FOR EACH ROW SET NEW.a = 1//\n"
+      "CREATE DEFINER=CURRENT_USER TRIGGER tr2 BEFORE UPDATE ON t FOR EACH ROW PRECEDES tr1\n"
+      "BEGIN SET NEW.b = 2; END//\n"
+      "CREATE EVENT e1 ON SCHEDULE EVERY 1 HOUR STARTS '2030-01-01' ON COMPLETION NOT PRESERVE\n"
+      "  DISABLE ON SLAVE COMMENT 'ev' DO DELETE FROM t//\n"
+      "CREATE EVENT e2 ON SCHEDULE AT '2030-01-01 00:00:00' DO BEGIN SELECT 1; END//\n"
+      "DELIMITER ;\n"
+      "ALTER PROCEDURE p COMMENT 'changed' SQL SECURITY INVOKER;\n"
+      "ALTER EVENT e2 ON COMPLETION PRESERVE ENABLE;\n"
+      "CREATE SEQUENCE s1 START WITH 10 INCREMENT BY -2 MINVALUE=1 MAXVALUE 100 CACHE 5 CYCLE;\n"
+      "CREATE SEQUENCE s2 NOCACHE NOCYCLE;\n"
+      "ALTER SEQUENCE s2 INCREMENT 3;\n");
+  const Schema *sc = schema(o, "");
+  ASSERT_NE(nullptr, sc);
+  ASSERT_EQ(3u, sc->views.size());
+  EXPECT_EQ("MERGE", sc->views[0].algorithm);
+  EXPECT_EQ("INVOKER", sc->views[0].security);
+  EXPECT_EQ("root@localhost", sc->views[0].definer);
+  EXPECT_EQ("LOCAL", sc->views[0].check_option);
+  EXPECT_EQ("CASCADED", sc->views[1].check_option);
+  EXPECT_EQ("", sc->views[2].algorithm);
+  EXPECT_EQ("", sc->views[2].check_option);
+
+  ASSERT_EQ(2u, sc->routines.size());
+  const Routine &f = sc->routines[0];
+  EXPECT_EQ("RETURN x + 1", f.body);
+  EXPECT_EQ(true, f.deterministic);
+  EXPECT_EQ("READS SQL DATA", f.data_access);
+  EXPECT_EQ("INVOKER", f.security);
+  EXPECT_EQ("root@%", f.definer);
+  EXPECT_EQ("it's", f.comment);
+  const Routine &p = sc->routines[1];
+  EXPECT_EQ("BEGIN\n  SELECT   1;  -- kept\nEND", p.body);  // as written
+  EXPECT_EQ(false, p.deterministic);
+  EXPECT_EQ("MODIFIES SQL DATA", p.data_access);
+  EXPECT_EQ("INVOKER", p.security);  // ALTER PROCEDURE
+  EXPECT_EQ("changed", p.comment);
+  EXPECT_EQ("", p.definer);
+
+  ASSERT_EQ(2u, sc->triggers.size());
+  EXPECT_EQ("SET NEW.a = 1", sc->triggers[0].body);
+  EXPECT_EQ("", sc->triggers[0].order_kind);
+  EXPECT_EQ("PRECEDES", sc->triggers[1].order_kind);
+  EXPECT_EQ("tr1", sc->triggers[1].order_trigger);
+  EXPECT_EQ("CURRENT_USER", sc->triggers[1].definer);
+  EXPECT_EQ("BEGIN SET NEW.b = 2; END", sc->triggers[1].body);
+
+  ASSERT_EQ(2u, sc->events.size());
+  const Event &e1 = sc->events[0];
+  EXPECT_EQ("EVERY 1 HOUR STARTS '2030-01-01'", e1.schedule);
+  EXPECT_EQ(false, e1.on_completion_preserve);
+  EXPECT_EQ("DISABLE ON SLAVE", e1.status);
+  EXPECT_EQ("ev", e1.comment);
+  EXPECT_EQ("DELETE FROM t", e1.body);
+  const Event &e2 = sc->events[1];
+  EXPECT_EQ("AT '2030-01-01 00:00:00'", e2.schedule);  // kept by ALTER EVENT
+  EXPECT_EQ(true, e2.on_completion_preserve);
+  EXPECT_EQ("ENABLE", e2.status);
+  EXPECT_EQ(std::nullopt, e2.comment);
+  EXPECT_EQ("BEGIN SELECT 1; END", e2.body);
+
+  ASSERT_EQ(2u, sc->sequences.size());
+  const Sequence &s1 = sc->sequences[0];
+  EXPECT_EQ("10", s1.start);
+  EXPECT_EQ("-2", s1.increment);
+  EXPECT_EQ("1", s1.minvalue);
+  EXPECT_EQ("100", s1.maxvalue);
+  EXPECT_EQ("5", s1.cache);
+  EXPECT_EQ(true, s1.cycle);
+  const Sequence &s2 = sc->sequences[1];
+  EXPECT_EQ("0", s2.cache);
+  EXPECT_EQ(false, s2.cycle);
+  EXPECT_EQ("3", s2.increment);
+  EXPECT_EQ("", s2.start);
+}
+
+// Every member of format 1 is written, null when the SQL does not state it.
+TEST(Catalog, outline_json_has_the_new_members) {
+  const std::string text =
+      "CREATE TABLE t (a VARCHAR(9) CHARACTER SET utf8mb4, KEY k (a(3)));\n"
+      "CREATE TABLE c (x INT, CONSTRAINT f FOREIGN KEY fi (x) REFERENCES t (a));\n"
+      "CREATE VIEW v AS SELECT 1;\n"
+      "CREATE PROCEDURE p() SELECT 1;\n"
+      "CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW SET @a = 1;\n"
+      "CREATE EVENT e ON SCHEDULE AT '2030-01-01' DO SELECT 1;\n"
+      "CREATE SEQUENCE s;\n";
+  static Parser_pool pool(2);
+  const auto index = Statement_index::build(text);
+  const auto json = outline_json(build_outline(text, index, pool), text, Line_map(text));
+  for (const char *member :
+       {"\"type\":\"VARCHAR(9)\"", "\"charset\":\"utf8mb4\"", "\"on_update\":null",
+        "\"invisible\":false", "\"generated_storage\":null", "\"generated_row\":null",
+        "\"system_versioning\":null",
+        "\"key_parts\":[{\"column\":\"a\",\"length\":3,\"order\":null,\"expression\":null}]",
+        "\"using\":null", "\"ignored\":false", "\"without_overlaps\":null",
+        "\"name\":\"f\",", "\"index_name\":\"fi\"", "\"match\":null", "\"partitioning\":null",
+        "\"system_versioning\":false", "\"periods\":[]", "\"algorithm\":null",
+        "\"check_option\":null", "\"body\":\"SELECT 1\"", "\"deterministic\":null",
+        "\"data_access\":null", "\"order\":null", "\"update_columns\":[]",
+        "\"schedule\":\"AT '2030-01-01'\"", "\"on_completion_preserve\":null", "\"status\":null",
+        "\"start\":null", "\"cycle\":null"}) {
+    EXPECT_NE(std::string::npos, json.find(member)) << member;
+  }
 }
 
 // The grammar rule names the fold looks for must exist; a MariaDB update
