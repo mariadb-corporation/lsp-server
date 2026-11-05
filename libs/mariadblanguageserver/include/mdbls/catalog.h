@@ -69,7 +69,7 @@ struct Column {
   // "varchar(20) CHARACTER SET utf8mb4 NOT NULL DEFAULT 'x' AUTO_INCREMENT"
   std::string attributes() const;
   // The whole definition after the name: attributes() plus ON UPDATE,
-  // AS (expr) VIRTUAL|PERSISTENT|STORED and INVISIBLE.
+  // AS (expr) VIRTUAL|PERSISTENT|STORED, AS ROW START|END and INVISIBLE.
   std::string definition() const;
 };
 

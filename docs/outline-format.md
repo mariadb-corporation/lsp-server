@@ -117,7 +117,8 @@ as for `CREATE TABLE`; the column's own check goes with it (a new `CHECK` in the
 replaces it, none removes it). `CHANGE` to a new name and `RENAME COLUMN` rename the column in
 the `columns` and `key_parts` of indexes, the `columns` of foreign keys, the `column` of checks
 and the periods (expressions are not rewritten). `ALTER COLUMN ... SET DEFAULT` / `DROP
-DEFAULT` change `default` only; `DROP COLUMN` removes the column's own check too. `ALTER INDEX
+DEFAULT` change `default` only; `DROP COLUMN` removes the column's own check too, and the column from the `key_parts` of its
+indexes (an index left without key parts goes with it, as on the server). `ALTER INDEX
 i [NOT] IGNORED` sets `ignored`. `ADD INDEX`, `ADD KEY`, `ADD CONSTRAINT ... FOREIGN KEY` and
 `CREATE INDEX` fill every member, as in `CREATE TABLE`.
 

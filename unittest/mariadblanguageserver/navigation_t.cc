@@ -133,6 +133,11 @@ TEST(Navigation, hover_column_charset_and_attributes) {
          false);
   const auto h2 = d2.hover();
   EXPECT_NE(h2.find("ts TIMESTAMP ON UPDATE CURRENT_TIMESTAMP INVISIBLE"), std::string::npos) << h2;
+  Doc d3("CREATE TABLE t (rs TIMESTAMP(6) AS ROW START INVISIBLE, re TIMESTAMP(6) AS ROW END,\n"
+         "  PERIOD FOR SYSTEM_TIME (rs, re)) WITH SYSTEM VERSIONING;\nSELECT r|s FROM t;",
+         false);
+  const auto h3 = d3.hover();
+  EXPECT_NE(h3.find("rs TIMESTAMP(6) AS ROW START INVISIBLE"), std::string::npos) << h3;
 }
 
 TEST(Navigation, unqualified_column_found_in_the_right_table) {

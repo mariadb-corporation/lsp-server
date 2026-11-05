@@ -59,6 +59,11 @@ std::string unquote_string(std::string_view s) {
 // A name or a string literal without its quotes: `a`, 'a', "a" and a give a.
 std::string unquote_any(std::string_view s) { return unquote_string(unquote_identifier(s)); }
 
+// Whether `r` is the routine of `kind` (procedure, function) named `name`.
+bool is_routine(const Routine &r, std::string_view kind, std::string_view name) {
+  return r.kind == kind && iequals(r.name, name);
+}
+
 // The element of `v` (a vector, const or not) named `name`, or v.end().
 template <typename V>
 auto find_named(V &v, std::string_view name) {
@@ -136,6 +141,8 @@ std::string Column::definition() const {
   if (generated) {
     out += " AS " + *generated;  // generated holds its parentheses
     if (generated_storage) out += " " + *generated_storage;
+  } else if (generated_row) {
+    out += " AS ROW " + *generated_row;
   }
   if (invisible) out += " INVISIBLE";
   return out;
@@ -999,12 +1006,13 @@ void Catalog_fold::key_def(uint32_t n, Table &tb) {
   const std::string cname = constraint_name(child(n, s_.opt_constraint));
   uint32_t id = child(n, s_.opt_ident);
   if (id == npos || !non_empty(id)) id = child(n, s_.ident);
-  std::string name = non_empty(id) ? name_of(id) : cname;
+  // The name after KEY / FOREIGN KEY, else the CONSTRAINT name.
+  const std::string index_name = non_empty(id) ? name_of(id) : "";
+  const std::string name = index_name.empty() ? cname : index_name;
 
   if (has_child(n, s_.FOREIGN)) {
     // The constraint is named by CONSTRAINT c, else by the name after
     // FOREIGN KEY, which also names the index.
-    const std::string index_name = non_empty(id) ? name_of(id) : "";
     std::vector<std::string> cols;
     for (auto &kp : key_parts(n)) cols.push_back(std::move(kp.column));
     Foreign_key fk = references(child(n, s_.references), cname.empty() ? index_name : cname,
@@ -1168,9 +1176,8 @@ bool Catalog_fold::alter(uint32_t n) {
     const std::string name = name_of(id);
     Schema *sc = c_.find_schema(schema_name);
     if (sc == nullptr) return false;
-    auto it = std::find_if(sc->routines.begin(), sc->routines.end(), [&](const Routine &r) {
-      return r.kind == kind && iequals(r.name, name);
-    });
+    auto it = std::find_if(sc->routines.begin(), sc->routines.end(),
+                           [&](const Routine &r) { return is_routine(r, kind, name); });
     if (it == sc->routines.end()) return false;
     routine_characteristics(child(n, s_.sp_a_chistics), *it);
     return true;
@@ -1238,8 +1245,7 @@ bool Catalog_fold::alter(uint32_t n) {
       } else if (const uint32_t cc = child(item, s_.check_constraint); cc != npos) {
         // ADD CONSTRAINT IF NOT EXISTS c CHECK (...)
         const std::string cname = name_of(child(item, s_.field_ident));
-        if (std::none_of(tb->checks.begin(), tb->checks.end(),
-                         [&](const Check &k) { return iequals(k.name, cname); })) {
+        if (find_named(tb->checks, cname) == tb->checks.end()) {
           tb->checks.push_back(make_check(cc, cname, {t_.begin(child(item, s_.CONSTRAINT)), t_.end(item)}));
         }
       } else if (has_child(item, s_.VERSIONING_SYM)) {  // ADD SYSTEM VERSIONING
@@ -1294,6 +1300,11 @@ bool Catalog_fold::alter(uint32_t n) {
         auto it = find_named(tb->columns, what);
         if (it != tb->columns.end()) tb->columns.erase(it);
         drop_column_checks(*tb, what);
+        // The server drops the column from its indexes, and an index left empty.
+        for (auto &ix : tb->indexes) {
+          std::erase_if(ix.key_parts, [&](const Key_part &kp) { return iequals(kp.column, what); });
+        }
+        std::erase_if(tb->indexes, [](const Index &i) { return i.key_parts.empty(); });
       }
     } else if (first == s_.ALTER && has_child(item, s_.ignorability)) {
       // ALTER INDEX i [NOT] IGNORED
@@ -1360,7 +1371,7 @@ bool Catalog_fold::drop(uint32_t n) {
     if (sc == nullptr) return true;
     const std::string name = name_of(ids.back());
     std::erase_if(sc->routines, [&](const Routine &x) {
-      return iequals(x.name, name) && x.kind == (proc ? "procedure" : "function");
+      return is_routine(x, proc ? "procedure" : "function", name);
     });
     return true;
   }

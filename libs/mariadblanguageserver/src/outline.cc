@@ -476,13 +476,13 @@ class Json_outline {
     for (const auto &e : s.events) {
       w_.StartObject();
       str("name", e.name);
-      origin(e.origin);
       str_or_null("schedule", e.schedule);
       opt_bool("on_completion_preserve", e.on_completion_preserve);
       str_or_null("status", e.status);
       opt_str("comment", e.comment);
       str_or_null("body", e.body);
       str_or_null("definer", e.definer);
+      origin(e.origin);
       w_.EndObject();
     }
     w_.EndArray();
@@ -491,7 +491,6 @@ class Json_outline {
     for (const auto &q : s.sequences) {
       w_.StartObject();
       str("name", q.name);
-      origin(q.origin);
       str_or_null("type", q.type);
       str_or_null("start", q.start);
       str_or_null("increment", q.increment);
@@ -500,6 +499,7 @@ class Json_outline {
       str_or_null("cache", q.cache);
       opt_bool("cycle", q.cycle);
       options(q.options);
+      origin(q.origin);
       w_.EndObject();
     }
     w_.EndArray();

@@ -332,6 +332,20 @@ TEST(Catalog, column_check_is_a_table_check) {
   EXPECT_TRUE(t2->checks.empty());
 }
 
+// DROP COLUMN takes the column out of its indexes; an index left without
+// key parts goes with it, as on the server.
+TEST(Catalog, drop_column_leaves_its_indexes) {
+  const auto o = outline_of(
+      "CREATE TABLE t (a INT, b INT, KEY k (a, b), KEY ka (a), UNIQUE u (b));\n"
+      "ALTER TABLE t DROP COLUMN a;\n");
+  const Table *t = table(o, "", "t");
+  ASSERT_NE(nullptr, t);
+  ASSERT_EQ(2u, t->indexes.size());
+  EXPECT_EQ("k", t->indexes[0].name);
+  EXPECT_EQ(std::vector<std::string>{"b"}, t->indexes[0].columns());
+  EXPECT_EQ("u", t->indexes[1].name);
+}
+
 TEST(Catalog, index_details) {
   const auto o = outline_of(
       "CREATE TABLE t (a VARCHAR(20), b INT, g GEOMETRY NOT NULL, s DATE, e DATE, txt TEXT,\n"
