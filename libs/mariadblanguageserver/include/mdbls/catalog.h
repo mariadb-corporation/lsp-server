@@ -66,8 +66,11 @@ struct Column {
   // Engine-defined attributes (ENCRYPTED=YES): lower-cased name, value as written.
   std::vector<std::pair<std::string, std::string>> options;
 
-  // "varchar(20) NOT NULL DEFAULT 'x' AUTO_INCREMENT"
+  // "varchar(20) CHARACTER SET utf8mb4 NOT NULL DEFAULT 'x' AUTO_INCREMENT"
   std::string attributes() const;
+  // The whole definition after the name: attributes() plus ON UPDATE,
+  // AS (expr) VIRTUAL|PERSISTENT|STORED and INVISIBLE.
+  std::string definition() const;
 };
 
 struct Key_part {
@@ -80,7 +83,6 @@ struct Key_part {
 struct Index {
   std::string name;                    // "" when unnamed
   std::string kind;                    // primary, unique, index, fulltext, spatial, vector
-  std::vector<std::string> columns;
   Origin origin;
   std::vector<Key_part> key_parts;
   std::string using_;                  // BTREE, HASH, RTREE, or ""
@@ -90,9 +92,10 @@ struct Index {
   // key_block_size, parser, engine-defined options: value as written.
   std::vector<std::pair<std::string, std::string>> options;
 
-  // An index on whole columns, as a column's PRIMARY KEY or UNIQUE makes.
-  static Index on(std::string name, std::string kind, std::vector<std::string> columns,
-                  Origin origin);
+  // The key parts' columns.
+  std::vector<std::string> columns() const;
+  // An index on one whole column, as a column's PRIMARY KEY or UNIQUE makes.
+  static Index on(std::string kind, const std::string &column, Origin origin);
 };
 
 struct Foreign_key {

@@ -229,7 +229,7 @@ TEST(Catalog, named_key_replaces_its_namesake) {
   ASSERT_NE(nullptr, t);
   ASSERT_EQ(3u, t->indexes.size());  // k once, the two unnamed keys both kept
   EXPECT_EQ("k", t->indexes[0].name);
-  EXPECT_EQ(std::vector<std::string>{"b"}, t->indexes[0].columns);
+  EXPECT_EQ(std::vector<std::string>{"b"}, t->indexes[0].columns());
 }
 
 TEST(Catalog, notes_for_what_cannot_be_applied) {
@@ -288,6 +288,20 @@ TEST(Catalog, column_attributes) {
   EXPECT_EQ("START", c[13].generated_row);
   EXPECT_EQ("END", c[14].generated_row);
   EXPECT_EQ(std::nullopt, c[13].generated);
+  // Completion shows attributes(), hover definition(): both keep CHARACTER SET and COLLATE.
+  EXPECT_EQ("VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL", c[0].attributes());
+  EXPECT_EQ("TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) INVISIBLE",
+            c[1].definition());
+  EXPECT_EQ("INT AS (a + 1) PERSISTENT", c[2].definition());
+}
+
+TEST(Catalog, quoted_collation_reads_alike_everywhere) {
+  const auto o = outline_of("CREATE TABLE t (a CHAR(1) COLLATE 'utf8mb4_bin', b CHAR(1) NOT NULL COLLATE 'utf8mb4_bin');\n");
+  const Table *t = table(o, "", "t");
+  ASSERT_NE(nullptr, t);
+  ASSERT_EQ(2u, t->columns.size());
+  EXPECT_EQ("utf8mb4_bin", t->columns[0].collation);
+  EXPECT_EQ("utf8mb4_bin", t->columns[1].collation);
 }
 
 TEST(Catalog, column_check_is_a_table_check) {
@@ -333,7 +347,7 @@ TEST(Catalog, index_details) {
   ASSERT_NE(nullptr, t);
   ASSERT_EQ(7u, t->indexes.size());
   const Index &k1 = t->indexes[0];
-  EXPECT_EQ((std::vector<std::string>{"a", "b"}), k1.columns);
+  EXPECT_EQ((std::vector<std::string>{"a", "b"}), k1.columns());
   ASSERT_EQ(2u, k1.key_parts.size());
   EXPECT_EQ("a", k1.key_parts[0].column);
   EXPECT_EQ(10u, k1.key_parts[0].length);
@@ -352,10 +366,10 @@ TEST(Catalog, index_details) {
   EXPECT_EQ("8", k2.options[0].second);
   const Index &sg = t->indexes[2];
   EXPECT_EQ("spatial", sg.kind);
-  EXPECT_EQ(std::vector<std::string>{"g"}, sg.columns);
+  EXPECT_EQ(std::vector<std::string>{"g"}, sg.columns());
   ASSERT_EQ(1u, sg.key_parts.size());
   EXPECT_EQ("p", t->indexes[3].without_overlaps);
-  EXPECT_EQ(std::vector<std::string>{"b"}, t->indexes[3].columns);
+  EXPECT_EQ(std::vector<std::string>{"b"}, t->indexes[3].columns());
   ASSERT_EQ(1u, t->indexes[4].options.size());
   EXPECT_EQ("parser", t->indexes[4].options[0].first);
   EXPECT_EQ("ngram", t->indexes[4].options[0].second);
@@ -461,7 +475,7 @@ TEST(Catalog, alter_keeps_column_members) {
   EXPECT_EQ("VIRTUAL", g.generated_storage);
   EXPECT_TRUE(g.invisible);
   ASSERT_EQ(1u, t->indexes.size());
-  EXPECT_EQ(std::vector<std::string>{"a2"}, t->indexes[0].columns);  // follows the rename
+  EXPECT_EQ(std::vector<std::string>{"a2"}, t->indexes[0].columns());  // follows the rename
   EXPECT_EQ("a2", t->indexes[0].key_parts[0].column);
 }
 

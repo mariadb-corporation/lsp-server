@@ -163,11 +163,10 @@ void document_symbols(Json_writer &w, const Snapshot &s, const Outline &outline)
                               [&] {
                                 for (const auto &col : t.columns)
                                   out.symbol(col.name, col.type, k_field, col.origin);
-                                for (const auto &ix : t.indexes)
-                                  out.symbol(ix.name.empty() ? ix.kind + " (" + join(ix.columns) + ")"
-                                                             : ix.name,
-                                             ix.kind + " (" + join(ix.columns) + ")", k_key,
-                                             ix.origin);
+                                for (const auto &ix : t.indexes) {
+                                  const std::string detail = ix.kind + " (" + join(ix.columns()) + ")";
+                                  out.symbol(ix.name.empty() ? detail : ix.name, detail, k_key, ix.origin);
+                                }
                                 for (const auto &fk : t.foreign_keys)
                                   out.symbol(fk.name.empty() ? "foreign key (" + join(fk.columns) + ")"
                                                              : fk.name,

@@ -105,22 +105,39 @@ Column *Table::column(std::string_view n) {
   return it == columns.end() ? nullptr : &*it;
 }
 
-Index Index::on(std::string name, std::string kind, std::vector<std::string> columns,
-                 Origin origin) {
+Index Index::on(std::string kind, const std::string &column, Origin origin) {
   Index ix;
-  ix.name = std::move(name);
   ix.kind = std::move(kind);
-  ix.columns = std::move(columns);
   ix.origin = origin;
-  for (const auto &c : ix.columns) ix.key_parts.push_back(Key_part{c, std::nullopt, "", std::nullopt});
+  ix.key_parts.emplace_back().column = column;
   return ix;
+}
+
+std::vector<std::string> Index::columns() const {
+  std::vector<std::string> out;
+  out.reserve(key_parts.size());
+  for (const auto &kp : key_parts) out.push_back(kp.column);
+  return out;
 }
 
 std::string Column::attributes() const {
   std::string out = type;
+  if (charset) out += " CHARACTER SET " + *charset;
+  if (collation) out += " COLLATE " + *collation;
   if (!nullable) out += " NOT NULL";
   if (default_value) out += " DEFAULT " + *default_value;
   if (auto_increment) out += " AUTO_INCREMENT";
+  return out;
+}
+
+std::string Column::definition() const {
+  std::string out = attributes();
+  if (on_update) out += " ON UPDATE " + *on_update;
+  if (generated) {
+    out += " AS " + *generated;  // generated holds its parentheses
+    if (generated_storage) out += " " + *generated_storage;
+  }
+  if (invisible) out += " INVISIBLE";
   return out;
 }
 
@@ -303,6 +320,12 @@ class Catalog_fold {
     return i < ch.size() ? ch[i] : npos;
   }
   bool non_empty(uint32_t n) const { return n != npos && t_.node(n).token_count > 0; }
+  // The text from offset `from` to the end of node `to`, blanks collapsed.
+  std::string text_span(uint32_t from, uint32_t to) const {
+    return collapse(text_.substr(from, t_.end(to) - from));
+  }
+  // A charset or collation name: unquoted, lower-cased.
+  std::string charset_name(uint32_t n) const { return lower(unquote_any(text(n))); }
 
   // schema.name of a table_ident / sp_name (ident '.' ident | ident | '.' ident)
   std::pair<std::string, uint32_t> qualified(uint32_t n) const {
@@ -334,7 +357,8 @@ class Catalog_fold {
   void routine_characteristics(uint32_t n, Routine &r) const;
   void event_details(uint32_t holder, uint32_t body, Event &e) const;
   void sequence_options(uint32_t n, Sequence &q) const;
-  void column_check(uint32_t field_spec, const std::string &column, Table &t);
+  Check make_check(uint32_t check_constraint, std::string name, Range def) const;
+  void column_check(uint32_t field_spec, const std::string &column, Table &t) const;
   void add_period(uint32_t n, Table &t);
   static void rename_column_refs(Table &t, const std::string &from, const std::string &to);
   void engine_option(uint32_t n, std::vector<std::pair<std::string, std::string>> &opts) const;
@@ -343,12 +367,10 @@ class Catalog_fold {
   Column column(uint32_t field_spec, Table &t);
   void key_def(uint32_t n, Table &t);
   void check_def(uint32_t n, Table &t);
-  std::vector<std::string> key_columns(uint32_t key_list) const;
   Foreign_key references(uint32_t refs, std::string name, std::vector<std::string> columns,
                          uint32_t at) const;
   std::string constraint_name(uint32_t opt_constraint) const;
-  void table_options(uint32_t n, std::vector<std::pair<std::string, std::string>> &opts,
-                     Table *table = nullptr);
+  bool table_options(uint32_t n, std::vector<std::pair<std::string, std::string>> &opts);
   static void set_option(std::vector<std::pair<std::string, std::string>> &opts,
                          const std::string &key, std::string value);
 
@@ -526,6 +548,7 @@ std::string Catalog_fold::text_without(uint32_t n, const std::vector<uint32_t> &
   for (const uint32_t c : cut) {
     if (non_empty(c)) rs.push_back(range(c));
   }
+  if (rs.empty()) return text(n);
   std::sort(rs.begin(), rs.end(), [](const Range &a, const Range &b) { return a.begin < b.begin; });
   std::string out;
   uint32_t at = t_.begin(n);
@@ -579,7 +602,7 @@ std::vector<Key_part> Catalog_fold::key_parts(uint32_t n) const {
   const uint32_t list = child(n, s_.key_list);
   if (list == npos) {  // SPATIAL / VECTOR: one key_part_simple
     if (const uint32_t kp = child(n, s_.key_part_simple); kp != npos) {
-      out.push_back(Key_part{name_of(find(kp, s_.ident)), std::nullopt, "", std::nullopt});
+      out.emplace_back().column = name_of(find(kp, s_.ident));
     }
     return out;
   }
@@ -602,8 +625,6 @@ std::vector<Key_part> Catalog_fold::key_parts(uint32_t n) const {
 // CREATE INDEX node.
 void Catalog_fold::index_details(uint32_t n, Index &ix) const {
   ix.key_parts = key_parts(n);
-  ix.columns.clear();
-  for (const auto &kp : ix.key_parts) ix.columns.push_back(kp.column);
   if (const uint32_t b = find(n, s_.btree_or_rtree); b != npos) ix.using_ = upper(text(b));
   if (const uint32_t wo = child(n, s_.opt_without_overlaps); non_empty(wo)) {
     ix.without_overlaps = name_of(child(wo, s_.ident));
@@ -671,7 +692,7 @@ void Catalog_fold::sequence_options(uint32_t n, Sequence &q) const {
     const int first = t_.node(ch[0]).symbol;
     const std::string value = text(ch.back());
     if (first == s_.AS) {
-      q.type = collapse(text_.substr(t_.begin(ch[1]), t_.end(d) - t_.begin(ch[1])));
+      q.type = text_span(t_.begin(ch[1]), d);
     } else if (first == s_.MINVALUE_SYM) {
       q.minvalue = value;
     } else if (first == s_.MAXVALUE_SYM) {
@@ -696,41 +717,46 @@ void Catalog_fold::sequence_options(uint32_t n, Sequence &q) const {
   }
 }
 
-// A column-level CHECK (expr) of `field_spec`, as a check of the table.
-void Catalog_fold::column_check(uint32_t spec, const std::string &column, Table &tb) {
-  const uint32_t cc = child(child(spec, s_.opt_check_constraint), s_.check_constraint);
-  if (cc == npos) return;
+// The CHECK (expr) of a check_constraint node; `def` is its whole definition.
+Check Catalog_fold::make_check(uint32_t cc, std::string name, Range def) const {
   Check ck;
+  ck.name = std::move(name);
   const uint32_t e = find(cc, s_.expr);
   ck.expression = text(e != npos ? e : cc);
-  ck.origin = origin(range(cc), range(cc));
+  ck.origin = origin(def, def);
+  return ck;
+}
+
+// Drops the column-level CHECK of `column`.
+static void drop_column_checks(Table &tb, const std::string &column) {
+  std::erase_if(tb.checks, [&](const Check &k) { return !k.column.empty() && iequals(k.column, column); });
+}
+
+// A column-level CHECK (expr) of `field_spec`, as a check of the table.
+void Catalog_fold::column_check(uint32_t spec, const std::string &column, Table &tb) const {
+  const uint32_t cc = child(child(spec, s_.opt_check_constraint), s_.check_constraint);
+  if (cc == npos) return;
+  Check ck = make_check(cc, "", range(cc));
   ck.column = column;
   tb.checks.push_back(std::move(ck));
 }
 
 // PERIOD FOR SYSTEM_TIME (s, e) or PERIOD FOR p (s, e) in `n`.
 void Catalog_fold::add_period(uint32_t n, Table &tb) {
-  Period p;
+  uint32_t node = child(n, s_.period_for_system_time);
+  const bool system_time = node != npos;
+  if (!system_time) node = child(n, s_.period_for_application_time);
+  if (node == npos) return;
   std::vector<uint32_t> ids;
-  if (const uint32_t ps = child(n, s_.period_for_system_time); ps != npos) {
-    p.name = "SYSTEM_TIME";
-    for (const uint32_t c : t_.children(ps)) {
-      if (t_.node(c).symbol == s_.ident) ids.push_back(c);
-    }
-    if (ids.size() < 2) return;
-    p.start = name_of(ids[0]);
-    p.end = name_of(ids[1]);
-  } else if (const uint32_t pa = child(n, s_.period_for_application_time); pa != npos) {
-    for (const uint32_t c : t_.children(pa)) {
-      if (t_.node(c).symbol == s_.ident) ids.push_back(c);
-    }
-    if (ids.size() < 3) return;
-    p.name = name_of(ids[0]);
-    p.start = name_of(ids[1]);
-    p.end = name_of(ids[2]);
-  } else {
-    return;
+  for (const uint32_t c : t_.children(node)) {
+    if (t_.node(c).symbol == s_.ident) ids.push_back(c);
   }
+  const size_t at = system_time ? 0 : 1;  // the application period's name comes first
+  if (ids.size() < at + 2) return;
+  Period p;
+  p.name = system_time ? "SYSTEM_TIME" : name_of(ids[0]);
+  p.start = name_of(ids[at]);
+  p.end = name_of(ids[at + 1]);
   upsert_named(tb.periods, std::move(p));
 }
 
@@ -741,7 +767,6 @@ void Catalog_fold::rename_column_refs(Table &tb, const std::string &from, const 
     if (iequals(s, from)) s = to;
   };
   for (auto &ix : tb.indexes) {
-    for (auto &c : ix.columns) fix(c);
     for (auto &kp : ix.key_parts) fix(kp.column);
   }
   for (auto &fk : tb.foreign_keys) {
@@ -764,29 +789,26 @@ bool Catalog_fold::create_table(uint32_t n) {
   }
 
   Table tb;
-  tb.name = name;
-  tb.temporary = non_empty(child(n, s_.opt_temporary));
-  tb.origin = origin(id);
   const uint32_t body = child(n, s_.create_body);
   if (const uint32_t like = child(body, s_.create_like); like != npos) {
     auto [src_schema, src_id] = qualified(find(like, s_.table_ident));
-    if (Table *src = c_.schema(src_schema).table(name_of(src_id))) {
-      tb.columns = src->columns;
-      tb.indexes = src->indexes;
-      tb.checks = src->checks;
-      tb.options = src->options;
-      tb.partitioning = src->partitioning;
-      tb.system_versioning = src->system_versioning;
-      tb.periods = src->periods;
+    if (const Table *src = c_.schema(src_schema).table(name_of(src_id))) {
+      // Everything but the name, foreign keys and where it was written.
+      tb = *src;
+      tb.foreign_keys.clear();
+      tb.stub = false;
     } else {
       c_.m_notes.push_back({stmt_.begin, "CREATE TABLE ... LIKE " + name_of(src_id) +
                                              ", which the script does not create"});
     }
   }
+  tb.name = name;
+  tb.temporary = non_empty(child(n, s_.opt_temporary));
+  tb.origin = origin(id);
   if (const uint32_t list = child(body, s_.create_field_list_parens); list != npos) {
     field_list_items(list, tb);
   }
-  table_options(child(body, s_.opt_create_table_options), tb.options, &tb);
+  if (table_options(child(body, s_.opt_create_table_options), tb.options)) tb.system_versioning = true;
   if (const uint32_t p = find(child(body, s_.opt_create_partitioning), s_.partitioning); p != npos) {
     tb.partitioning = text(p);
   }
@@ -826,7 +848,7 @@ Column Catalog_fold::column(uint32_t spec, Table &tb) {
         if (sym == s_.charset_or_alias) {
           cut.push_back(ch);
           if (const uint32_t cn = child(ch, s_.charset_name); cn != npos) {
-            c.charset = lower(unquote_any(text(cn)));
+            c.charset = charset_name(cn);
           } else if (has_child(ch, s_.ASCII_SYM)) {
             c.charset = "latin1";
           } else if (has_child(ch, s_.UNICODE_SYM)) {
@@ -837,7 +859,7 @@ Column Catalog_fold::column(uint32_t spec, Table &tb) {
           after_collate = true;
         } else if (after_collate && sym == s_.collation_name) {
           cut.push_back(ch);
-          c.collation = lower(unquote_any(text(ch)));
+          c.collation = charset_name(ch);
         } else if (after_collate && sym == s_.DEFAULT) {
           cut.push_back(ch);
           c.collation = "default";
@@ -881,10 +903,9 @@ Column Catalog_fold::column(uint32_t spec, Table &tb) {
         c.auto_increment = true;
         c.nullable = false;
       } else if (first == s_.COLLATE_SYM) {
-        c.collation = lower(text(child(x, s_.collation_name)));
+        c.collation = charset_name(child(x, s_.collation_name));
       } else if (first == s_.ON) {  // ON UPDATE CURRENT_TIMESTAMP[(n)]
-        const uint32_t now = child(x, s_.NOW_SYM);
-        c.on_update = collapse(text_.substr(t_.begin(now), t_.end(x) - t_.begin(now)));
+        c.on_update = text_span(t_.begin(child(x, s_.NOW_SYM)), x);
       }
     } else if (sym == s_.serial_attribute) {
       if (const uint32_t w = child(x, s_.with_or_without_system); w != npos) {
@@ -897,12 +918,12 @@ Column Catalog_fold::column(uint32_t spec, Table &tb) {
       if (has_child(x, s_.NULL_SYM)) {
         c.nullable = false;  // NOT NULL
       } else if (has_child(x, s_.KEY_SYM)) {  // [PRIMARY] KEY
-        tb.indexes.push_back(Index::on("", "primary", {c.name}, c.origin));
+        tb.indexes.push_back(Index::on("primary", c.name, c.origin));
         c.nullable = false;
       }
     } else if (sym == s_.vcol_attribute) {
       if (has_child(x, s_.UNIQUE_SYM)) {
-        tb.indexes.push_back(Index::on("", "unique", {c.name}, c.origin));
+        tb.indexes.push_back(Index::on("unique", c.name, c.origin));
       } else if (const uint32_t cm = child(x, s_.TEXT_STRING_sys); cm != npos) {
         c.comment = unquote_string(raw(cm));
       } else if (has_child(x, s_.INVISIBLE_SYM)) {
@@ -918,7 +939,7 @@ Column Catalog_fold::column(uint32_t spec, Table &tb) {
 void Catalog_fold::column_def(uint32_t n, Table &tb, std::optional<size_t> at) {
   const uint32_t spec = child(n, s_.field_spec);
   Column c = column(spec, tb);
-  std::erase_if(tb.checks, [&](const Check &k) { return !k.column.empty() && iequals(k.column, c.name); });
+  if (tb.column(c.name) != nullptr) drop_column_checks(tb, c.name);  // redefined
   column_check(spec, c.name, tb);
   if (const uint32_t refs = child(n, s_.references); refs != npos) {
     tb.foreign_keys.push_back(
@@ -936,15 +957,6 @@ void Catalog_fold::column_def(uint32_t n, Table &tb, std::optional<size_t> at) {
 std::string Catalog_fold::constraint_name(uint32_t opt_constraint) const {
   const uint32_t c = child(opt_constraint, s_.constraint);
   return c == npos ? "" : name_of(child(c, s_.opt_ident));
-}
-
-std::vector<std::string> Catalog_fold::key_columns(uint32_t key_list) const {
-  std::vector<std::string> cols;
-  for (const uint32_t part : find_all(key_list, s_.key_part)) {
-    const uint32_t id = find(part, s_.ident);
-    cols.push_back(id != npos ? name_of(id) : text(part));
-  }
-  return cols;
 }
 
 Foreign_key Catalog_fold::references(uint32_t refs, std::string name,
@@ -988,13 +1000,15 @@ void Catalog_fold::key_def(uint32_t n, Table &tb) {
   uint32_t id = child(n, s_.opt_ident);
   if (id == npos || !non_empty(id)) id = child(n, s_.ident);
   std::string name = non_empty(id) ? name_of(id) : cname;
-  const auto cols = key_columns(child(n, s_.key_list));
 
   if (has_child(n, s_.FOREIGN)) {
     // The constraint is named by CONSTRAINT c, else by the name after
     // FOREIGN KEY, which also names the index.
     const std::string index_name = non_empty(id) ? name_of(id) : "";
-    Foreign_key fk = references(child(n, s_.references), cname.empty() ? index_name : cname, cols, n);
+    std::vector<std::string> cols;
+    for (auto &kp : key_parts(n)) cols.push_back(std::move(kp.column));
+    Foreign_key fk = references(child(n, s_.references), cname.empty() ? index_name : cname,
+                                std::move(cols), n);
     fk.index_name = index_name;
     fk.origin = origin(range(n), non_empty(id) ? range(id) : range(n));
     auto it = find_named(tb.foreign_keys, fk.name);
@@ -1016,8 +1030,8 @@ void Catalog_fold::key_def(uint32_t n, Table &tb) {
     ix.kind = "index";
   }
   if (ix.kind == "primary") {
-    for (const auto &c : ix.columns) {
-      if (Column *col = tb.column(c)) col->nullable = false;
+    for (const auto &kp : ix.key_parts) {
+      if (Column *col = tb.column(kp.column)) col->nullable = false;
     }
     auto it = std::find_if(tb.indexes.begin(), tb.indexes.end(),
                            [](const Index &i) { return i.kind == "primary"; });
@@ -1036,18 +1050,14 @@ void Catalog_fold::key_def(uint32_t n, Table &tb) {
 }
 
 void Catalog_fold::check_def(uint32_t n, Table &tb) {
-  Check ck;
-  ck.name = constraint_name(child(n, s_.opt_constraint));
-  const uint32_t cc = child(n, s_.check_constraint);
-  const uint32_t e = find(cc, s_.expr);
-  ck.expression = text(e != npos ? e : cc);
-  ck.origin = origin(range(n), range(n));
-  tb.checks.push_back(std::move(ck));
+  tb.checks.push_back(make_check(child(n, s_.check_constraint),
+                                 constraint_name(child(n, s_.opt_constraint)), range(n)));
 }
 
-void Catalog_fold::table_options(uint32_t n,
-                                 std::vector<std::pair<std::string, std::string>> &opts,
-                                 Table *table) {
+// Returns whether the options hold WITH SYSTEM VERSIONING.
+bool Catalog_fold::table_options(uint32_t n,
+                                 std::vector<std::pair<std::string, std::string>> &opts) {
+  bool versioning = false;
   for (const uint32_t o : find_all(n, s_.create_table_option)) {
     const auto ch = t_.children(o);
     if (ch.empty()) continue;
@@ -1062,7 +1072,7 @@ void Catalog_fold::table_options(uint32_t n,
     } else if (sym == s_.ENGINE_SYM) {
       set_option(opts, "engine", unquote_string(text(ch.back())));
     } else if (sym == s_.versioning_option) {
-      if (table != nullptr) table->system_versioning = true;
+      versioning = true;
     } else if (sym == s_.engine_defined_option) {
       engine_option(first, opts);
     } else if (t_.is_token(first)) {
@@ -1071,14 +1081,11 @@ void Catalog_fold::table_options(uint32_t n,
       for (size_t i = 0; i < ch.size(); ++i) {
         if (t_.node(ch[i]).symbol == s_.opt_equal) from = i + 1;
       }
-      std::string value = text(ch.back());
-      if (from < ch.size()) {
-        const uint32_t b = t_.begin(ch[from]);
-        value = collapse(text_.substr(b, t_.end(o) - b));
-      }
-      set_option(opts, lower(raw(first)), std::move(value));
+      set_option(opts, lower(raw(first)),
+                 from < ch.size() ? text_span(t_.begin(ch[from]), o) : text(ch.back()));
     }
   }
+  return versioning;
 }
 
 bool Catalog_fold::create_routine(uint32_t n) {
@@ -1126,7 +1133,7 @@ bool Catalog_fold::create_routine(uint32_t n) {
     const uint32_t nm = find(p, s_.sp_param_name_and_mode);
     prm.mode = upper(text(child(nm, s_.sp_parameter_type)));
     prm.name = name_of(find(nm, s_.ident));
-    prm.type = collapse(text_.substr(t_.end(nm), t_.end(p) - t_.end(nm)));
+    prm.type = text_span(t_.end(nm), p);
     r.parameters.push_back(std::move(prm));
   }
   Schema &sc = c_.schema(schema_name);
@@ -1158,10 +1165,11 @@ bool Catalog_fold::alter(uint32_t n) {
   if (has_child(n, s_.PROCEDURE_SYM) || has_child(n, s_.FUNCTION_SYM)) {
     auto [schema_name, id] = qualified(child(n, s_.sp_name));
     const char *kind = has_child(n, s_.PROCEDURE_SYM) ? "procedure" : "function";
+    const std::string name = name_of(id);
     Schema *sc = c_.find_schema(schema_name);
     if (sc == nullptr) return false;
     auto it = std::find_if(sc->routines.begin(), sc->routines.end(), [&](const Routine &r) {
-      return r.kind == kind && iequals(r.name, name_of(id));
+      return r.kind == kind && iequals(r.name, name);
     });
     if (it == sc->routines.end()) return false;
     routine_characteristics(child(n, s_.sp_a_chistics), *it);
@@ -1232,13 +1240,7 @@ bool Catalog_fold::alter(uint32_t n) {
         const std::string cname = name_of(child(item, s_.field_ident));
         if (std::none_of(tb->checks.begin(), tb->checks.end(),
                          [&](const Check &k) { return iequals(k.name, cname); })) {
-          Check ck;
-          ck.name = cname;
-          const uint32_t e = find(cc, s_.expr);
-          ck.expression = text(e != npos ? e : cc);
-          const Range def{t_.begin(child(item, s_.CONSTRAINT)), t_.end(item)};
-          ck.origin = origin(def, def);
-          tb->checks.push_back(std::move(ck));
+          tb->checks.push_back(make_check(cc, cname, {t_.begin(child(item, s_.CONSTRAINT)), t_.end(item)}));
         }
       } else if (has_child(item, s_.VERSIONING_SYM)) {  // ADD SYSTEM VERSIONING
         tb->system_versioning = true;
@@ -1250,7 +1252,7 @@ bool Catalog_fold::alter(uint32_t n) {
       Column c = column(spec, *tb);
       const std::string old = first == s_.CHANGE ? name_of(child(item, s_.field_ident)) : c.name;
       // The column's own CHECK is part of its definition.
-      std::erase_if(tb->checks, [&](const Check &k) { return !k.column.empty() && iequals(k.column, old); });
+      drop_column_checks(*tb, old);
       column_check(spec, c.name, *tb);
       rename_column_refs(*tb, old, c.name);
       auto it = find_named(tb->columns, old);
@@ -1291,7 +1293,7 @@ bool Catalog_fold::alter(uint32_t n) {
       } else if (!what.empty()) {
         auto it = find_named(tb->columns, what);
         if (it != tb->columns.end()) tb->columns.erase(it);
-        std::erase_if(tb->checks, [&](const Check &k) { return !k.column.empty() && iequals(k.column, what); });
+        drop_column_checks(*tb, what);
       }
     } else if (first == s_.ALTER && has_child(item, s_.ignorability)) {
       // ALTER INDEX i [NOT] IGNORED
@@ -1332,7 +1334,7 @@ bool Catalog_fold::alter(uint32_t n) {
         set_option(tb->options, "collation", lower(text(co)));
       }
     } else if (first == s_.create_table_options_space_separated) {
-      table_options(ch[0], tb->options, tb);
+      if (table_options(ch[0], tb->options)) tb->system_versioning = true;
     }
   }
   const uint32_t cmds = child(n, s_.alter_commands);

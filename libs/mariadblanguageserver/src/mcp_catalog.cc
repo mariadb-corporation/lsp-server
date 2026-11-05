@@ -180,7 +180,7 @@ void read_constraints(const Json &details, Table &t) {
       ix.kind = kind;
       t.indexes.push_back(std::move(ix));
     }
-    if (const auto column = nonempty(r, "column_name")) t.indexes.back().columns.push_back(*column);
+    if (const auto column = nonempty(r, "column_name")) t.indexes.back().key_parts.emplace_back().column = *column;
   }
 }
 

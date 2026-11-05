@@ -268,7 +268,7 @@ std::optional<Live_snapshot> fetch_live_catalog(const Connection_uri &uri, std::
                                            : "index";
             t->indexes.push_back(std::move(ix));
           }
-          t->indexes.back().columns.push_back(str(r, 5));
+          t->indexes.back().key_parts.emplace_back().column = str(r, 5);
         });
     run("SELECT k.TABLE_SCHEMA, k.TABLE_NAME, k.CONSTRAINT_NAME, k.COLUMN_NAME, "
         "k.REFERENCED_TABLE_SCHEMA, k.REFERENCED_TABLE_NAME, k.REFERENCED_COLUMN_NAME, "

@@ -198,7 +198,7 @@ TEST(Mcp_catalog, details_fill_the_stubs_asked_for) {
   EXPECT_TRUE(item->columns[2].nullable);
   ASSERT_EQ(item->indexes.size(), 2u);
   EXPECT_EQ(item->indexes[0].kind, "primary");
-  EXPECT_EQ(item->indexes[0].columns, std::vector<std::string>{"id"});
+  EXPECT_EQ(item->indexes[0].columns(), std::vector<std::string>{"id"});
   EXPECT_EQ(item->indexes[1].kind, "unique");
   EXPECT_EQ(item->options, (std::vector<std::pair<std::string, std::string>>{{"comment", "for sale"}}));
   EXPECT_TRUE(item->foreign_keys.empty());

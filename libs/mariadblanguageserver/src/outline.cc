@@ -263,6 +263,14 @@ class Json_outline {
       w_.Null();
     }
   }
+  void opt_uint(const char *key, const std::optional<uint32_t> &v) {
+    w_.Key(key);
+    if (v) {
+      w_.Uint(*v);
+    } else {
+      w_.Null();
+    }
+  }
   void boolean(const char *key, bool v) {
     w_.Key(key);
     w_.Bool(v);
@@ -317,18 +325,13 @@ class Json_outline {
       w_.StartObject();
       str_or_null("name", i.name);
       str("kind", i.kind);
-      strings("columns", i.columns);
+      strings("columns", i.columns());
       w_.Key("key_parts");
       w_.StartArray();
       for (const auto &kp : i.key_parts) {
         w_.StartObject();
         str("column", kp.column);
-        w_.Key("length");
-        if (kp.length) {
-          w_.Uint(*kp.length);
-        } else {
-          w_.Null();
-        }
+        opt_uint("length", kp.length);
         str_or_null("order", kp.order);
         opt_str("expression", kp.expression);
         w_.EndObject();

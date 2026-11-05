@@ -39,19 +39,7 @@ std::string qualified(const std::string &schema, const std::string &name) {
   return (schema.empty() ? std::string() : "`" + schema + "`.") + "`" + name + "`";
 }
 
-std::string column_line(const Column &c) {
-  std::string s = quote_identifier(c.name) + " " + c.type;
-  if (c.charset) s += " CHARACTER SET " + *c.charset;
-  if (c.collation) s += " COLLATE " + *c.collation;
-  s += c.attributes().substr(c.type.size());
-  if (c.on_update) s += " ON UPDATE " + *c.on_update;
-  if (c.generated) {
-    s += " AS (" + *c.generated + ")";
-    if (c.generated_storage) s += " " + *c.generated_storage;
-  }
-  if (c.invisible) s += " INVISIBLE";
-  return s;
-}
+std::string column_line(const Column &c) { return quote_identifier(c.name) + " " + c.definition(); }
 
 const char *layer_text(const Catalog_layer *l) {
   if (l == nullptr) return nullptr;
@@ -338,7 +326,7 @@ std::string hover_markdown(const Resolution &r) {
     out += "\n```sql\n";
     for (const auto &c : t.columns) out += column_line(c) + "\n";
     for (const auto &ix : t.indexes) {
-      const std::string cols = join(ix.columns);
+      const std::string cols = join(ix.columns());
       out += (ix.kind == "primary" ? std::string("PRIMARY KEY")
                                    : upper(ix.kind == "index" ? "key" : ix.kind + " key") +
                                          (ix.name.empty() ? "" : " " + quote_identifier(ix.name))) +
