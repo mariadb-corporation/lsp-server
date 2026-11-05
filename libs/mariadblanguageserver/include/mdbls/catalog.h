@@ -45,6 +45,32 @@ struct Origin {
   uint32_t source = 0;
 };
 
+// Why a statement is listed under Outline::notes.  to_string() gives the
+// `kind` of the outline JSON; docs/outline-format.md lists them all, and a
+// test checks that it does.
+enum class Note_kind {
+  syntax_error,          // not applied: the statement has a syntax error
+  unsupported_sql_mode,  // not applied: an sql_mode the parser does not support
+  unknown_table,         // ALTER TABLE, CREATE INDEX (not applied) or CREATE TABLE ... LIKE
+                         // (applied) of a table the file does not create
+  include_unreadable,    // not applied: a SOURCE file that cannot be read
+  include_nested,        // not applied: a SOURCE directive in an included text
+};
+constexpr Note_kind k_note_kinds[] = {Note_kind::syntax_error, Note_kind::unsupported_sql_mode,
+                                      Note_kind::unknown_table, Note_kind::include_unreadable,
+                                      Note_kind::include_nested};
+const char *to_string(Note_kind kind);
+
+// A remark on one statement: what the fold could not read, or applied with
+// a reservation.
+struct Note {
+  uint32_t at = 0;       // the statement's offset in the text of `source`
+  Note_kind kind = Note_kind::syntax_error;
+  bool applied = false;  // the statement changed the outline nonetheless
+  std::string message;
+  uint32_t source = 0;   // as Origin::source
+};
+
 struct Column {
   std::string name;
   // as written, blanks collapsed, without CHARACTER SET and COLLATE:
@@ -310,8 +336,8 @@ class Catalog {
   static Catalog from_schemas(std::vector<Schema> schemas);
 
   // Things the fold could not apply, such as ALTER TABLE of a table the
-  // script never created: (statement offset, message).
-  const std::vector<std::pair<uint32_t, std::string>> &notes() const { return m_notes; }
+  // script never created.
+  const std::vector<Note> &notes() const { return m_notes; }
 
  private:
   Schema &schema(const std::string &name);
@@ -326,7 +352,7 @@ class Catalog {
   std::vector<Named_object> m_auth_apps;
   std::vector<Named_object> m_roles;
   std::vector<Named_object> m_users;
-  std::vector<std::pair<uint32_t, std::string>> m_notes;
+  std::vector<Note> m_notes;
   uint32_t m_source = 0;
 
   friend class Catalog_fold;

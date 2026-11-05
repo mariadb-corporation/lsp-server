@@ -232,13 +232,61 @@ TEST(Catalog, named_key_replaces_its_namesake) {
   EXPECT_EQ(std::vector<std::string>{"b"}, t->indexes[0].columns());
 }
 
+// Every note has a kind and says whether its statement was applied
+// nonetheless; msm_plugin fails a release on a note that was not.
 TEST(Catalog, notes_for_what_cannot_be_applied) {
   const auto o = outline_of(
       "ALTER TABLE missing ADD COLUMN x INT;\n"
-      "CREATE TABLE broken (a INT,);\n");
-  ASSERT_EQ(2u, o.notes.size());
-  EXPECT_NE(std::string::npos, o.notes[0].second.find("does not create this table"));
-  EXPECT_NE(std::string::npos, o.notes[1].second.find("syntax error"));
+      "CREATE TABLE broken (a INT,);\n"
+      "CREATE INDEX i ON missing (a);\n"
+      "CREATE TABLE copy LIKE missing;\n"
+      "SET sql_mode = ORACLE;\n"
+      "CREATE TABLE o (a INT);\n");
+  ASSERT_EQ(5u, o.notes.size());
+  EXPECT_EQ(Note_kind::unknown_table, o.notes[0].kind);
+  EXPECT_FALSE(o.notes[0].applied);
+  EXPECT_NE(std::string::npos, o.notes[0].message.find("does not create this table"));
+  EXPECT_EQ(Note_kind::syntax_error, o.notes[1].kind);
+  EXPECT_FALSE(o.notes[1].applied);
+  EXPECT_NE(std::string::npos, o.notes[1].message.find("syntax error"));
+  EXPECT_EQ(Note_kind::unknown_table, o.notes[2].kind);
+  EXPECT_FALSE(o.notes[2].applied);
+  EXPECT_EQ(Note_kind::unknown_table, o.notes[3].kind);
+  EXPECT_TRUE(o.notes[3].applied);  // the LIKE creates the table
+  EXPECT_NE(nullptr, table(o, "", "copy"));
+  EXPECT_EQ(Note_kind::unsupported_sql_mode, o.notes[4].kind);
+  EXPECT_FALSE(o.notes[4].applied);
+  EXPECT_EQ("not read: sql_mode ORACLE is not supported", o.notes[4].message);
+  EXPECT_EQ(nullptr, table(o, "", "o"));
+  for (const Note &n : o.notes) EXPECT_EQ(0u, n.source);
+  EXPECT_EQ(5u, o.ddl_statements);
+  EXPECT_EQ(1u, o.applied);  // the LIKE
+
+  const std::string json = outline_json(o, "", Line_map(""));
+  EXPECT_NE(std::string::npos,
+            json.find("{\"kind\":\"unknown-table\",\"applied\":false,\"start\":{\"line\":0,\"character\":0},"
+                      "\"message\":\"ALTER TABLE missing: the script does not create this table\"}"))
+      << json;
+  EXPECT_NE(std::string::npos, json.find("{\"kind\":\"unknown-table\",\"applied\":true,")) << json;
+}
+
+// docs/outline-format.md lists every kind of note the server can write.
+TEST(Catalog, every_note_kind_is_documented) {
+  const std::string doc = test::read_fixture("../../../docs/outline-format.md");
+  ASSERT_FALSE(doc.empty());
+  const size_t section = doc.find("\n## Notes\n");
+  ASSERT_NE(std::string::npos, section);
+  const size_t end = doc.find("\n## ", section + 1);
+  std::string notes = doc.substr(section, end == std::string::npos ? end : end - section);
+  const size_t kinds = notes.find("\n| Kind |");  // the table of kinds, after the members' table
+  ASSERT_NE(std::string::npos, kinds);
+  notes = notes.substr(kinds);
+  size_t rows = 0;
+  for (size_t at = notes.find("\n| `"); at != std::string::npos; at = notes.find("\n| `", at + 1)) ++rows;
+  EXPECT_EQ(std::size(k_note_kinds), rows);
+  for (const Note_kind kind : k_note_kinds) {
+    EXPECT_NE(std::string::npos, notes.find("\n| `" + std::string(to_string(kind)) + "` |")) << to_string(kind);
+  }
 }
 
 // Column attributes the outline keeps (they make the schema snapshot of an

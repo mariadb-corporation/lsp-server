@@ -103,6 +103,17 @@ constexpr const char *k_sym_names[] = {
 
 }  // namespace
 
+const char *to_string(Note_kind kind) {
+  switch (kind) {
+    case Note_kind::syntax_error: return "syntax-error";
+    case Note_kind::unsupported_sql_mode: return "unsupported-sql-mode";
+    case Note_kind::unknown_table: return "unknown-table";
+    case Note_kind::include_unreadable: return "include-unreadable";
+    case Note_kind::include_nested: return "include-nested";
+  }
+  return "";
+}
+
 // --- lookups --------------------------------------------------------------
 
 Column *Table::column(std::string_view n) {
@@ -381,6 +392,11 @@ class Catalog_fold {
   static void set_option(std::vector<std::pair<std::string, std::string>> &opts,
                          const std::string &key, std::string value);
 
+  // A note on the statement being folded.
+  void note(Note_kind kind, bool applied, std::string message) {
+    c_.m_notes.push_back({stmt_.begin, kind, applied, std::move(message), c_.m_source});
+  }
+
   Catalog &c_;
   const Syntax_tree &t_;
   std::string_view text_;
@@ -468,8 +484,8 @@ bool Catalog_fold::create(uint32_t n) {
     auto [schema_name, tid] = qualified(child(n, s_.table_ident));
     Table *tb = c_.schema(schema_name).table(name_of(tid));
     if (tb == nullptr) {
-      c_.m_notes.push_back({stmt_.begin, "CREATE INDEX on table " + name_of(tid) +
-                                             ", which the script does not create"});
+      note(Note_kind::unknown_table, false,
+           "CREATE INDEX on table " + name_of(tid) + ", which the script does not create");
       return false;
     }
     Index ix;
@@ -805,8 +821,8 @@ bool Catalog_fold::create_table(uint32_t n) {
       tb.foreign_keys.clear();
       tb.stub = false;
     } else {
-      c_.m_notes.push_back({stmt_.begin, "CREATE TABLE ... LIKE " + name_of(src_id) +
-                                             ", which the script does not create"});
+      note(Note_kind::unknown_table, true,
+           "CREATE TABLE ... LIKE " + name_of(src_id) + ", which the script does not create");
     }
   }
   tb.name = name;
@@ -1214,8 +1230,8 @@ bool Catalog_fold::alter(uint32_t n) {
   Schema *sc = &c_.schema(schema_name);
   Table *tb = sc->table(name_of(id));
   if (tb == nullptr) {
-    c_.m_notes.push_back({stmt_.begin, "ALTER TABLE " + name_of(id) +
-                                           ": the script does not create this table"});
+    note(Note_kind::unknown_table, false,
+         "ALTER TABLE " + name_of(id) + ": the script does not create this table");
     return false;
   }
   for (const uint32_t item : find_all(child(n, s_.alter_commands), s_.alter_list_item)) {

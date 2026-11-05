@@ -20,12 +20,10 @@ and comment-only statements, are not parsed. A `CREATE` of a name that exists re
 earlier object; `IF NOT EXISTS` keeps an existing database, table, view or sequence.
 
 A statement with a syntax error, or in an sql_mode the parser does not support, is not applied
-and is listed under `notes` ("not read: the statement has a syntax error", "not read: sql_mode
-X is not supported"). So are an `ALTER TABLE` or `CREATE INDEX` on a table the file does not
-create ("ALTER TABLE t: the script does not create this table", "CREATE INDEX on table t, which
-the script does not create") and a `CREATE TABLE ... LIKE t` of such a table ("CREATE TABLE ...
-LIKE t, which the script does not create"); the `LIKE` statement is still applied and creates
-the table. A statement that parses but changes nothing (`CREATE`/`DROP USER`, `ROLE` or
+and is listed under `notes` (kind `syntax-error` or `unsupported-sql-mode`, see [Notes](#notes)).
+So are an `ALTER TABLE` or `CREATE INDEX` on a table the file does not create and a `CREATE
+TABLE ... LIKE t` of such a table (`unknown-table`); the `LIKE` statement is still applied and
+creates the table. A statement that parses but changes nothing (`CREATE`/`DROP USER`, `ROLE` or
 `SERVER`, `CREATE PACKAGE`, an `ALTER` of anything but a database, view, table, procedure,
 function, event or sequence, an `ALTER PROCEDURE`, `FUNCTION`, `EVENT` or `SEQUENCE` of an
 object the file does not create, a `RENAME` of a table the file does not create, `USE REST
@@ -36,10 +34,10 @@ body, definer; `RENAME TO` renames or moves the event), `ALTER SEQUENCE` the opt
 MSM `SOURCE '<path>'[<start>:<end>];` directives are expanded first, as msm_plugin's
 `prepare_release` does ([language-server.md](language-server.md#source-includes)): the
 included text is folded where its directive stands, in the script's context. A note on an
-included statement is at its directive and starts with the file and line
-(`140_tables.sql:13: ALTER TABLE missing: ...`); a file that cannot be read gets "not read:
-cannot read PATH", and a directive in an included text, which msm does not expand, "FILE:LINE:
-SOURCE 'x' not expanded: msm expands one level only". `mariadb-lsp outline --no-source`
+included statement has `source` and its `start` in that file, and its message starts with the
+file and line (`140_tables.sql:13: ALTER TABLE missing: ...`); a file that cannot be read gets
+a note at its directive (`include-unreadable`), and a directive in an included text, which msm
+does not expand, one where it stands (`include-nested`). `mariadb-lsp outline --no-source`
 does not expand them.
 
 Names are as written, without quotes (`` `order` `` becomes `order`), and compare without
@@ -63,7 +61,7 @@ removed (`` `root`@`localhost` `` and `root@'localhost'` give `root@localhost`),
 | `rest` | object | MariaDB REST Service objects |
 | `includes` | array | only when the file has SOURCE directives: one `{file, range, slice, error?}` per directive, in order; `file` is the path as resolved (absolute, `/` separators), `range` the directive, `slice` its `[...]` as written or null, `error` why nothing was included |
 | `statements` | object | `ddl`: statements that may change the schema; `applied`: those the fold took (a `USE`, or a `DROP` of an object the file never created, counts; a `CREATE USER` or `USE REST SERVICE` does not) |
-| `notes` | array | `{start: {line, character}, message}` for statements that were not read, or that refer to a table the file does not create (see above), sorted by `start` |
+| `notes` | array | `{kind, applied, source?, start: {line, character}, message}` for statements that were not read, or that refer to a table the file does not create: see [Notes](#notes) |
 
 Objects carry `range` and `selection_range`, each `{start: {line, character}, end: {...}}`:
 `range` is the whole defining statement and `selection_range` the object's name as written,
@@ -77,6 +75,30 @@ a REST schema the file never declared (`CREATE REST VIEW ... ON SCHEMA /x` witho
 REST SCHEMA /x`) has the statement that first named it as both. Without both: an undeclared
 schema, routine `parameters` entries, a foreign key's `references`, and `notes` entries
 (`start` only).
+
+## Notes
+
+Each entry of `notes` is a remark on one statement, in the order of the statements (a note on
+an included statement where its directive stands):
+
+| Member | Type | Meaning |
+| --- | --- | --- |
+| `kind` | string | one of the identifiers below; stable, so consumers match it rather than `message` |
+| `applied` | boolean | whether the statement changed the outline nonetheless; `false` means the outline misses what it defines, which fails an MSM release |
+| `source` | number | only for a statement in an included file: its index in `includes`; the directive is `includes[source].range` |
+| `start` | position | where the statement begins: in the file at `source`, else in the input |
+| `message` | string | for people; starts with `FILE:LINE: ` when `source` is set |
+
+| Kind | `applied` | Meaning |
+| --- | --- | --- |
+| `syntax-error` | `false` | the statement has a syntax error and was not read |
+| `unsupported-sql-mode` | `false` | the statement is in an sql_mode the parser does not support (`ORACLE`) and was not read |
+| `unknown-table` | `false` for `ALTER TABLE` and `CREATE INDEX`, `true` for `CREATE TABLE ... LIKE` | the statement names a table the file does not create; the `LIKE` still creates its table, empty |
+| `include-unreadable` | `false` | a `SOURCE` file cannot be read; the note is on the directive |
+| `include-nested` | `false` | a `SOURCE` directive in an included text, which msm does not expand; the note is on that directive, in its file |
+
+A kind is never removed or renamed within format 1; new kinds may be added, so a consumer that
+does not know a kind should go by `applied`.
 
 An object defined in an included file has `source`, its index in `includes`, and its
 `range` and `selection_range` are positions in that file. Objects of the file itself have

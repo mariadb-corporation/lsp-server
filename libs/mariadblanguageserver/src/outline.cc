@@ -82,10 +82,13 @@ void fold_outline(Outline &out, std::string_view text, const Statement_index &in
   for (size_t k = 0; k < ddl.size(); ++k) {
     const uint32_t at = stmts[ddl[k]].begin;
     if (parsed[k].unsupported) {
-      out.notes.push_back({at, "not read: sql_mode " + index.modes()[stmts[ddl[k]].mode].mode +
-                                   " is not supported"});
+      out.notes.push_back({at, Note_kind::unsupported_sql_mode, false,
+                           "not read: sql_mode " + index.modes()[stmts[ddl[k]].mode].mode +
+                               " is not supported",
+                           source});
     } else if (!parsed[k].accepted) {
-      out.notes.push_back({at, "not read: the statement has a syntax error"});
+      out.notes.push_back(
+          {at, Note_kind::syntax_error, false, "not read: the statement has a syntax error", source});
     } else if (out.catalog.apply(parsed[k].tree, text)) {
       ++out.applied;
     }
@@ -94,7 +97,7 @@ void fold_outline(Outline &out, std::string_view text, const Statement_index &in
     out.notes.push_back(out.catalog.notes()[k]);
   }
   std::sort(out.notes.begin() + static_cast<std::ptrdiff_t>(first_note), out.notes.end(),
-            [](const auto &a, const auto &b) { return a.first < b.first; });
+            [](const Note &a, const Note &b) { return a.at < b.at; });
 }
 
 namespace {
@@ -118,27 +121,43 @@ void fold_expanded(Outline &out, const Source_expansion &e, const Statement_inde
     o.source = to_source(statement.source);
   });
 
+  // The notes keep their order in the script: a note from an include sorts
+  // where its directive stands.
+  std::vector<std::pair<uint32_t, size_t>> order;  // (script offset, note)
   for (size_t k = first_note; k < out.notes.size(); ++k) {
-    auto &[at, message] = out.notes[k];
-    const auto loc = e.map(at);
-    if (loc.source == 0) {
-      at = loc.offset;
-    } else {
+    Note &n = out.notes[k];
+    const auto loc = e.map(n.at);
+    n.at = loc.offset;
+    n.source = to_source(loc.source);
+    uint32_t script_at = loc.offset;
+    if (loc.source != 0) {
       const auto &inc = e.includes[loc.source - 1];
-      at = inc.directive.statement.begin;
-      message = source_location(inc, loc.offset) + ": " + message;
+      n.message = source_location(inc, loc.offset) + ": " + n.message;
+      script_at = inc.directive.statement.begin;
     }
+    order.emplace_back(script_at, k);
   }
-  for (const auto &inc : e.includes) {
+  for (size_t k = 0; k < e.includes.size(); ++k) {
+    const auto &inc = e.includes[k];
     const uint32_t at = inc.directive.statement.begin;
-    if (!inc.error.empty()) out.notes.push_back({at, "not read: " + inc.error});
+    if (!inc.error.empty()) {
+      order.emplace_back(at, out.notes.size());
+      out.notes.push_back({at, Note_kind::include_unreadable, false, "not read: " + inc.error, source});
+    }
     for (const auto &n : inc.nested) {
-      out.notes.push_back({at, source_location(inc, n.statement.begin) + ": SOURCE '" + n.file +
-                                   "' not expanded: msm expands one level only"});
+      order.emplace_back(at, out.notes.size());
+      out.notes.push_back({n.statement.begin, Note_kind::include_nested, false,
+                           source_location(inc, n.statement.begin) + ": SOURCE '" + n.file +
+                               "' not expanded: msm expands one level only",
+                           to_source(static_cast<uint32_t>(k + 1))});
     }
   }
-  std::stable_sort(out.notes.begin() + static_cast<std::ptrdiff_t>(first_note), out.notes.end(),
+  std::stable_sort(order.begin(), order.end(),
                    [](const auto &a, const auto &b) { return a.first < b.first; });
+  std::vector<Note> sorted;
+  sorted.reserve(order.size());
+  for (const auto &[_, k] : order) sorted.push_back(std::move(out.notes[k]));
+  std::move(sorted.begin(), sorted.end(), out.notes.begin() + static_cast<std::ptrdiff_t>(first_note));
 }
 
 // The including script's state where each include begins.
@@ -598,11 +617,22 @@ std::string outline_json(const Outline &outline, std::string_view text, const Li
   w.EndObject();
   w.Key("notes");
   w.StartArray();
-  for (const auto &[at, message] : outline.notes) {
+  for (const Note &n : outline.notes) {
     w.StartObject();
-    w.Key("start");
-    j.position(at);
-    j.str("message", message);
+    j.str("kind", to_string(n.kind));
+    w.Key("applied");
+    w.Bool(n.applied);
+    if (n.source > 0 && n.source <= outline.includes.size()) {
+      const auto &inc = outline.includes[n.source - 1];
+      w.Key("source");
+      w.Uint(n.source - 1);
+      w.Key("start");
+      lsp::write_position(w, inc.lines.position(inc.text, n.at));
+    } else {
+      w.Key("start");
+      j.position(n.at);
+    }
+    j.str("message", n.message);
     w.EndObject();
   }
   w.EndArray();
