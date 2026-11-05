@@ -40,8 +40,16 @@ std::string qualified(const std::string &schema, const std::string &name) {
 }
 
 std::string column_line(const Column &c) {
-  std::string s = quote_identifier(c.name) + " " + c.attributes();
-  if (c.generated) s += " AS (" + *c.generated + ")";
+  std::string s = quote_identifier(c.name) + " " + c.type;
+  if (c.charset) s += " CHARACTER SET " + *c.charset;
+  if (c.collation) s += " COLLATE " + *c.collation;
+  s += c.attributes().substr(c.type.size());
+  if (c.on_update) s += " ON UPDATE " + *c.on_update;
+  if (c.generated) {
+    s += " AS (" + *c.generated + ")";
+    if (c.generated_storage) s += " " + *c.generated_storage;
+  }
+  if (c.invisible) s += " INVISIBLE";
   return s;
 }
 

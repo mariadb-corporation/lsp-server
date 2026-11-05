@@ -118,6 +118,23 @@ TEST(Navigation, hover_column_through_alias) {
   EXPECT_NE(h.find("given name"), std::string::npos) << h;
 }
 
+// The outline keeps CHARACTER SET and COLLATE out of the type; hover puts
+// them back, with ON UPDATE and INVISIBLE.
+TEST(Navigation, hover_column_charset_and_attributes) {
+  Doc d("CREATE TABLE t (c VARCHAR(10) CHARACTER SET latin1 COLLATE latin1_bin NOT NULL,\n"
+        "  ts TIMESTAMP ON UPDATE CURRENT_TIMESTAMP INVISIBLE);\n"
+        "SELECT c|, ts FROM t;",
+        false);
+  const auto h = d.hover();
+  EXPECT_NE(h.find("c VARCHAR(10) CHARACTER SET latin1 COLLATE latin1_bin NOT NULL"),
+            std::string::npos)
+      << h;
+  Doc d2("CREATE TABLE t (ts TIMESTAMP ON UPDATE CURRENT_TIMESTAMP INVISIBLE);\nSELECT t|s FROM t;",
+         false);
+  const auto h2 = d2.hover();
+  EXPECT_NE(h2.find("ts TIMESTAMP ON UPDATE CURRENT_TIMESTAMP INVISIBLE"), std::string::npos) << h2;
+}
+
 TEST(Navigation, unqualified_column_found_in_the_right_table) {
   Doc d("SELECT tit|le FROM actor JOIN film USING (actor_id);");
   const auto r = d.resolve();

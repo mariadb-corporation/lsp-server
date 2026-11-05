@@ -324,9 +324,9 @@ std::optional<Live_snapshot> fetch_mcp_catalog(const Tool_caller &call, std::str
       sc.triggers.push_back(std::move(tr));
     }
     if (!reading.list(listed.name, "event", &d)) return fail();
-    for (const auto &o : d.GetArray()) sc.events.push_back({text(o, "name"), {}});
+    for (const auto &o : d.GetArray()) sc.events.emplace_back().name = text(o, "name");
     if (!reading.list(listed.name, "sequence", &d)) return fail();
-    for (const auto &o : d.GetArray()) sc.sequences.push_back({text(o, "name"), {}});
+    for (const auto &o : d.GetArray()) sc.sequences.emplace_back().name = text(o, "name");
   }
 
   for (const auto &sc : b.schemas) {
