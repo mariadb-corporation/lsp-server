@@ -967,7 +967,9 @@ TEST(Schema_edit, add_routine_in_a_new_delimiter_block) {
 
 TEST(Schema_edit, drop_routine) {
   const auto r = ok(edit(k_shop, {}, request("shop", R"j({"op": "drop_routine", "routine": "p1"})j")));
-  EXPECT_EQ(shop_with("CREATE PROCEDURE `p1`()\nBEGIN\n  SELECT note FROM orders;\nEND$$\n", ""), text(r, ""));
+  // Its DELIMITER block, left empty, goes too.
+  EXPECT_EQ(shop_with("\nDELIMITER $$\nCREATE PROCEDURE `p1`()\nBEGIN\n  SELECT note FROM orders;\nEND$$\nDELIMITER ;\n", ""),
+            text(r, ""));
   EXPECT_EQ(std::vector<std::string>{"DROP PROCEDURE `p1`"}, migration(r));
   EXPECT_EQ("unknown-object", failed(edit(k_shop, {}, request("shop", R"j({"op": "drop_routine", "routine": "p1", "kind": "function"})j"))).kind);
 }
@@ -1770,6 +1772,30 @@ TEST(Schema_edit, msm_triggers_and_events_are_dropped_before_they_are_created) {
                        "END$$\n"
                        "DELIMITER ;\n"),
             text(e, ""));
+}
+
+TEST(Schema_edit, msm_triggers_go_before_the_events) {
+  // Section 150 with an event only: the trigger goes before it, after the
+  // banner, not at the end of the section.
+  const std::string only_event =
+      "\n"
+      "DROP EVENT IF EXISTS `purge`;\n"
+      "CREATE EVENT `purge` ON SCHEDULE EVERY 1 DAY DO DELETE FROM `orders`;\n";
+  const auto r = ok(edit(msm_script(only_event), {}, request("shop", k_add_trigger)));
+  EXPECT_EQ(msm_script("\n"
+                       "DELIMITER $$\n"
+                       "DROP TRIGGER IF EXISTS `orders_bi`$$\n"
+                       "CREATE TRIGGER `orders_bi` BEFORE INSERT ON `orders` FOR EACH ROW\n"
+                       "BEGIN\n"
+                       "  SET NEW.note = 'new';\n"
+                       "END$$\n"
+                       "DELIMITER ;\n"
+                       "\n"
+                       "DROP EVENT IF EXISTS `purge`;\n"
+                       "CREATE EVENT `purge` ON SCHEDULE EVERY 1 DAY DO DELETE FROM `orders`;\n"),
+            text(r, ""));
+  EXPECT_EQ(msm_script(only_event),
+            twice(msm_script(only_event), k_add_trigger, R"j({"op": "drop_trigger", "trigger": "orders_bi"})j"));
 }
 
 TEST(Schema_edit, rename_table_keeps_its_triggers) {

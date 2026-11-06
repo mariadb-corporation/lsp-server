@@ -658,16 +658,12 @@ std::optional<Routine> read_routine(Json_reader &r, const Json &v) {
 // OR between two, each at most once; "" when they are not.
 std::string trigger_events(std::string_view events) {
   std::vector<std::string> words;
-  std::string w;
-  for (const char c : events) {
-    if (std::isspace(static_cast<unsigned char>(c))) {
-      if (!w.empty()) words.push_back(upper(w));
-      w.clear();
-    } else {
-      w += c;
-    }
+  const std::string all = collapse(upper(events));
+  for (size_t p = 0; p < all.size();) {
+    const size_t q = std::min(all.find(' ', p), all.size());
+    words.push_back(all.substr(p, q - p));
+    p = q + 1;
   }
-  if (!w.empty()) words.push_back(upper(w));
   if (words.size() % 2 == 0) return "";
   std::set<std::string> seen;
   std::string out;
@@ -703,10 +699,8 @@ std::optional<Trigger> read_trigger(Json_reader &r, const Json &v) {
     }
   }
   r.str(v, "table", &t.table, true, w);
-  std::string body;
-  r.str(v, "body", &body, true, w);
-  if (r.ok() && trim(body).empty()) r.fail(w + " has an empty \"body\"");
-  t.body = body;
+  r.str(v, "body", &t.body, true, w);
+  if (r.ok() && trim(t.body).empty()) r.fail(w + " has an empty \"body\"");
   if (r.ok() && Json_reader::given(v, "order")) {
     const Json &o = v["order"];
     const std::string ow = "\"order\" of " + w;
@@ -1195,17 +1189,13 @@ class Lookup {
   }
   std::pair<const Schema *, const Trigger *> trigger(std::string_view name) const {
     for (const Schema *s : m_schemas) {
-      for (const auto &t : s->triggers) {
-        if (iequals(t.name, name)) return {s, &t};
-      }
+      if (const Trigger *t = s->trigger(name)) return {s, t};
     }
     return {nullptr, nullptr};
   }
   std::pair<const Schema *, const Event *> event(std::string_view name) const {
     for (const Schema *s : m_schemas) {
-      for (const auto &e : s->events) {
-        if (iequals(e.name, name)) return {s, &e};
-      }
+      if (const Event *e = s->event(name)) return {s, e};
     }
     return {nullptr, nullptr};
   }
@@ -1310,6 +1300,7 @@ struct Subject {
   std::string verb;
   std::string kind;
   std::vector<std::pair<std::string, std::string>> names;  // (schema, name)
+  std::vector<std::string_view> name_words;                // each name's last part, as written in the SQL
   std::string on_schema;
   std::string on_table;
 };
@@ -1347,9 +1338,11 @@ std::optional<Subject> subject_of(std::string_view sql) {
     ++k;
     if (k + 1 < w.size() && w[k].punct && w[k].text == "." && !w[k + 1].punct) {
       std::string second = unquote_name(w[k + 1].text);
+      s.name_words.push_back(w[k + 1].text);
       k += 2;
       return std::make_pair(std::move(first), std::move(second));
     }
+    s.name_words.push_back(w[k - 1].text);
     return std::make_pair(std::string(), std::move(first));
   };
   while (true) {
@@ -2121,51 +2114,46 @@ class Editor {
 
   // Where a new object goes after: the statement of an existing one, and
   // its origin, whose name's quoting the new text follows.
+  // The kinds of object a new one is placed among.
+  enum class Kind : uint8_t { table, view, routine, trigger, event };
   struct Anchor {
     std::optional<size_t> k;
     const Origin *origin = nullptr;
     std::string name;
-    Target_kind kind = Target_kind::none;  // table, view or routine; none for the others
-    std::string_view type;                 // table, view, routine, trigger, event
+    std::optional<Kind> kind;
   };
+  // `f` called with schema `h`'s objects of kind `kind`.
+  template <typename F>
+  static auto with_objects(const Schema &h, Kind kind, F f) {
+    switch (kind) {
+      case Kind::view: return f(h.views);
+      case Kind::routine: return f(h.routines);
+      case Kind::trigger: return f(h.triggers);
+      case Kind::event: return f(h.events);
+      case Kind::table: break;
+    }
+    return f(h.tables);
+  }
+  template <typename T>
+  static constexpr Kind kind_of() {
+    if constexpr (std::is_same_v<T, Table>) return Kind::table;
+    else if constexpr (std::is_same_v<T, View>) return Kind::view;
+    else if constexpr (std::is_same_v<T, Routine>) return Kind::routine;
+    else if constexpr (std::is_same_v<T, Trigger>) return Kind::trigger;
+    else return Kind::event;
+  }
   // The object of `objects` (a schema's tables, views, routines, triggers or
   // events) placed last in the searched text, within searched range
   // `within` when given.
   template <typename T>
   Anchor last_of(const std::vector<T> &objects, std::optional<Range> within = std::nullopt) const {
-    static_assert(std::is_same_v<T, Table> || std::is_same_v<T, View> || std::is_same_v<T, Routine> ||
-                  std::is_same_v<T, Trigger> || std::is_same_v<T, Event>);
-    constexpr Target_kind kind = std::is_same_v<T, Table>     ? Target_kind::table
-                                 : std::is_same_v<T, View>    ? Target_kind::view
-                                 : std::is_same_v<T, Routine> ? Target_kind::routine
-                                                              : Target_kind::none;
-    constexpr std::string_view type = std::is_same_v<T, Table>     ? "table"
-                                      : std::is_same_v<T, View>    ? "view"
-                                      : std::is_same_v<T, Routine> ? "routine"
-                                      : std::is_same_v<T, Trigger> ? "trigger"
-                                                                   : "event";
     Anchor best;
     for (const auto &o : objects) {
       const auto k = statement_of(o.origin);
       if (!k || (within && (statement(*k).begin < within->begin || statement(*k).begin >= within->end))) continue;
-      if (!best.k || *k > *best.k) best = {k, &o.origin, o.name, kind, type};
+      if (!best.k || *k > *best.k) best = {k, &o.origin, o.name, kind_of<T>()};
     }
     return best;
-  }
-  // The last object of schema `h` of the first type of `types` (table,
-  // view, routine, trigger, event) that has one, within `within` when given.
-  Anchor last_in(const Schema &h, std::initializer_list<std::string_view> types,
-                 std::optional<Range> within = std::nullopt) const {
-    for (const std::string_view t : types) {
-      Anchor a;
-      if (t == "table") a = last_of(h.tables, within);
-      else if (t == "view") a = last_of(h.views, within);
-      else if (t == "routine") a = last_of(h.routines, within);
-      else if (t == "trigger") a = last_of(h.triggers, within);
-      else if (t == "event") a = last_of(h.events, within);
-      if (a.k) return a;
-    }
-    return {};
   }
 
   // The start of an MSM section's marker line: `-- MSM Section 150: ...`.
@@ -2199,15 +2187,7 @@ class Editor {
       if (st.begin < r.begin) before = k;
       else if (st.begin < r.end) last = k;
     }
-    if (last) {
-      // The blank lines above it count from its DROP ... IF EXISTS, if any.
-      size_t gap_from = *last;
-      const auto subject = subject_of(index().text_of(text(), statement(*last)));
-      if (subject && subject->verb == "CREATE" && subject->names.size() == 1) {
-        if (const auto drop = form_at(*last, subject->names[0].second).drop) gap_from = *drop;
-      }
-      return after_statement(*last, eol, gap_from);
-    }
+    if (last) return after_create(*last, eol);
     const std::string_view t = text();
     uint32_t p = r.begin;
     while (p < r.end) {
@@ -2244,39 +2224,87 @@ class Editor {
     }
     return f;
   }
-  // The home schema's last routine (with `routines`), else its last view
-  // (with `views`), else its last table.
-  Anchor anchor(bool routines, bool views) const {
-    const Schema *h = home();
-    if (h == nullptr) return {};
-    Anchor a;
-    if (routines) a = last_of(h->routines);
-    if (!a.k && views) a = last_of(h->views);
-    if (!a.k) a = last_of(h->tables);
-    return a;
+  // Where a statement goes after the object statement `k` creates: the
+  // blank lines above it count from its DROP ... IF EXISTS, if any.
+  Spot after_create(size_t k, const std::string &eol) const {
+    std::optional<size_t> gap_from;
+    const auto subject = subject_of(index().text_of(text(), statement(k)));
+    if (subject && subject->verb == "CREATE" && subject->names.size() == 1) {
+      gap_from = form_at(k, subject->names[0].second).drop;
+    }
+    return after_statement(k, eol, gap_from);
   }
   // Where a new object goes: after `anchor`, else at `spot`, else at the
-  // end of the script.
+  // end of the script.  `msm`: the script has MSM sections.
   struct Place {
     Anchor anchor;
     std::optional<Spot> spot;
+    bool msm = false;
   };
-  // In an MSM script, after the last of `objects` (then of `also`) in
-  // section `section`, else at that section's end; nullopt for a script
-  // without MSM sections.
-  template <typename A, typename B = A>
-  std::optional<Place> msm_place(int section, const A *objects, const B *also = nullptr) const {
-    const auto r = msm_section(section);
-    if (!r) return std::nullopt;
+  // After the home schema's last object of the first of `kinds` that has
+  // one; in an MSM script only within section `section`, else at that
+  // section's end.  Never at or after the first object of `before` (its
+  // DROP ... IF EXISTS included), and never before the CREATE TABLE of
+  // `after_table`, which the new object depends on.
+  Place place_for(int section, std::initializer_list<Kind> kinds, std::initializer_list<Kind> before = {},
+              const Table *after_table = nullptr) const {
     Place p;
-    if (objects != nullptr) p.anchor = last_of(*objects, r);
-    if (!p.anchor.k && also != nullptr) p.anchor = last_of(*also, r);
-    if (!p.anchor.k) p.spot = end_of_section(*r, style_at(std::nullopt, std::nullopt).eol);
+    const auto r = msm_section(section);
+    p.msm = r.has_value();
+    Range within = r.value_or(Range{0, static_cast<uint32_t>(text().size())});
+    const Schema *h = home();
+    if (h == nullptr) return p;
+    for (const Kind b : before) {
+      with_objects(*h, b, [&](const auto &objects) {
+        for (const auto &o : objects) {
+          const auto k = statement_of(o.origin);
+          if (!k) continue;
+          const uint32_t at = statement(form_at(*k, o.name).drop.value_or(*k)).begin;
+          if (at > within.begin && at < within.end) within.end = at;
+        }
+      });
+    }
+    for (const Kind kind : kinds) {
+      p.anchor = with_objects(*h, kind, [&](const auto &objects) { return last_of(objects, within); });
+      if (p.anchor.k) break;
+    }
+    if (after_table != nullptr && !p.msm) {
+      const auto kt = statement_of(after_table->origin);
+      if (kt && (!p.anchor.k || *p.anchor.k < *kt)) p.anchor = {kt, &after_table->origin, after_table->name, Kind::table};
+    }
+    if (r && !p.anchor.k) p.spot = end_of_section(within, style_at(std::nullopt, std::nullopt).eol);
     return p;
   }
-  std::optional<Spot> spot_of(const Place &p, const edit_text::Style &st,
-                              std::optional<size_t> gap_from = std::nullopt) const {
-    return p.anchor.k ? std::optional<Spot>(after_statement(*p.anchor.k, st.eol, gap_from)) : p.spot;
+  std::optional<Spot> spot_of(const Place &p, const edit_text::Style &st) const {
+    return p.anchor.k ? std::optional<Spot>(after_create(*p.anchor.k, st.eol)) : p.spot;
+  }
+
+  // Inserts the CREATE of a new routine, trigger or event (`object`, of
+  // kind `kind`) named `name` at `place`, written as the object it follows
+  // of its own kind is: dropped first or CREATE OR REPLACE, and in an MSM
+  // script (Section 150, which every deployment runs again) always one of
+  // the two; in a DELIMITER block when its body holds a semicolon.  `make`
+  // writes the CREATE, given whether it is OR REPLACE.  Migrates it, with
+  // a note that its CREATE cannot run inside a stored procedure.
+  template <typename Make>
+  std::optional<Edit_error> insert_create(size_t i, const Place &place, Kind kind, Migration_object object,
+                                          const std::string &name, Make make, Changes &changes) {
+    const Form form = place.anchor.kind == kind ? form_at(*place.anchor.k, place.anchor.name) : Form{};
+    const edit_text::Style st = style_of(place.anchor);
+    const std::string sql = make(st, form.or_replace);
+    const std::string noun = to_string(object);  // procedure, function, trigger, event
+    const bool drop_first = form.drop || (place.msm && !form.or_replace);
+    const std::string drop = drop_first ? st.kw("DROP " + upper(noun) + " IF EXISTS") + " " + st.id(name) : "";
+    const std::string what = noun + " `" + name + "`";
+    if (const auto p = parse_problem(sql)) return error(i, "bad-request", what + " does not parse (" + *p + ")");
+    const std::string laid = laid_out(sql, st, true);
+    const auto at = insert_at(changes, spot_of(place, st), laid, st, laid.find(';') != std::string::npos, drop);
+    if (!at) return error(i, "self-check", "no place for the CREATE of " + what + " was found");
+    migrate(i, laid, Migration_action::create, object, name);
+    const char *note_kind = kind == Kind::trigger ? "trigger-created" : kind == Kind::event ? "event-created" : "routine-created";
+    note_at(i, note_kind, at->first, m_s.files()[at->first].log.to_original(at->second),
+            "the migration creates the " + what + ", which cannot run inside a stored procedure: msm or a person must place it");
+    return std::nullopt;
   }
 
   edit_text::Style style_of(const Anchor &a) const {
@@ -2499,8 +2527,7 @@ class Editor {
       if (auto err = check_foreign_key(i, t, fk)) return err;
     }
     // An MSM script's tables are in Section 140.
-    const Schema *h = home();
-    const Place place = msm_place(140, h != nullptr ? &h->tables : nullptr).value_or(Place{anchor(false, false), std::nullopt});
+    const Place place = place_for(140, {Kind::table});
     const edit_text::Style st = style_of(place.anchor);
     for (const auto &c : t.columns) {
       if (auto err = check_column(i, c, edit_text::column_sql(c, edit_text::column_checks(t, c.name), st))) {
@@ -2575,6 +2602,69 @@ class Editor {
     return std::nullopt;
   }
 
+  // The searched offset of the first (or, with `last`, the last) line
+  // `DELIMITER ...` that starts in [b, e).
+  std::optional<uint32_t> delimiter_line(uint32_t b, uint32_t e, bool last) const {
+    const std::string_view t = text();
+    std::optional<uint32_t> found;
+    uint32_t p = b == line_begin(t, b) ? b : past_line_break(t, line_end(t, b));
+    while (p < e && p < t.size()) {
+      const uint32_t le = line_end(t, p);
+      const std::string_view line = trim(t.substr(p, le - p));
+      if (line.size() > 10 && iequals(line.substr(0, 10), "DELIMITER ")) {
+        found = p;
+        if (!last) break;
+      }
+      const uint32_t next = past_line_break(t, le);
+      if (next == p) break;
+      p = next;
+    }
+    return found;
+  }
+
+  // A DELIMITER block whose SQL statements are all among `gone` goes too,
+  // its two DELIMITER lines with the blank lines above it, as adding a
+  // routine, trigger or event in a block of its own wrote it.
+  void remove_emptied_delimiter_blocks(Changes &changes, const std::set<size_t> &gone) {
+    const std::string_view t = text();
+    const auto &sts = index().statements();
+    auto sql = [&](size_t j) { return sts[j].kind == Statement_kind::sql; };
+    for (const size_t k : gone) {
+      if (index().delimiters()[statement(k).active_delimiter] == ";") continue;
+      // The run of statements around `k` that all go, and its neighbours.
+      size_t first = k, last = k;
+      std::optional<size_t> prev, next;
+      for (size_t j = k; j-- > 0;) {
+        if (!sql(j)) continue;
+        if (gone.count(j) == 0) {
+          prev = j;
+          break;
+        }
+        first = j;
+      }
+      for (size_t j = k + 1; j < sts.size(); ++j) {
+        if (!sql(j)) continue;
+        if (gone.count(j) == 0) {
+          next = j;
+          break;
+        }
+        last = j;
+      }
+      const auto open = delimiter_line(prev ? statement(*prev).end : 0, statement(first).begin, true);
+      const auto close =
+          delimiter_line(statement(last).end, next ? statement(*next).begin : static_cast<uint32_t>(t.size()), false);
+      if (!open || !close) continue;
+      const uint32_t end = past_line_break(t, line_end(t, *close));
+      uint32_t above = *open;
+      while (above > 0) {
+        const uint32_t pb = line_begin(t, above - 1);
+        if (!trim(t.substr(pb, above - 1 - pb)).empty() || !mappable(pb, end)) break;
+        above = pb;
+      }
+      change(changes, above, end, "");  // overlaps the statements' removals: normalize() merges them
+    }
+  }
+
   // Removes the statements `gone` (with the word their banner names), then
   // notes what still refers to the object and migrates with its DROP.
   std::optional<Edit_error> drop_statements(size_t i, const std::vector<std::pair<size_t, std::string>> &gone,
@@ -2582,11 +2672,14 @@ class Editor {
                                             const std::string &what, std::string_view rest_kind, Migration_object object,
                                             Changes &changes) {
     std::vector<Range> removed;
+    std::set<size_t> ks;
     for (const auto &[k, banner] : gone) {
       const auto r = remove_statement(changes, k, banner);
       if (!r) return error(i, "self-check", "a statement on `" + name + "` cannot be removed");
       removed.push_back(*r);
+      ks.insert(k);
     }
+    remove_emptied_delimiter_blocks(changes, ks);
     still_referenced(i, id, removed, what);
     rest_notes(i, name, rest_kind, what);
     m_old_name = name;
@@ -2968,18 +3061,16 @@ class Editor {
     }
     // An MSM script's views are in Section 150, which every deployment runs
     // again: the view must be CREATE OR REPLACE (or dropped first).
-    const Schema *h = home();
-    const auto msm = msm_place(150, h != nullptr ? &h->views : nullptr);
-    const Place place = msm.value_or(Place{anchor(false, true), std::nullopt});
-    const Form form = place.anchor.kind == Target_kind::view ? form_at(*place.anchor.k, place.anchor.name) : Form{};
+    const Place place = place_for(150, {Kind::view, Kind::table});
+    const Form form = place.anchor.kind == Kind::view ? form_at(*place.anchor.k, place.anchor.name) : Form{};
     const edit_text::Style st = style_of(place.anchor);
-    const std::string sql = edit_text::create_view_sql(v, st, form.or_replace || (msm && !form.drop));
+    const std::string sql = edit_text::create_view_sql(v, st, form.or_replace || (place.msm && !form.drop));
     const std::string drop = form.drop && !form.or_replace ? st.kw("DROP VIEW IF EXISTS") + " " + st.id(v.name) : "";
     if (const auto p = parse_problem(sql)) {
       return error(i, "bad-request", "view `" + v.name + "` does not parse (" + *p + ")");
     }
     const std::string laid = laid_out(sql, st, false);
-    if (!insert_at(changes, spot_of(place, st, form.drop), laid, st, false, drop)) {
+    if (!insert_at(changes, spot_of(place, st), laid, st, false, drop)) {
       return error(i, "self-check", "no place for the CREATE VIEW of `" + v.name + "` was found");
     }
     migrate(i, laid, Act::create, Obj::view, v.name);
@@ -3001,32 +3092,13 @@ class Editor {
     const auto l = lookup();
     // A procedure and a function may share a name.
     if (!l.routines(r.name, r.kind).empty()) return error(i, "name-taken", "a " + r.kind + " `" + r.name + "` exists");
-    // An MSM script's routines are in Section 150, which every deployment
-    // runs again: the routine is dropped first (or CREATE OR REPLACE), as
-    // the routine it follows is.
-    const Schema *h = home();
-    const auto msm = msm_place(150, h != nullptr ? &h->routines : nullptr, h != nullptr ? &h->views : nullptr);
-    const Place place = msm.value_or(Place{anchor(true, true), std::nullopt});
-    const Form form = place.anchor.kind == Target_kind::routine ? form_at(*place.anchor.k, place.anchor.name) : Form{};
-    const edit_text::Style st = style_of(place.anchor);
-    const std::string sql = edit_text::create_routine_sql(r, st, form.or_replace);
-    const bool drop_first = form.drop || (msm && !form.or_replace);
-    const std::string drop =
-        drop_first ? st.kw(r.kind == "function" ? "DROP FUNCTION IF EXISTS" : "DROP PROCEDURE IF EXISTS") + " " + st.id(r.name)
-                   : "";
-    if (const auto p = parse_problem(sql)) {
-      return error(i, "bad-request", r.kind + " `" + r.name + "` does not parse (" + *p + ")");
-    }
-    const std::string laid = laid_out(sql, st, true);
-    const auto at = insert_at(changes, spot_of(place, st, form.drop), laid, st,
-                              laid.find(';') != std::string::npos, drop);
-    if (!at) return error(i, "self-check", "no place for the CREATE of `" + r.name + "` was found");
-    migrate(i, laid, Act::create, routine_object(r.kind), r.name);
     m_routine_kind = r.kind;
-    note_at(i, "routine-created", at->first, m_s.files()[at->first].log.to_original(at->second),
-            "the migration creates the " + r.kind + " `" + r.name +
-                "`, which cannot run inside a stored procedure: msm or a person must place it");
-    return std::nullopt;
+    return insert_create(i, place_for(150, {Kind::routine, Kind::view, Kind::table}), Kind::routine,
+                         routine_object(r.kind), r.name,
+                         [&](const edit_text::Style &st, bool or_replace) {
+                           return edit_text::create_routine_sql(r, st, or_replace);
+                         },
+                         changes);
   }
 
   std::optional<Edit_error> drop_routine(size_t i, const Schema_edit &e, Changes &changes) {
@@ -3049,40 +3121,29 @@ class Editor {
   // ---------------------------------------------------------------------
   // Triggers and events
 
-  // The searched range of the name a CREATE, ALTER or DROP statement `k` of
-  // keyword `kind` (TRIGGER, EVENT) is about: the last part of a qualified
-  // name.
-  std::optional<Range> subject_name_range(size_t k, std::string_view kind) const {
-    const std::string_view sql = index().text_of(text(), statement(k));
-    const auto w = words_of(sql, 48);
-    size_t j = 1;
-    while (j < w.size() && j < 24 && (w[j].quoted || w[j].punct || !iequals(w[j].text, kind))) ++j;
-    if (j >= w.size() || j >= 24) return std::nullopt;
-    ++j;
-    auto is = [&](size_t x, const char *word) { return x < w.size() && !w[x].quoted && iequals(w[x].text, word); };
-    if (is(j, "IF")) {
-      ++j;
-      if (is(j, "NOT")) ++j;
-      if (is(j, "EXISTS")) ++j;
-    }
-    if (j >= w.size() || w[j].punct) return std::nullopt;
-    if (j + 2 < w.size() && w[j + 1].punct && w[j + 1].text == "." && !w[j + 2].punct) j += 2;
-    const auto at = static_cast<uint32_t>(w[j].text.data() - text().data());
-    return Range{at, at + static_cast<uint32_t>(w[j].text.size())};
+  // The searched range of `word`, a view into the searched text.
+  Range range_of(std::string_view word) const {
+    const auto at = static_cast<uint32_t>(word.data() - text().data());
+    return Range{at, at + static_cast<uint32_t>(word.size())};
+  }
+
+  // Respells the name at searched range `r` as `new_name`, quoted as it is.
+  bool respell(Changes &changes, Range r, const std::string &new_name) {
+    const std::string token(text().substr(r.begin, r.end - r.begin));
+    return change(changes, r.begin, r.end, spell_like(token, new_name));
   }
 
   // The searched range of the trigger a CREATE TRIGGER statement `k` names
   // in its FOLLOWS or PRECEDES.
   std::optional<Range> order_name_range(size_t k) const {
     const std::string_view sql = index().text_of(text(), statement(k));
-    const auto w = words_of(sql, 400);
+    const auto w = words_of(sql, 64);
     auto is = [&](size_t x, const char *word) { return x < w.size() && !w[x].quoted && iequals(w[x].text, word); };
     for (size_t j = 2; j + 1 < w.size(); ++j) {
       if (!is(j - 2, "FOR") || !is(j - 1, "EACH") || !is(j, "ROW")) continue;
       if (!is(j + 1, "FOLLOWS") && !is(j + 1, "PRECEDES")) return std::nullopt;
       if (j + 2 >= w.size() || w[j + 2].punct) return std::nullopt;
-      const auto at = static_cast<uint32_t>(w[j + 2].text.data() - text().data());
-      return Range{at, at + static_cast<uint32_t>(w[j + 2].text.size())};
+      return range_of(w[j + 2].text);
     }
     return std::nullopt;
   }
@@ -3095,67 +3156,12 @@ class Editor {
     const auto ks = statements_about(kind, name, schema);
     if (ks.empty()) return error(i, "self-check", "the CREATE " + kind + " of `" + name + "` is not found");
     for (const size_t k : ks) {
-      const auto r = subject_name_range(k, kind);
-      if (!r) return error(i, "self-check", "the name of a statement on `" + name + "` is not found");
-      const std::string token(text().substr(r->begin, r->end - r->begin));
-      if (!change(changes, r->begin, r->end, spell_like(token, new_name))) {
+      // statements_about() chose it by this subject: one name, `name`.
+      const auto subject = subject_of(index().text_of(text(), statement(k)));
+      if (!respell(changes, range_of(subject->name_words[0]), new_name)) {
         return error(i, "edit-outside-slice", "the name of a statement on `" + name + "` cannot be changed");
       }
     }
-    return std::nullopt;
-  }
-
-  // Where a new trigger or event goes: after the last object of the home
-  // schema of the first of `types` that has one; in an MSM script within
-  // Section 150 (which every deployment runs again), else at its end.
-  // `msm`: the script has MSM sections.
-  Place place_after(std::initializer_list<std::string_view> types, bool *msm) const {
-    const Schema *h = home();
-    const auto r = msm_section(150);
-    *msm = r.has_value();
-    Place p;
-    if (h != nullptr) {
-      if (r) {
-        std::vector<std::string_view> in150;
-        for (const auto t : types) {
-          if (t != "table") in150.push_back(t);
-        }
-        for (const auto t : in150) {
-          p.anchor = last_in(*h, {t}, r);
-          if (p.anchor.k) break;
-        }
-      } else {
-        p.anchor = last_in(*h, types);
-      }
-    }
-    if (r && !p.anchor.k) p.spot = end_of_section(*r, style_at(std::nullopt, std::nullopt).eol);
-    return p;
-  }
-
-  // Inserts the CREATE `sql` (of a trigger or event, `keyword` TRIGGER or
-  // EVENT) at `place`, as the object it follows of its own type is written:
-  // dropped first or CREATE OR REPLACE, and in an MSM script always one of
-  // the two.  `make` writes the CREATE, given whether it is OR REPLACE.  The
-  // file and offset it went to, and the statement as laid out.
-  template <typename Make>
-  std::optional<Edit_error> insert_create(size_t i, const Place &place, bool msm, std::string_view type,
-                                          const std::string &keyword, const std::string &name, Make make,
-                                          std::pair<size_t, uint32_t> *at, std::string *laid, Changes &changes) {
-    // The blank lines above the object it follows count from that one's
-    // DROP ... IF EXISTS, whatever its type; its form only from its own type.
-    const Form after = place.anchor.k ? form_at(*place.anchor.k, place.anchor.name) : Form{};
-    const Form form = place.anchor.type == type ? after : Form{};
-    const edit_text::Style st = style_of(place.anchor);
-    const std::string sql = make(st, form.or_replace);
-    const bool drop_first = form.drop || (msm && !form.or_replace);
-    const std::string drop = drop_first ? st.kw("DROP " + keyword + " IF EXISTS") + " " + st.id(name) : "";
-    const std::string noun = lower(keyword) + " `" + name + "`";
-    if (const auto p = parse_problem(sql)) return error(i, "bad-request", noun + " does not parse (" + *p + ")");
-    *laid = laid_out(sql, st, true);
-    const auto where = insert_at(changes, spot_of(place, st, after.drop), *laid, st,
-                                 laid->find(';') != std::string::npos, drop);
-    if (!where) return error(i, "self-check", "no place for the CREATE of " + noun + " was found");
-    *at = *where;
     return std::nullopt;
   }
 
@@ -3182,25 +3188,12 @@ class Editor {
       }
       t.order_trigger = o->name;
     }
-    bool msm = false;
-    Place place = place_after({"trigger", "routine", "view", "table"}, &msm);
-    // Not before its table: a script that creates its routines first.
-    if (const auto kt = statement_of(table->origin); kt && (!place.anchor.k || *place.anchor.k < *kt) && !place.spot) {
-      place.anchor = Anchor{kt, &table->origin, table->name, Target_kind::table, "table"};
-    }
-    std::pair<size_t, uint32_t> at;
-    std::string laid;
-    if (auto err = insert_create(
-            i, place, msm, "trigger", "TRIGGER", t.name,
-            [&](const edit_text::Style &st, bool or_replace) { return edit_text::create_trigger_sql(t, st, or_replace); },
-            &at, &laid, changes)) {
-      return err;
-    }
-    migrate(i, laid, Act::create, Obj::trigger, t.name);
-    note_at(i, "trigger-created", at.first, m_s.files()[at.first].log.to_original(at.second),
-            "the migration creates the trigger `" + t.name +
-                "`, which cannot run inside a stored procedure: msm or a person must place it");
-    return std::nullopt;
+    // Before the events, after its table.
+    const Place place = place_for(150, {Kind::trigger, Kind::routine, Kind::view, Kind::table}, {Kind::event}, table);
+    return insert_create(
+        i, place, Kind::trigger, Obj::trigger, t.name,
+        [&](const edit_text::Style &st, bool or_replace) { return edit_text::create_trigger_sql(t, st, or_replace); },
+        changes);
   }
 
   std::optional<Edit_error> drop_trigger(size_t i, const Schema_edit &e, Changes &changes) {
@@ -3238,8 +3231,7 @@ class Editor {
       const auto k = statement_of(x.origin);
       const auto r = k ? order_name_range(*k) : std::nullopt;
       if (!r) return error(i, "self-check", "the FOLLOWS or PRECEDES of trigger `" + x.name + "` is not found");
-      const std::string token(text().substr(r->begin, r->end - r->begin));
-      if (!change(changes, r->begin, r->end, spell_like(token, e.new_name))) {
+      if (!respell(changes, *r, e.new_name)) {
         return error(i, "edit-outside-slice", "the FOLLOWS or PRECEDES of trigger `" + x.name + "` cannot be changed");
       }
     }
@@ -3250,21 +3242,11 @@ class Editor {
   std::optional<Edit_error> add_event(size_t i, const Schema_edit &e, Changes &changes) {
     const Event &ev = *e.new_event;
     if (lookup().event(ev.name).second != nullptr) return error(i, "name-taken", "an event `" + ev.name + "` exists");
-    bool msm = false;
-    const Place place = place_after({"event", "trigger", "routine", "view", "table"}, &msm);
-    std::pair<size_t, uint32_t> at;
-    std::string laid;
-    if (auto err = insert_create(
-            i, place, msm, "event", "EVENT", ev.name,
-            [&](const edit_text::Style &st, bool or_replace) { return edit_text::create_event_sql(ev, st, or_replace); },
-            &at, &laid, changes)) {
-      return err;
-    }
-    migrate(i, laid, Act::create, Obj::event, ev.name);
-    note_at(i, "event-created", at.first, m_s.files()[at.first].log.to_original(at.second),
-            "the migration creates the event `" + ev.name +
-                "`, which cannot run inside a stored procedure: msm or a person must place it");
-    return std::nullopt;
+    return insert_create(
+        i, place_for(150, {Kind::event, Kind::trigger, Kind::routine, Kind::view, Kind::table}), Kind::event,
+        Obj::event, ev.name,
+        [&](const edit_text::Style &st, bool or_replace) { return edit_text::create_event_sql(ev, st, or_replace); },
+        changes);
   }
 
   std::optional<Edit_error> drop_event(size_t i, const Schema_edit &e, Changes &changes) {
@@ -3698,6 +3680,23 @@ class Editor {
     return std::nullopt;
   }
 
+  // No statement renames a routine or a trigger: the migration drops it
+  // and creates it again, with the CREATE as it runs, from the expanded text
+  // (a body that includes a file holds that file's text), and a note that
+  // the CREATE cannot run inside a stored procedure.
+  std::optional<Edit_error> migrate_recreate(size_t i, Obj o, const Origin &origin, const std::string &old_name,
+                                             const std::string &new_name) {
+    const auto k = statement_of(origin);
+    if (!k) return error(i, "self-check", "the CREATE of `" + new_name + "` is not found");
+    const std::string noun = to_string(o);
+    migrate_drop(i, o, old_name);
+    migrate(i, std::string(trim(index().text_of(text(), statement(*k)))), Act::create, o, new_name);
+    note(i, o == Obj::trigger ? "trigger-recreated" : "routine-recreated", origin.source, origin.statement.begin,
+         "no statement renames a " + noun + ": the migration drops `" + old_name + "` and creates `" + new_name +
+             "`, which cannot run inside a stored procedure");
+    return std::nullopt;
+  }
+
   // The edited outline shows the edit.
   std::optional<Edit_error> verify(size_t i, const Schema_edit &e) {
     const auto l = lookup();
@@ -3781,20 +3780,7 @@ class Editor {
           return fail("the edited script still has the " + kind + " `" + old_name + "`");
         }
         if (old_name == e.new_name) break;  // the same name again: nothing to migrate
-        // No DDL renames a routine: drop it, create it again.
-        // The CREATE as it runs: from the expanded text, so a body that
-        // includes a file holds that file's text.
-        const Routine &r = *now[0].second;
-        const auto at = m_s.to_searched(r.origin.source, r.origin.statement.begin);
-        const auto &index = m_s.searched_index();
-        const size_t k = at ? index.find(*at) : index.statements().size();
-        if (k >= index.statements().size()) return fail("the CREATE of `" + e.new_name + "` is not found");
-        migrate_drop(i, routine_object(kind), old_name);
-        migrate(i, std::string(trim(index.text_of(m_s.searched(), index.statements()[k]))), Act::create,
-                routine_object(kind), e.new_name);
-        note(i, "routine-recreated", r.origin.source, r.origin.statement.begin,
-             "no statement renames a " + kind + ": the migration drops `" + old_name +
-                 "` and creates `" + e.new_name + "`, which cannot run inside a stored procedure");
+        if (auto err = migrate_recreate(i, routine_object(kind), now[0].second->origin, old_name, e.new_name)) return err;
         break;
       }
       case Edit_op::add_table: {
@@ -3941,7 +3927,7 @@ class Editor {
         if (l.trigger(old_name).second != nullptr) return fail("the edited script still has trigger `" + old_name + "`");
         break;
       case Edit_op::rename_trigger: {
-        const auto [sc, t] = l.trigger(e.new_name);
+        const Trigger *t = l.trigger(e.new_name).second;
         if (t == nullptr || t->name != e.new_name) return fail("the edited script has no trigger `" + e.new_name + "`");
         if (!case_only) {
           if (l.trigger(old_name).second != nullptr) {
@@ -3956,18 +3942,7 @@ class Editor {
           }
         }
         if (old_name == e.new_name) break;  // the same name again: nothing to migrate
-        // No statement renames a trigger: drop it, create it again, from
-        // the expanded text.
-        const auto at = m_s.to_searched(t->origin.source, t->origin.statement.begin);
-        const auto &index = m_s.searched_index();
-        const size_t k = at ? index.find(*at) : index.statements().size();
-        if (k >= index.statements().size()) return fail("the CREATE of `" + e.new_name + "` is not found");
-        migrate_drop(i, Obj::trigger, old_name);
-        migrate(i, std::string(trim(index.text_of(m_s.searched(), index.statements()[k]))), Act::create,
-                Obj::trigger, e.new_name);
-        note(i, "trigger-recreated", t->origin.source, t->origin.statement.begin,
-             "no statement renames a trigger: the migration drops `" + old_name + "` and creates `" + e.new_name +
-                 "`, which cannot run inside a stored procedure");
+        if (auto err = migrate_recreate(i, Obj::trigger, t->origin, old_name, e.new_name)) return err;
         break;
       }
       case Edit_op::add_event: {

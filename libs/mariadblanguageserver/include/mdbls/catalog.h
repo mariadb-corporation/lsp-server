@@ -279,6 +279,8 @@ struct Schema {
   Table *table(std::string_view name);
   const Table *table(std::string_view name) const;
   const View *view(std::string_view name) const;
+  const Trigger *trigger(std::string_view name) const;
+  const Event *event(std::string_view name) const;
   // `kind`: "procedure" or "function"; "" for either (the first of the name).
   const Routine *routine(std::string_view name, std::string_view kind = {}) const;
   bool empty() const;

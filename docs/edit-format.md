@@ -160,7 +160,8 @@ has above it (a banner's comment lines not counted); no banner is written.
   Its name must be free among the routines of its kind (`name-taken`); a procedure and a
   function may share a name, as in MariaDB.
 - **A trigger** goes after the schema's last trigger, else its last routine, else its last
-  view, else its last table, and never before its own table's `CREATE TABLE`; an **event**
+  view, else its last table, never before its own table's `CREATE TABLE` and never after the
+  schema's first event (nor that event's `DROP EVENT IF EXISTS`); an **event**
   after the schema's last event, else its last trigger, routine, view or table. In an MSM script
   both go into Section 150: after the last object of that order there, else at the end of the
   section. They are written as their neighbour of their own kind is, dropped first or `CREATE OR
@@ -176,8 +177,9 @@ has above it (a banner's comment lines not counted); no banner is written.
 - **A statement removed** (with the `DROP ... IF EXISTS` of the object before it, which is
   also removed) goes with its lines, with the comment lines right above it when
   one of them names the object (a Workbench banner), and the blank lines above it, as
-  adding put them there (those below when nothing is above it). So adding an object and
-  dropping it again gives the files back as they were.
+  adding put them there (those below when nothing is above it). A `DELIMITER` block left
+  without statements goes too, its two `DELIMITER` lines with the blank lines above it. So
+  adding an object and dropping it again gives the files back as they were.
 - **A key** goes into the `CREATE TABLE`: a primary key after the last column, another index
   after the last index (else the last column), a foreign key after the last foreign key (else
   the last index, else the last column). A table whose `CREATE TABLE` has no column list gets
