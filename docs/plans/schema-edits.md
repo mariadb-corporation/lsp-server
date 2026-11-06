@@ -469,3 +469,16 @@ into Section 140. New views and routines take their neighbour's form (`OR REPLAC
 from its `DROP`, and a section's banner no longer counts as a statement's. Before this, a
 first routine in an MSM project without routines went after its last view (Section 150 when
 it had views) or its last table (Section 140), or to the end of the script; now Section 150.
+
+**Follow-ups, 2026-11-06:** a routine's `Object_id` carries its kind (`routine_kind`, from
+the name's context: `CALL` and `PROCEDURE` say procedure, a call in an expression and
+`FUNCTION` say function; a name whose context does not say equals either). A procedure and a
+function of one name are now renamed apart, so `rename_routine` no longer answers
+`unsupported` for such a pair or skips the other kind's `DROP`, and `add_routine` and
+`rename_routine` answer `name-taken` only for a routine of the same kind. `sql_names` reads
+the key and constraint names of `ALTER TABLE ... DROP INDEX|KEY|FOREIGN KEY|CONSTRAINT`,
+`RENAME INDEX`, `ALTER INDEX`, and those of `KEY k (...)`/`CONSTRAINT c` in a table's
+definition, as index names, no longer as columns: a column rename leaves a key named like it
+alone. With routines of both kinds allowed one name, `rest-reference` notes match the REST
+object's kind (a REST procedure is not the function's), and the new name of `ALTER EVENT e
+RENAME TO x` is an event's, not a reference to a routine `x`.

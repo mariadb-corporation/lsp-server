@@ -188,8 +188,10 @@ const View *Schema::view(std::string_view n) const {
   return it == views.end() ? nullptr : &*it;
 }
 
-const Routine *Schema::routine(std::string_view n) const {
-  auto it = find_named(routines, n);
+const Routine *Schema::routine(std::string_view n, std::string_view kind) const {
+  auto it = std::find_if(routines.begin(), routines.end(), [&](const Routine &r) {
+    return iequals(r.name, n) && (kind.empty() || iequals(r.kind, kind));
+  });
   return it == routines.end() ? nullptr : &*it;
 }
 

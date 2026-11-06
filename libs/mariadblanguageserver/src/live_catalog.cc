@@ -470,7 +470,7 @@ void Live_catalog::read_details(std::vector<Detail_request> requests) {
           const View *v = sc->view(it->name);
           stub = v != nullptr && v->stub;
         } else {
-          const Routine *r = sc->routine(it->name);
+          const Routine *r = sc->routine(it->name, it->type);
           stub = r != nullptr && r->stub;
         }
       }

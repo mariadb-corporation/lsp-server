@@ -65,6 +65,9 @@ struct Name_ref {
   bool has_owner = false;
   std::string owner_schema;  // "" when not qualified
   std::string owner;
+  // A routine's: "procedure" (CALL p, CREATE|DROP|ALTER|SHOW PROCEDURE p),
+  // "function" (f(...), FUNCTION f); "" when the statement does not say.
+  std::string routine_kind;
   uint32_t node = Syntax_tree::npos;  // the token's node, npos without a tree
 };
 

@@ -467,15 +467,29 @@ TEST(Schema_edit, routines_in_delimiter_blocks) {
 
 TEST(Schema_edit, routine_kinds) {
   const std::string script =
-      "CREATE PROCEDURE r() SELECT 1;\n"
+      "DROP PROCEDURE IF EXISTS r;\n"
+      "CREATE PROCEDURE r() SELECT r();\n"
+      "DROP FUNCTION IF EXISTS r;\n"
       "CREATE FUNCTION r() RETURNS INT RETURN 1;\n"
+      "CALL r();\n"
       "SELECT r();\n";
   EXPECT_EQ("bad-request",
             failed(edit(script, {}, request("", R"({"op": "rename_routine", "routine": "r", "new_name": "x"})"))).kind);
-  // References cannot tell the two apart.
-  EXPECT_EQ("unsupported",
-            failed(edit(script, {}, request("", R"({"op": "rename_routine", "routine": "r", "kind": "function", "new_name": "f"})")))
-                .kind);
+  // A procedure and a function of one name: each renamed on its own.
+  EXPECT_EQ("DROP PROCEDURE IF EXISTS r;\n"
+            "CREATE PROCEDURE r() SELECT f();\n"
+            "DROP FUNCTION IF EXISTS f;\n"
+            "CREATE FUNCTION f() RETURNS INT RETURN 1;\n"
+            "CALL r();\n"
+            "SELECT f();\n",
+            text(ok(edit(script, {}, request("", R"({"op": "rename_routine", "routine": "r", "kind": "function", "new_name": "f"})"))), ""));
+  EXPECT_EQ("DROP PROCEDURE IF EXISTS p;\n"
+            "CREATE PROCEDURE p() SELECT r();\n"
+            "DROP FUNCTION IF EXISTS r;\n"
+            "CREATE FUNCTION r() RETURNS INT RETURN 1;\n"
+            "CALL p();\n"
+            "SELECT r();\n",
+            text(ok(edit(script, {}, request("", R"({"op": "rename_routine", "routine": "r", "kind": "procedure", "new_name": "p"})"))), ""));
   const auto r = ok(edit("CREATE FUNCTION r() RETURNS INT RETURN 1;\nSELECT r();\n", {},
                          request("", R"({"op": "rename_routine", "routine": "r", "kind": "function", "new_name": "f"})")));
   EXPECT_EQ("CREATE FUNCTION f() RETURNS INT RETURN 1;\nSELECT f();\n", text(r, ""));
@@ -917,9 +931,10 @@ TEST(Schema_edit, add_routine_in_the_delimiter_block) {
                                       "CREATE FUNCTION `f1`(`a` INT) RETURNS INT DETERMINISTIC RETURN a + 1"}),
             migration(r));
   EXPECT_EQ((std::vector<std::string>{"routine-created", "routine-created"}), note_kinds(r));
-  // Any routine of the name, of either kind, takes it.
+  // Only a routine of its own kind takes the name.
   EXPECT_EQ("name-taken",
-            failed(edit(k_shop, {}, request("shop", R"j({"op": "add_routine", "routine": {"name": "P1", "kind": "function", "returns": "INT", "body": "RETURN 1"}})j"))).kind);
+            failed(edit(k_shop, {}, request("shop", R"j({"op": "add_routine", "routine": {"name": "P1", "kind": "procedure", "body": "SELECT 1"}})j"))).kind);
+  ok(edit(k_shop, {}, request("shop", R"j({"op": "add_routine", "routine": {"name": "P1", "kind": "function", "returns": "INT", "body": "RETURN 1"}})j")));
   EXPECT_EQ("bad-request",
             failed(edit(k_shop, {}, request("shop", R"j({"op": "add_routine", "routine": {"name": "r", "kind": "procedure", "body": "BEGIN SELECT FROM; END"}})j"))).kind);
 }
@@ -1022,9 +1037,13 @@ TEST(Schema_edit, string_literals_follow_the_sql_mode) {
 }
 
 TEST(Schema_edit, rename_routine_to_a_name_of_the_other_kind) {
-  const std::string script = "CREATE PROCEDURE p() SELECT 1;\nCREATE FUNCTION f() RETURNS INT RETURN 1;\n";
+  // MariaDB keeps procedures and functions apart: the name is free.
+  const std::string script = "CREATE PROCEDURE p() SELECT 1;\nCREATE FUNCTION f() RETURNS INT RETURN 1;\nCALL p();\n";
+  EXPECT_EQ("CREATE PROCEDURE f() SELECT 1;\nCREATE FUNCTION f() RETURNS INT RETURN 1;\nCALL f();\n",
+            text(ok(edit(script, {}, request("", R"j({"op": "rename_routine", "routine": "p", "new_name": "f"})j"))), ""));
   EXPECT_EQ("name-taken",
-            failed(edit(script, {}, request("", R"j({"op": "rename_routine", "routine": "p", "new_name": "f"})j"))).kind);
+            failed(edit(script + "CREATE PROCEDURE q() SELECT 1;\n", {},
+                        request("", R"j({"op": "rename_routine", "routine": "p", "new_name": "q"})j"))).kind);
 }
 
 TEST(Schema_edit, an_undo_request) {

@@ -107,11 +107,11 @@ Catalog_view::Table_hit Catalog_view::find_table_in_layers(std::string_view sche
   return {};
 }
 
-Catalog_view::Routine_hit Catalog_view::find_routine(std::string_view schema,
-                                                     std::string_view name) const {
+Catalog_view::Routine_hit Catalog_view::find_routine(std::string_view schema, std::string_view name,
+                                                     std::string_view kind) const {
   for (const auto &l : m_layers) {
     for (const Schema *s : schemas_for(l, schema)) {
-      if (const Routine *r = s->routine(name)) {
+      if (const Routine *r = s->routine(name, kind)) {
         if (r->stub) m_stubs.insert({s->name, r->name, r->kind});
         return {r, s, &l};
       }

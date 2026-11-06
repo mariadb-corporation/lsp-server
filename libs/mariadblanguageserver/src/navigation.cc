@@ -86,7 +86,13 @@ std::vector<T> on_statements(const std::vector<size_t> &todo, size_t per_job,
 
 bool Object_id::operator==(const Object_id &o) const {
   return kind == o.kind && iequals(schema, o.schema) && iequals(table, o.table) &&
-         iequals(name, o.name);
+         iequals(name, o.name) && routine_kind == o.routine_kind;
+}
+
+bool Object_id::matches(const Object_id &target) const {
+  return kind == target.kind && iequals(schema, target.schema) && iequals(table, target.table) &&
+         iequals(name, target.name) &&
+         (routine_kind.empty() || target.routine_kind.empty() || routine_kind == target.routine_kind);
 }
 
 void Name_resolver::resolve_table(Resolution &r, const std::string &schema,
@@ -248,14 +254,14 @@ Resolution Name_resolver::resolve(const Name_ref &ref) const {
     case Name_kind::routine:
     case Name_kind::function: {
       const std::string schema = ref.qualifiers.empty() ? std::string() : ref.qualifiers.back();
-      const auto hit = m_catalogs.find_routine(schema, ref.name);
+      const auto hit = m_catalogs.find_routine(schema, ref.name, ref.routine_kind);
       if (hit.routine != nullptr) {
         r.routine = hit.routine;
         r.schema = hit.schema;
         r.layer = hit.layer;
         r.id = {Target_kind::routine,
                 hit.schema->name.empty() ? m_catalogs.current_schema() : hit.schema->name, "",
-                hit.routine->name};
+                hit.routine->name, ref.routine_kind};
         break;
       }
       if (ref.kind == Name_kind::function && ref.qualifiers.empty()) {
@@ -266,7 +272,7 @@ Resolution Name_resolver::resolve(const Name_ref &ref) const {
         }
       }
       r.id = {Target_kind::routine, schema.empty() ? m_catalogs.current_schema() : schema, "",
-              ref.name};
+              ref.name, ref.routine_kind};
       break;
     }
     case Name_kind::alias: {
@@ -474,7 +480,7 @@ void references_in(std::string_view text, const Statement_index &index, size_t i
   const Name_resolver resolver(catalogs, names);
   for (const auto &ref : names.names(id.name)) {
     const auto r = resolver.resolve(ref);
-    if (r.id == id) out->push_back({ref.range, ref.defining});
+    if (r.id.matches(id)) out->push_back({ref.range, ref.defining});
   }
 }
 
@@ -602,8 +608,8 @@ std::optional<Signature_help> signature_help(std::string_view text, const Statem
 
   Signature_help help;
   help.active_parameter = stack.back().commas;
-  const auto hit = catalogs.find_routine(schema, name);
-  if (hit.routine != nullptr && (call || hit.routine->kind == "function")) {
+  const auto hit = catalogs.find_routine(schema, name, call ? "procedure" : "function");
+  if (hit.routine != nullptr) {
     Signature sig;
     sig.label = hit.routine->name + "(";
     for (size_t k = 0; k < hit.routine->parameters.size(); ++k) {

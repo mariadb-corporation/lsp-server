@@ -43,7 +43,8 @@ struct Name_syms {
   S(field_spec) S(key_def) S(sp_param_name) S(sp_decl_ident) S(sp_decl_idents)
   S(sp_decl_idents_init_vars) S(with_element_head) S(with_list_element) S(with_column_list)
   S(ident_sys_alloc) S(option_value_no_option_type) S(trigger_tail) S(event_tail)
-  S(optionally_qualified_column_ident)
+  S(optionally_qualified_column_ident) S(key_or_index) S(FOREIGN) S(CONSTRAINT) S(opt_ident)
+  S(sp_handler) S(PROCEDURE_SYM) S(FUNCTION_SYM) S(create_routine) S(show_param) S(opt_ev_rename_to)
   // scopes and tables
   S(query_specification) S(query_expression_body_ext) S(update) S(insert) S(replace)
   S(table_primary_ident) S(table_primary_derived) S(table_name_with_opt_use_partition)
@@ -352,6 +353,28 @@ Name_ref Statement_names::classify(uint32_t token) const {
     if (owner == npos) owner = ancestor(a, s.create);
     return owner == npos ? npos : m_tree.child(owner, s.table_ident);
   };
+  // An ALTER TABLE item about a key or constraint, not a column: DROP
+  // INDEX|KEY|FOREIGN KEY|CONSTRAINT x, RENAME INDEX x TO y, ALTER INDEX x.
+  auto key_item = [&](uint32_t item) {
+    return item != npos && m_tree.node(item).symbol == s.alter_list_item &&
+           (m_tree.child(item, s.key_or_index) != npos || m_tree.child(item, s.FOREIGN) != npos ||
+            m_tree.child(item, s.CONSTRAINT) != npos);
+  };
+  // The routine kind a routine's name is given: the PROCEDURE or FUNCTION
+  // keyword of the statement rule that owns it (CREATE, DROP (in its
+  // sp_handler), ALTER, SHOW); "" when it has none.
+  auto routine_kind_at = [&](uint32_t n) -> std::string {
+    for (; n != npos; n = m_tree.node(n).parent) {
+      const int ns = m_tree.node(n).symbol;
+      if (ns != s.create_routine && ns != s.drop_routine && ns != s.alter && ns != s.show_param) continue;
+      const uint32_t h = m_tree.child(n, s.sp_handler);
+      const uint32_t k = h != npos ? h : n;
+      if (m_tree.child(k, s.PROCEDURE_SYM) != npos) return "procedure";
+      if (m_tree.child(k, s.FUNCTION_SYM) != npos) return "function";
+      return "";
+    }
+    return "";
+  };
   // In a trigger body: the trigger's table.
   auto trigger_table = [&] {
     const uint32_t tt = ancestor(a, s.trigger_tail);
@@ -406,14 +429,17 @@ Name_ref Statement_names::classify(uint32_t token) const {
     }
     const uint32_t p = m_tree.node(a).parent;
     const int ps = p == npos ? -1 : m_tree.node(p).symbol;
-    ref.kind = ps == s.key_def ? Name_kind::index : Name_kind::column;
-    ref.defining = ps == s.key_def || ps == s.field_spec;
+    // opt_ident is only ever a key's or constraint's name: KEY k (...),
+    // CONSTRAINT c ..., FOREIGN KEY f (...).
+    const bool key_name = ps == s.key_def || ps == s.opt_ident;
+    ref.kind = key_name || key_item(p) ? Name_kind::index : Name_kind::column;
+    ref.defining = key_name || ps == s.field_spec;
     set_owner(ddl_table(), &ref);
     return ref;
   }
   // A key part: `a`, or `a(10)` with a prefix length.
   if (sym == s.key_part_simple || sym == s.key_part || sym == s.ref_list || sym == s.alter_list_item) {
-    ref.kind = Name_kind::column;
+    ref.kind = key_item(a) ? Name_kind::index : Name_kind::column;
     const uint32_t r = ancestor(a, s.references);
     set_owner(r != npos ? m_tree.child(r, s.table_ident) : ddl_table(), &ref);
     return ref;
@@ -459,6 +485,7 @@ Name_ref Statement_names::classify(uint32_t token) const {
     }
     if (at + 1 == before_paren) {
       ref.kind = Name_kind::function;
+      ref.routine_kind = "function";
       qualify();
     } else if (at + 1 < before_paren) {
       ref.kind = Name_kind::schema;
@@ -473,14 +500,18 @@ Name_ref Statement_names::classify(uint32_t token) const {
     qualify();
     if (sym == s.call) {
       ref.kind = Name_kind::routine;
+      ref.routine_kind = "procedure";
       return ref;
     }
     // A trigger's or event's name is not a routine's: CREATE (their tails),
-    // and DROP TRIGGER, DROP EVENT, ALTER EVENT (the keyword beside it).
+    // DROP TRIGGER, DROP EVENT, ALTER EVENT (the keyword beside it), and
+    // ALTER EVENT ... RENAME TO.
     const uint32_t p = m_tree.node(a).parent;
-    const bool beside = p != npos && (m_tree.child(p, s.TRIGGER_SYM) != npos || m_tree.child(p, s.EVENT_SYM) != npos);
+    const bool beside = p != npos && (m_tree.child(p, s.TRIGGER_SYM) != npos || m_tree.child(p, s.EVENT_SYM) != npos ||
+                                      m_tree.node(p).symbol == s.opt_ev_rename_to);
     const bool other = beside || ancestor(a, s.trigger_tail) != npos || ancestor(a, s.event_tail) != npos;
     ref.kind = other ? Name_kind::other : Name_kind::routine;
+    if (!other) ref.routine_kind = routine_kind_at(a);
     ref.defining = ancestor(a, s.create) != npos;
     return ref;
   }
@@ -492,6 +523,7 @@ Name_ref Statement_names::classify(uint32_t token) const {
     }
     qualify();
     ref.kind = Name_kind::routine;
+    ref.routine_kind = routine_kind_at(a);
     return ref;
   }
   if (sym == s.use) {
@@ -501,8 +533,8 @@ Name_ref Statement_names::classify(uint32_t token) const {
   if (sym == s.create || sym == s.drop || sym == s.alter) {
     if (m_tree.child(a, s.DATABASE) != npos) {
       ref.kind = Name_kind::schema;
-    } else if (sym == s.create && m_tree.child(a, s.INDEX_SYM) != npos) {
-      ref.kind = Name_kind::index;
+    } else if (sym != s.alter && m_tree.child(a, s.INDEX_SYM) != npos) {
+      ref.kind = Name_kind::index;  // CREATE INDEX i, DROP INDEX i
     } else {
       ref.kind = Name_kind::other;
     }
