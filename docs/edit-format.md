@@ -169,7 +169,8 @@ has above it (a banner's comment lines not counted); no banner is written.
   the neighbour uses `OR REPLACE`; inside a `DELIMITER` block when the body holds `;`, as a
   routine. A trigger's `events` is the outline's string (`INSERT`, `UPDATE OR DELETE`), not an
   array; `update_columns` needs `UPDATE` among them. Its table must exist and be a table
-  (`unknown-object`), as must the trigger its `order` names, on the same table. Trigger names
+  (`unknown-object`), as must the columns of its `update_columns` and the trigger its `order`
+  names, on the same table. Trigger names
   and event names must be free in the schema (`name-taken`). A trigger that another trigger
   follows or precedes cannot be dropped (`referenced`): that one's `CREATE` fails without it.
   A trigger or event rename changes the statements about it by name (no reference search: SQL

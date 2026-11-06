@@ -974,6 +974,24 @@ TEST(Schema_edit, drop_routine) {
   EXPECT_EQ("unknown-object", failed(edit(k_shop, {}, request("shop", R"j({"op": "drop_routine", "routine": "p1", "kind": "function"})j"))).kind);
 }
 
+TEST(Schema_edit, drop_routine_keeps_the_block_above_its_drop) {
+  // The DROP ... IF EXISTS above the block bounds it: the block before
+  // keeps its closing DELIMITER line.
+  const std::string before =
+      "CREATE TABLE t (a INT);\n"
+      "DELIMITER $$\n"
+      "CREATE PROCEDURE a()\nBEGIN\n  SELECT 1;\nEND$$\n"
+      "DELIMITER ;\n";
+  const std::string script = before +
+                             "\n"
+                             "DROP PROCEDURE IF EXISTS b;\n"
+                             "DELIMITER $$\n"
+                             "CREATE PROCEDURE b()\nBEGIN\n  SELECT 2;\nEND$$\n"
+                             "DELIMITER ;\n";
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "drop_routine", "routine": "b"})j")));
+  EXPECT_EQ(before, text(r, ""));
+}
+
 TEST(Schema_edit, rename_column_in_a_key_part_with_a_prefix_length) {
   const auto r = ok(edit("CREATE TABLE t (a TEXT, b INT, INDEX ix (a(10), b));\n", {},
                          request("", R"j({"op": "rename_column", "table": "t", "column": "a", "new_name": "z"})j")));
@@ -1652,6 +1670,15 @@ TEST(Schema_edit, add_trigger_with_all_its_members) {
   EXPECT_EQ("FOLLOWS", t.order_kind);
   EXPECT_EQ("t1", t.order_trigger);
   EXPECT_EQ("t", t.table);
+}
+
+TEST(Schema_edit, add_trigger_update_columns_are_the_tables) {
+  const std::string script = "CREATE TABLE t (a INT, b INT);\n";
+  EXPECT_EQ("unknown-object",
+            failed(edit(script, {}, request("", R"j({"op": "add_trigger", "trigger": {"name": "x", "timing": "BEFORE", "events": "UPDATE", "table": "t", "update_columns": ["c"], "body": "SET NEW.a = 1"}})j"))).kind);
+  // Spelled as the table spells them.
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "add_trigger", "trigger": {"name": "x", "timing": "BEFORE", "events": "UPDATE", "table": "t", "update_columns": ["B"], "body": "SET NEW.a = 1"}})j")));
+  EXPECT_EQ(script + "CREATE TRIGGER x BEFORE UPDATE OF b ON t FOR EACH ROW SET NEW.a = 1;\n", text(r, ""));
 }
 
 TEST(Schema_edit, a_trigger_goes_after_its_table) {

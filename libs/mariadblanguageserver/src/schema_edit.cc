@@ -2260,7 +2260,7 @@ class Editor {
           const auto k = statement_of(o.origin);
           if (!k) continue;
           const uint32_t at = statement(form_at(*k, o.name).drop.value_or(*k)).begin;
-          if (at > within.begin && at < within.end) within.end = at;
+          if (at >= within.begin && at < within.end) within.end = at;
         }
       });
     }
@@ -2629,14 +2629,20 @@ class Editor {
     const std::string_view t = text();
     const auto &sts = index().statements();
     auto sql = [&](size_t j) { return sts[j].kind == Statement_kind::sql; };
+    std::set<size_t> done;  // the statements of a block already looked at
     for (const size_t k : gone) {
-      if (index().delimiters()[statement(k).active_delimiter] == ";") continue;
-      // The run of statements around `k` that all go, and its neighbours.
+      if (done.count(k) != 0) continue;
+      const size_t d = statement(k).active_delimiter;
+      if (index().delimiters()[d] == ";") continue;
+      // The run of statements around `k` under its delimiter that all go,
+      // and its neighbours.  A statement under another delimiter (a DROP
+      // ... IF EXISTS above the block) bounds the run, gone or not.
+      auto in_run = [&](size_t j) { return gone.count(j) != 0 && statement(j).active_delimiter == d; };
       size_t first = k, last = k;
       std::optional<size_t> prev, next;
       for (size_t j = k; j-- > 0;) {
         if (!sql(j)) continue;
-        if (gone.count(j) == 0) {
+        if (!in_run(j)) {
           prev = j;
           break;
         }
@@ -2644,12 +2650,15 @@ class Editor {
       }
       for (size_t j = k + 1; j < sts.size(); ++j) {
         if (!sql(j)) continue;
-        if (gone.count(j) == 0) {
+        if (!in_run(j)) {
           next = j;
           break;
         }
         last = j;
       }
+      for (size_t j = first; j <= last; ++j) done.insert(j);
+      // One block: no DELIMITER line between the run's statements.
+      if (delimiter_line(statement(first).begin, statement(last).end, false)) continue;
       const auto open = delimiter_line(prev ? statement(*prev).end : 0, statement(first).begin, true);
       const auto close =
           delimiter_line(statement(last).end, next ? statement(*next).begin : static_cast<uint32_t>(t.size()), false);
@@ -3137,7 +3146,9 @@ class Editor {
   // in its FOLLOWS or PRECEDES.
   std::optional<Range> order_name_range(size_t k) const {
     const std::string_view sql = index().text_of(text(), statement(k));
-    const auto w = words_of(sql, 64);
+    // Not a fixed few words: a DEFINER and a long UPDATE OF list come
+    // before FOR EACH ROW.
+    const auto w = words_of(sql, 4096);
     auto is = [&](size_t x, const char *word) { return x < w.size() && !w[x].quoted && iequals(w[x].text, word); };
     for (size_t j = 2; j + 1 < w.size(); ++j) {
       if (!is(j - 2, "FOR") || !is(j - 1, "EACH") || !is(j, "ROW")) continue;
@@ -3176,6 +3187,11 @@ class Editor {
       return error(i, "unknown-object", "there is no table `" + t.table + "`");
     }
     t.table = table->name;
+    for (auto &c : t.update_columns) {
+      const Column *col = table->column(c);
+      if (col == nullptr) return error(i, "unknown-object", "table `" + table->name + "` has no column `" + c + "`");
+      c = col->name;
+    }
     if (const Trigger *x = l.trigger(t.name).second) {
       return error(i, "name-taken", "a trigger `" + t.name + "` exists on table `" + x->table + "`");
     }
