@@ -982,7 +982,9 @@ class Lookup {
       else if (s.name.empty()) m_schemas.push_back(&s);
     }
   }
-  const std::vector<const Schema *> &schemas() const { return m_schemas; }
+  // A copy (one or two pointers): `lookup().schemas()` in a range-for
+  // would otherwise refer into the destroyed Lookup.
+  std::vector<const Schema *> schemas() const { return m_schemas; }
 
   std::pair<const Schema *, const Table *> table(std::string_view name) const {
     for (const Schema *s : m_schemas) {
