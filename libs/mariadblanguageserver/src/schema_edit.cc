@@ -30,6 +30,7 @@
 #include <memory>
 #include <set>
 #include <tuple>
+#include <type_traits>
 
 #include "mdbls/catalog_view.h"
 #include "mdbls/keywords.h"
@@ -49,7 +50,6 @@ namespace {
 struct Op_name {
   Edit_op op;
   const char *name;
-  bool supported = true;  // false: answers `unsupported` (PR 3)
 };
 
 constexpr Op_name k_ops[] = {
@@ -166,17 +166,9 @@ const char *to_string(Edit_op op) {
   return "";
 }
 
-bool edit_op_supported(Edit_op op) {
-  for (const auto &o : k_ops) {
-    if (o.op == op) return o.supported;
-  }
-  return false;
-}
-
 std::string supported_edit_ops() {
   std::string out;
   for (const auto &o : k_ops) {
-    if (!o.supported) continue;
     if (!out.empty()) out += ' ';
     out += o.name;
   }
@@ -1683,7 +1675,7 @@ class Editor {
         // A comment block is the statement's banner, unless it is an MSM
         // section's: the blank lines above that are the section's.
         if (trim(line).empty()) ++blanks;
-        else if (!is_comment_line(line) || line.find("MSM Section ") != std::string_view::npos) break;
+        else if (!is_comment_line(line) || line.substr(0, k_msm_marker.size()) == k_msm_marker) break;
         lb = pb;
       }
     }
@@ -1930,26 +1922,33 @@ class Editor {
     std::optional<size_t> k;
     const Origin *origin = nullptr;
     std::string name;
+    Target_kind kind = Target_kind::none;  // table, view or routine
   };
   // The object of `objects` (a schema's tables, views or routines) placed
   // last in the searched text, within searched range `within` when given.
-  template <typename Objects>
-  Anchor last_of(const Objects &objects, std::optional<Range> within = std::nullopt) const {
+  template <typename T>
+  Anchor last_of(const std::vector<T> &objects, std::optional<Range> within = std::nullopt) const {
+    static_assert(std::is_same_v<T, Table> || std::is_same_v<T, View> || std::is_same_v<T, Routine>);
+    constexpr Target_kind kind = std::is_same_v<T, Table>  ? Target_kind::table
+                                 : std::is_same_v<T, View> ? Target_kind::view
+                                                           : Target_kind::routine;
     Anchor best;
     for (const auto &o : objects) {
       const auto k = statement_of(o.origin);
       if (!k || (within && (statement(*k).begin < within->begin || statement(*k).begin >= within->end))) continue;
-      if (!best.k || *k > *best.k) best = {k, &o.origin, o.name};
+      if (!best.k || *k > *best.k) best = {k, &o.origin, o.name, kind};
     }
     return best;
   }
 
+  // The start of an MSM section's marker line: `-- MSM Section 150: ...`.
+  static constexpr std::string_view k_msm_marker = "-- MSM Section ";
   // An MSM script's section `id`: from its marker (a line `-- MSM Section
   // 150: ...`) to the next one, in the searched text; nullopt when the
   // script has no such marker (it is not an MSM script).
   std::optional<Range> msm_section(int id) const {
     const std::string_view t = text();
-    const std::string_view marker = "-- MSM Section ";
+    const std::string_view marker = k_msm_marker;
     std::optional<Range> out;
     for (size_t p = t.find(marker); p != std::string_view::npos; p = t.find(marker, p + 1)) {
       if (p != line_begin(t, static_cast<uint32_t>(p))) continue;
@@ -2038,8 +2037,8 @@ class Editor {
   // In an MSM script, after the last of `objects` (then of `also`) in
   // section `section`, else at that section's end; nullopt for a script
   // without MSM sections.
-  template <typename A, typename B>
-  std::optional<Place> msm_place(int section, const A *objects, const B *also) const {
+  template <typename A, typename B = A>
+  std::optional<Place> msm_place(int section, const A *objects, const B *also = nullptr) const {
     const auto r = msm_section(section);
     if (!r) return std::nullopt;
     Place p;
@@ -2051,11 +2050,6 @@ class Editor {
   std::optional<Spot> spot_of(const Place &p, const edit_text::Style &st,
                               std::optional<size_t> gap_from = std::nullopt) const {
     return p.anchor.k ? std::optional<Spot>(after_statement(*p.anchor.k, st.eol, gap_from)) : p.spot;
-  }
-  // `CREATE ...` as `CREATE OR REPLACE ...`.
-  static std::string or_replace(const std::string &sql, const edit_text::Style &st) {
-    const std::string create = st.kw("CREATE");
-    return create + " " + st.kw("OR REPLACE") + sql.substr(create.size());
   }
 
   edit_text::Style style_of(const Anchor &a) const {
@@ -2199,8 +2193,7 @@ class Editor {
     }
     // An MSM script's tables are in Section 140.
     const Schema *h = home();
-    const Place place = msm_place(140, h != nullptr ? &h->tables : nullptr, static_cast<const std::vector<Table> *>(nullptr))
-                            .value_or(Place{anchor(false, false), std::nullopt});
+    const Place place = msm_place(140, h != nullptr ? &h->tables : nullptr).value_or(Place{anchor(false, false), std::nullopt});
     const edit_text::Style st = style_of(place.anchor);
     for (const auto &c : t.columns) {
       if (auto err = check_column(i, c, edit_text::column_sql(c, edit_text::column_checks(t, c.name), st))) {
@@ -2436,8 +2429,7 @@ class Editor {
     bool in_primary = false;
     for (const auto &ix : table->indexes) {
       if (ix.kind == "primary" && names(ix.columns(), column->name)) in_primary = true;
-      if (ix.origin.source == column->origin.source && ix.origin.statement.begin == column->origin.statement.begin &&
-          ix.origin.statement.end == column->origin.statement.end && ix.key_parts.size() == 1) {
+      if (ix.key_parts.size() == 1 && column_level(*table, ix) == column) {
         key = ix.kind == "primary" ? "PRIMARY KEY" : "UNIQUE";
       }
     }
@@ -2675,13 +2667,11 @@ class Editor {
     // An MSM script's views are in Section 150, which every deployment runs
     // again: the view must be CREATE OR REPLACE (or dropped first).
     const Schema *h = home();
-    const auto msm = msm_place(150, h != nullptr ? &h->views : nullptr, static_cast<const std::vector<View> *>(nullptr));
+    const auto msm = msm_place(150, h != nullptr ? &h->views : nullptr);
     const Place place = msm.value_or(Place{anchor(false, true), std::nullopt});
-    const bool after_view = place.anchor.k && h != nullptr && h->view(place.anchor.name) != nullptr;
-    const Form form = after_view ? form_at(*place.anchor.k, place.anchor.name) : Form{};
+    const Form form = place.anchor.kind == Target_kind::view ? form_at(*place.anchor.k, place.anchor.name) : Form{};
     const edit_text::Style st = style_of(place.anchor);
-    std::string sql = edit_text::create_view_sql(v, st);
-    if (form.or_replace || (msm && !form.drop)) sql = or_replace(sql, st);
+    const std::string sql = edit_text::create_view_sql(v, st, form.or_replace || (msm && !form.drop));
     const std::string drop = form.drop && !form.or_replace ? st.kw("DROP VIEW IF EXISTS") + " " + st.id(v.name) : "";
     if (const auto p = parse_problem(sql)) {
       return error(i, "bad-request", "view `" + v.name + "` does not parse (" + *p + ")");
@@ -2715,19 +2705,10 @@ class Editor {
     // the routine it follows is.
     const Schema *h = home();
     const auto msm = msm_place(150, h != nullptr ? &h->routines : nullptr, h != nullptr ? &h->views : nullptr);
-    Place place;
-    if (msm) {
-      place = *msm;
-    } else {
-      if (h != nullptr) place.anchor = last_of(h->routines);
-      if (!place.anchor.k) place.anchor = anchor(false, true);
-    }
-    const bool after_routine = place.anchor.k && h != nullptr && !lookup().routines(place.anchor.name, "").empty() &&
-                               h->view(place.anchor.name) == nullptr && h->table(place.anchor.name) == nullptr;
-    const Form form = after_routine ? form_at(*place.anchor.k, place.anchor.name) : Form{};
+    const Place place = msm.value_or(Place{anchor(true, true), std::nullopt});
+    const Form form = place.anchor.kind == Target_kind::routine ? form_at(*place.anchor.k, place.anchor.name) : Form{};
     const edit_text::Style st = style_of(place.anchor);
-    std::string sql = edit_text::create_routine_sql(r, st);
-    if (form.or_replace) sql = or_replace(sql, st);
+    const std::string sql = edit_text::create_routine_sql(r, st, form.or_replace);
     const bool drop_first = form.drop || (msm && !form.or_replace);
     const std::string drop =
         drop_first ? st.kw(r.kind == "function" ? "DROP FUNCTION IF EXISTS" : "DROP PROCEDURE IF EXISTS") + " " + st.id(r.name)
@@ -2829,14 +2810,16 @@ class Editor {
     return false;
   }
 
-  // The parsed statement and node of a column's field_spec at searched `r`.
-  std::optional<std::pair<Parsed, uint32_t>> field_spec_at(Range r) {
+  // The parsed statement at searched `r` and its first `sym` node whose
+  // range `fits(begin, end)` accepts.
+  template <typename Fits>
+  std::optional<std::pair<Parsed, uint32_t>> node_at(Range r, int sym, Fits fits) {
     const size_t k = index().find(r.begin);
     if (k >= index().statements().size()) return std::nullopt;
     auto p = parse(k);
     if (!p) return std::nullopt;
-    for (const uint32_t n : find_all_in(p->tree, p->tree.roots()[0], gram().field_spec)) {
-      if (p->tree.begin(n) == r.begin) return std::make_pair(std::move(*p), n);
+    for (const uint32_t n : find_all_in(p->tree, p->tree.roots()[0], sym)) {
+      if (fits(p->tree.begin(n), p->tree.end(n))) return std::make_pair(std::move(*p), n);
     }
     return std::nullopt;
   }
@@ -2844,26 +2827,15 @@ class Editor {
   // Removes the PRIMARY KEY (`primary`) or UNIQUE attribute of the column
   // whose field_spec is at searched `r`.
   bool remove_key_attribute(Changes &changes, Range r, bool primary) {
-    const auto at = field_spec_at(r);
+    const auto at = node_at(r, gram().field_spec, [&](uint32_t b, uint32_t) { return b == r.begin; });
     if (!at) return false;
     const auto &t = at->first.tree;
+    // find_all_in descends into asrow_attribute, where a vcol_attribute may sit.
+    const int attribute = primary ? gram().asrow_attribute : gram().vcol_attribute;
+    const int keyword = primary ? gram().KEY_SYM : gram().UNIQUE_SYM;
     std::vector<uint32_t> nodes;
-    if (primary) {
-      for (const uint32_t n : find_all_in(t, at->second, gram().asrow_attribute)) {
-        if (t.child(n, gram().KEY_SYM) != k_npos) nodes.push_back(n);
-      }
-    } else {
-      // vcol_attribute may sit inside an asrow_attribute: search both.
-      std::vector<uint32_t> todo{at->second};
-      while (!todo.empty()) {
-        const uint32_t n = todo.back();
-        todo.pop_back();
-        if (t.node(n).symbol == gram().vcol_attribute && t.child(n, gram().UNIQUE_SYM) != k_npos) {
-          nodes.push_back(n);
-          continue;
-        }
-        for (const uint32_t c : t.children(n)) todo.push_back(c);
-      }
+    for (const uint32_t n : find_all_in(t, at->second, attribute)) {
+      if (t.child(n, keyword) != k_npos) nodes.push_back(n);
     }
     if (nodes.size() != 1) return false;
     uint32_t b = t.begin(nodes[0]);
@@ -2883,17 +2855,15 @@ class Editor {
     return nullptr;
   }
 
-  static bool same_columns(const std::vector<std::string> &a, const std::vector<std::string> &b) {
-    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](const auto &x, const auto &y) {
-             return iequals(x, y);
-           });
-  }
   // Whether an index on `index` serves a foreign key on `fk`: those are its
   // leading columns.
   static bool serves(const std::vector<std::string> &index, const std::vector<std::string> &fk) {
     return fk.size() <= index.size() && std::equal(fk.begin(), fk.end(), index.begin(), [](const auto &x, const auto &y) {
              return iequals(x, y);
            });
+  }
+  static bool same_columns(const std::vector<std::string> &a, const std::vector<std::string> &b) {
+    return a.size() == b.size() && serves(a, b);
   }
 
   // What would lose the index it needs if `table`'s index `gone` went
@@ -2965,22 +2935,36 @@ class Editor {
     return std::nullopt;
   }
 
+  // The one item of `table`'s `items` that `pick` accepts; or an error
+  // naming `what`.
+  template <typename T, typename Pick>
+  std::variant<const T *, Edit_error> the_one(size_t i, const Table &table, const std::vector<T> &items, Pick pick,
+                                              const std::string &what) const {
+    const T *found = nullptr;
+    for (const auto &x : items) {
+      if (!pick(x)) continue;
+      if (found != nullptr) {
+        return error(i, "bad-request", "table `" + table.name + "` has more than one " + what);
+      }
+      found = &x;
+    }
+    if (found == nullptr) return error(i, "unknown-object", "table `" + table.name + "` has no " + what);
+    return found;
+  }
+
   // The index of `table` that drop_index names; or an error.
   std::variant<const Index *, Edit_error> index_named(size_t i, const Table &table, const Schema_edit &e) const {
-    std::vector<const Index *> found;
-    for (const auto &x : table.indexes) {
-      if (!e.name.empty() ? iequals(x.name, e.name)
-          : !e.kind.empty() ? x.kind == "primary"
-                            : x.name.empty() && same_columns(x.columns(), e.columns)) {
-        found.push_back(&x);
-      }
-    }
     const std::string what = !e.name.empty() ? "an index `" + e.name + "`"
                              : !e.kind.empty() ? std::string("a primary key")
                                                : "an unnamed index on (" + join(e.columns) + ")";
-    if (found.empty()) return error(i, "unknown-object", "table `" + table.name + "` has no " + what);
-    if (found.size() > 1) return error(i, "bad-request", "table `" + table.name + "` has more than one " + what);
-    return found[0];
+    return the_one(
+        i, table, table.indexes,
+        [&](const Index &x) {
+          return !e.name.empty()   ? iequals(x.name, e.name)
+                 : !e.kind.empty() ? x.kind == "primary"
+                                   : x.name.empty() && same_columns(x.columns(), e.columns);
+        },
+        what);
   }
 
   // Removes index `ix` of `table` from where it is defined.
@@ -3033,21 +3017,16 @@ class Editor {
     Index pk;
     pk.kind = "primary";
     for (const auto &c : e.columns) pk.key_parts.emplace_back().column = c;
-    std::string cols;
-    for (const auto &c : e.columns) cols += (cols.empty() ? "" : ", ") + st.id(c);
     bool ok = false;
     if (old != nullptr && column_level(*table, *old) == nullptr) {
       // The key's columns where it is written: its other attributes stay.
       const auto r = searched_range(old->origin.source, old->origin.statement);
-      const size_t k = r ? index().find(r->begin) : index().statements().size();
-      if (k < index().statements().size()) {
-        if (const auto p = parse(k)) {
-          for (const uint32_t kd : find_all_in(p->tree, p->tree.roots()[0], gram().key_def)) {
-            if (p->tree.begin(kd) > r->begin || p->tree.end(kd) < r->end) continue;
-            const uint32_t list = child_of(p->tree, kd, gram().key_list);
-            if (list != k_npos) ok = change(changes, p->tree.begin(list), p->tree.end(list), cols);
-          }
-        }
+      const auto at = r ? node_at(*r, gram().key_def, [&](uint32_t b, uint32_t en) { return b <= r->begin && r->end <= en; })
+                        : std::nullopt;
+      if (at) {
+        const auto &t = at->first.tree;
+        const uint32_t list = child_of(t, at->second, gram().key_list);
+        ok = list != k_npos && change(changes, t.begin(list), t.end(list), edit_text::ids(e.columns, st));
       }
     } else {
       ok = old == nullptr || remove_index(changes, *table, *old);
@@ -3082,10 +3061,16 @@ class Editor {
       // After the last ALTER TABLE ... FOREIGN KEY after both, else after the
       // referenced table.
       size_t after = *k_ref;
-      for (size_t k = *k_ref + 1; k < index().statements().size(); ++k) {
-        const std::string_view sql_k = index().text_of(text(), statement(k));
-        const auto subject = subject_of(sql_k);
-        if (subject && subject->verb == "ALTER" && subject->kind == "TABLE" && icontains(sql_k, "FOREIGN KEY")) after = k;
+      const std::vector<const Schema *> schemas = lookup().schemas();
+      for (const Schema *h : schemas) {
+        for (const auto &t : h->tables) {
+          for (const auto &other : t.foreign_keys) {
+            const auto k = statement_of(other.origin);
+            if (!k || *k <= after) continue;
+            const auto subject = subject_of(index().text_of(text(), statement(*k)));
+            if (subject && subject->verb == "ALTER") after = *k;
+          }
+        }
       }
       const std::string alter = st.kw("ALTER TABLE") + " " + st.id(table->name) + " " + st.kw("ADD") + " " + sql;
       ok = insert_statement(changes, after, laid_out(alter, st, false), st, false).has_value();
@@ -3101,34 +3086,27 @@ class Editor {
   std::optional<Edit_error> drop_foreign_key(size_t i, const Schema_edit &e, Changes &changes) {
     const Table *table = lookup().table(e.table).second;
     if (table == nullptr) return error(i, "unknown-object", "there is no table `" + e.table + "`");
-    std::vector<const Foreign_key *> found;
-    for (const auto &fk : table->foreign_keys) {
-      if (!e.name.empty() ? iequals(fk.name, e.name) : fk.name.empty() && same_columns(fk.columns, e.columns)) {
-        found.push_back(&fk);
-      }
-    }
     const std::string what = !e.name.empty() ? "foreign key `" + e.name + "`"
                                              : "unnamed foreign key on (" + join(e.columns) + ")";
-    if (found.empty()) return error(i, "unknown-object", "table `" + table->name + "` has no " + what);
-    if (found.size() > 1) return error(i, "bad-request", "table `" + table->name + "` has more than one " + what);
-    const Foreign_key &fk = *found[0];
+    const auto found = the_one(
+        i, *table, table->foreign_keys,
+        [&](const Foreign_key &x) {
+          return !e.name.empty() ? iequals(x.name, e.name) : x.name.empty() && same_columns(x.columns, e.columns);
+        },
+        what);
+    if (const auto *err = std::get_if<Edit_error>(&found)) return *err;
+    const Foreign_key &fk = *std::get<const Foreign_key *>(found);
     m_count = table->foreign_keys.size();
     const auto r = searched_range(fk.origin.source, fk.origin.statement);
     bool ok = false;
     if (r) {
       // A column's REFERENCES (the origin is its column_def): from the end
       // of its field_spec to the end of the column.
-      const size_t k = index().find(r->begin);
-      std::optional<Parsed> p = k < index().statements().size() ? parse(k) : std::nullopt;
-      uint32_t inline_def = k_npos;
-      if (p) {
-        for (const uint32_t cd : find_all_in(p->tree, p->tree.roots()[0], gram().column_def)) {
-          if (p->tree.begin(cd) == r->begin && p->tree.end(cd) == r->end) inline_def = cd;
-        }
-      }
-      if (inline_def != k_npos) {
-        const uint32_t spec = child_of(p->tree, inline_def, gram().field_spec);
-        ok = spec != k_npos && change(changes, p->tree.end(spec), r->end, "");
+      const auto at =
+          node_at(*r, gram().column_def, [&](uint32_t b, uint32_t en) { return b == r->begin && en == r->end; });
+      if (at) {
+        const uint32_t spec = child_of(at->first.tree, at->second, gram().field_spec);
+        ok = spec != k_npos && change(changes, at->first.tree.end(spec), r->end, "");
       } else {
         ok = remove_element(changes, *r, fk.name.empty() ? table->name : fk.name);
       }
@@ -3176,6 +3154,21 @@ class Editor {
     const std::string &old_name = m_old_name;
     const bool case_only = iequals(old_name, e.new_name);
     auto fail = [&](const std::string &what) { return error(i, "self-check", what); };
+    // A key op's table has one item more (`added`, one that `is_new`
+    // accepts) or one fewer than before.
+    auto check_keys = [&](const Table &t, const auto &items, const std::string &noun,
+                          const std::string &nouns, bool added,
+                          auto is_new) -> std::optional<Edit_error> {
+      const size_t want = added ? m_count + 1 : m_count - 1;
+      if (items.size() != want) {
+        return fail("table `" + t.name + "` has " + std::to_string(items.size()) + " " + nouns + ", not " +
+                    std::to_string(want));
+      }
+      if (added && std::none_of(items.begin(), items.end(), is_new)) {
+        return fail("table `" + t.name + "` does not have the " + noun + " added");
+      }
+      return std::nullopt;
+    };
     switch (e.op) {
       case Edit_op::rename_table:
       case Edit_op::rename_view: {
@@ -3330,14 +3323,13 @@ class Editor {
       case Edit_op::drop_index: {
         const Table *t = l.table(e.table).second;
         if (t == nullptr) return fail("the edited script has no table `" + e.table + "`");
-        const size_t want = e.op == Edit_op::add_index ? m_count + 1 : m_count - 1;
-        if (t->indexes.size() != want) return fail("table `" + t->name + "` has " + std::to_string(t->indexes.size()) + " indexes, not " + std::to_string(want));
-        if (e.op == Edit_op::add_index) {
-          const Index &ix = *e.new_index;
-          const bool there = std::any_of(t->indexes.begin(), t->indexes.end(), [&](const Index &x) {
-            return x.kind == ix.kind && same_columns(x.columns(), ix.columns()) && (ix.name.empty() || iequals(x.name, ix.name));
-          });
-          if (!there) return fail("table `" + t->name + "` does not have the index added");
+        const bool added = e.op == Edit_op::add_index;
+        if (auto err = check_keys(*t, t->indexes, "index", "indexes", added, [&](const Index &x) {
+              const Index &ix = *e.new_index;
+              return x.kind == ix.kind && same_columns(x.columns(), ix.columns()) &&
+                     (ix.name.empty() || iequals(x.name, ix.name));
+            })) {
+          return err;
         }
         break;
       }
@@ -3345,14 +3337,13 @@ class Editor {
       case Edit_op::drop_foreign_key: {
         const Table *t = l.table(e.table).second;
         if (t == nullptr) return fail("the edited script has no table `" + e.table + "`");
-        const size_t want = e.op == Edit_op::add_foreign_key ? m_count + 1 : m_count - 1;
-        if (t->foreign_keys.size() != want) return fail("table `" + t->name + "` has " + std::to_string(t->foreign_keys.size()) + " foreign keys, not " + std::to_string(want));
-        if (e.op == Edit_op::add_foreign_key) {
-          const Foreign_key &fk = *e.new_foreign_key;
-          const bool there = std::any_of(t->foreign_keys.begin(), t->foreign_keys.end(), [&](const Foreign_key &x) {
-            return same_columns(x.columns, fk.columns) && iequals(x.ref_table, fk.ref_table) && (fk.name.empty() || iequals(x.name, fk.name));
-          });
-          if (!there) return fail("table `" + t->name + "` does not have the foreign key added");
+        const bool added = e.op == Edit_op::add_foreign_key;
+        if (auto err = check_keys(*t, t->foreign_keys, "foreign key", "foreign keys", added, [&](const Foreign_key &x) {
+              const Foreign_key &fk = *e.new_foreign_key;
+              return same_columns(x.columns, fk.columns) && iequals(x.ref_table, fk.ref_table) &&
+                     (fk.name.empty() || iequals(x.name, fk.name));
+            })) {
+          return err;
         }
         break;
       }

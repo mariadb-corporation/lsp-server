@@ -638,15 +638,6 @@ const std::string k_shop =
     "END$$\n"
     "DELIMITER ;\n";
 
-// k_shop with `from` replaced by `to` (once; it must be there).
-std::string shop_with(const std::string &from, const std::string &to) {
-  std::string s = k_shop;
-  const size_t at = s.find(from);
-  EXPECT_NE(std::string::npos, at) << from;
-  if (at != std::string::npos) s.replace(at, from.size(), to);
-  return s;
-}
-
 // `text` with `from` replaced by `to` (once; it must be there).
 std::string shop_with_in(std::string text, const std::string &from, const std::string &to) {
   const size_t at = text.find(from);
@@ -654,6 +645,9 @@ std::string shop_with_in(std::string text, const std::string &from, const std::s
   if (at != std::string::npos) text.replace(at, from.size(), to);
   return text;
 }
+
+// k_shop with `from` replaced by `to`.
+std::string shop_with(const std::string &from, const std::string &to) { return shop_with_in(k_shop, from, to); }
 
 }  // namespace
 }  // namespace mdbls
@@ -1171,6 +1165,27 @@ TEST(Schema_edit, add_foreign_key) {
   EXPECT_EQ("name-taken",
             failed(edit(k_shop, {}, request("shop", R"j({"op": "add_foreign_key", "table": "orders",
       "foreign_key": {"name": "fk_orders_customer", "columns": ["id"], "references": {"table": "customer", "columns": ["id"]}}})j"))).kind);
+}
+
+TEST(Schema_edit, add_foreign_key_after_its_schemas_alter_tables_only) {
+  // The ALTER TABLE of another schema's foreign key is after its USE, where
+  // an unqualified ALTER TABLE a would name that schema's `a`; a DROP
+  // FOREIGN KEY adds none.
+  const std::string script =
+      "USE s;\n"
+      "CREATE TABLE a (id INT PRIMARY KEY, b_id INT);\n"
+      "CREATE TABLE b (id INT PRIMARY KEY, CONSTRAINT fk_0 FOREIGN KEY (id) REFERENCES a (id));\n"
+      "ALTER TABLE b ADD CONSTRAINT fk_b FOREIGN KEY (id) REFERENCES a (id);\n"
+      "ALTER TABLE b DROP FOREIGN KEY fk_0;\n"
+      "USE o;\n"
+      "CREATE TABLE c (id INT PRIMARY KEY);\n"
+      "CREATE TABLE d (c_id INT);\n"
+      "ALTER TABLE d ADD FOREIGN KEY (c_id) REFERENCES c (id);\n";
+  const auto r = ok(edit(script, {}, request("s", R"j({"op": "add_foreign_key", "table": "a",
+      "foreign_key": {"name": "fk_a_b", "columns": ["b_id"], "references": {"table": "b", "columns": ["id"]}}})j")));
+  EXPECT_EQ(shop_with_in(script, "ALTER TABLE b DROP",
+                         "ALTER TABLE a ADD CONSTRAINT fk_a_b FOREIGN KEY (b_id) REFERENCES b (id);\nALTER TABLE b DROP"),
+            text(r, ""));
 }
 
 TEST(Schema_edit, drop_foreign_key_wherever_it_is_defined) {

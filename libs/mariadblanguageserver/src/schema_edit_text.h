@@ -56,6 +56,8 @@ std::vector<Check> column_checks(const Table &t, std::string_view column);
 // `name type ...`: the column's whole definition, its column-level CHECKs
 // (`checks`, those whose `column` is this column) at the end.
 std::string column_sql(const Column &c, const std::vector<Check> &checks, const Style &st);
+// `a`, `b`: the names quoted, comma-separated.
+std::string ids(const std::vector<std::string> &names, const Style &st);
 // PRIMARY KEY (...), [UNIQUE|FULLTEXT|SPATIAL|VECTOR] INDEX name (...) ...
 std::string index_sql(const Index &ix, const Style &st);
 // [CONSTRAINT name] FOREIGN KEY [index] (...) REFERENCES t (...) ...
@@ -69,8 +71,9 @@ std::string table_option_sql(std::string_view name, std::string_view value, cons
 
 // The statements, on one line, without a delimiter.
 std::string create_table_sql(const Table &t, const Style &st);
-std::string create_view_sql(const View &v, const Style &st);
-std::string create_routine_sql(const Routine &r, const Style &st);
+// `or_replace`: CREATE OR REPLACE.
+std::string create_view_sql(const View &v, const Style &st, bool or_replace = false);
+std::string create_routine_sql(const Routine &r, const Style &st, bool or_replace = false);
 
 }  // namespace mdbls::edit_text
 
