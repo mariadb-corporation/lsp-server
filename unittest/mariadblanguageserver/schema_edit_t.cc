@@ -951,6 +951,57 @@ TEST(Schema_edit, rename_column_in_a_key_part_with_a_prefix_length) {
   EXPECT_EQ("CREATE TABLE t (z TEXT, b INT, INDEX ix (z(10), b));\n", text(r, ""));
 }
 
+TEST(Schema_edit, renames_reach_the_drop_before_the_create) {
+  // MSM writes Section 150 to run on every deployment: drop, then create.
+  // A DROP left under the old name breaks the second deployment.
+  const std::string script =
+      "USE shop;\n"
+      "DELIMITER %%\n"
+      "\n"
+      "DROP PROCEDURE IF EXISTS `count_customers`%%\n"
+      "DROP PROCEDURE IF EXISTS shop.count_customers%%\n"
+      "DROP FUNCTION IF EXISTS `count_customers`%%\n"
+      "CREATE PROCEDURE `count_customers`()\n"
+      "BEGIN\n"
+      "    SELECT COUNT(*) AS `customers` FROM `customer`;\n"
+      "END%%\n"
+      "\n"
+      "DELIMITER ;\n";
+  const auto r = ok(edit(script, {}, request("shop", R"j({"op": "rename_routine", "routine": "count_customers",
+      "new_name": "count_clients", "kind": "procedure"})j")));
+  // A DROP FUNCTION is not a reference of the procedure.
+  EXPECT_EQ(
+      "USE shop;\n"
+      "DELIMITER %%\n"
+      "\n"
+      "DROP PROCEDURE IF EXISTS `count_clients`%%\n"
+      "DROP PROCEDURE IF EXISTS shop.count_clients%%\n"
+      "DROP FUNCTION IF EXISTS `count_customers`%%\n"
+      "CREATE PROCEDURE `count_clients`()\n"
+      "BEGIN\n"
+      "    SELECT COUNT(*) AS `customers` FROM `customer`;\n"
+      "END%%\n"
+      "\n"
+      "DELIMITER ;\n",
+      text(r, ""));
+  // msm takes the DROP of the old name from the migration.
+  ASSERT_FALSE(migration(r).empty());
+  EXPECT_EQ("DROP PROCEDURE `count_customers`", migration(r)[0]);
+
+  const auto f = ok(edit("DROP FUNCTION IF EXISTS f;\nCREATE FUNCTION f() RETURNS INT RETURN 1;\nDROP PROCEDURE IF EXISTS f;\n", {},
+                         request("", R"j({"op": "rename_routine", "routine": "f", "new_name": "g"})j")));
+  EXPECT_EQ("DROP FUNCTION IF EXISTS g;\nCREATE FUNCTION g() RETURNS INT RETURN 1;\nDROP PROCEDURE IF EXISTS f;\n", text(f, ""));
+
+  const auto v = ok(edit("DROP VIEW IF EXISTS `v`;\nCREATE VIEW `v` AS SELECT 1;\n", {},
+                         request("", R"j({"op": "rename_view", "view": "v", "new_name": "w"})j")));
+  EXPECT_EQ("DROP VIEW IF EXISTS `w`;\nCREATE VIEW `w` AS SELECT 1;\n", text(v, ""));
+
+  // A Workbench export.
+  const auto t = ok(edit("DROP TABLE IF EXISTS `mydb`.`t` ;\nCREATE TABLE IF NOT EXISTS `mydb`.`t` (`a` INT);\n", {},
+                         request("mydb", R"j({"op": "rename_table", "table": "t", "new_name": "u"})j")));
+  EXPECT_EQ("DROP TABLE IF EXISTS `mydb`.`u` ;\nCREATE TABLE IF NOT EXISTS `mydb`.`u` (`a` INT);\n", text(t, ""));
+}
+
 TEST(Schema_edit, rename_routine_to_a_name_of_the_other_kind) {
   const std::string script = "CREATE PROCEDURE p() SELECT 1;\nCREATE FUNCTION f() RETURNS INT RETURN 1;\n";
   EXPECT_EQ("name-taken",

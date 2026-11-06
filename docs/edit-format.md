@@ -57,10 +57,10 @@ unknown members.
 
 | op | Members | Status | What changes |
 | --- | --- | --- | --- |
-| `rename_table` | `table`, `new_name` | done | the definition and every reference |
+| `rename_table` | `table`, `new_name` | done | the definition and every reference, a `DROP TABLE [IF EXISTS]` of it included |
 | `rename_column` | `table`, `column`, `new_name` | done | the definition, also when an `ALTER TABLE` adds the column, and every reference |
-| `rename_view` | `view`, `new_name` | done | the definition and every reference |
-| `rename_routine` | `routine`, `new_name`, `kind` (`procedure` or `function`; needed when both kinds have the name) | done | the definition and every reference |
+| `rename_view` | `view`, `new_name` | done | the definition and every reference, a `DROP VIEW [IF EXISTS]` of it included |
+| `rename_routine` | `routine`, `new_name`, `kind` (`procedure` or `function`; needed when both kinds have the name) | done | the definition and every reference, a `DROP PROCEDURE [IF EXISTS]` (or `FUNCTION`, by its kind) of it included |
 | `add_table` | `table` (Table) | done | a `CREATE TABLE` after the schema's last one |
 | `drop_table` | `table` | done | its `CREATE TABLE`, every `ALTER TABLE`, `CREATE INDEX` and `DROP INDEX` on it, its triggers, and `DROP TABLE` statements of it alone |
 | `add_column` | `table`, `column` (Column), `after` or `first` | done | an element of the `CREATE TABLE`, or an `ALTER TABLE ... ADD COLUMN ... AFTER` (below) |
@@ -82,7 +82,7 @@ expanded script that spells the name is parsed and each name in it resolved in t
 script's context (its schema in use, aliases, the tables in scope), so `h.name` of `FROM
 url_host h` is a reference to `url_host.name` and `name` of another table is not. That
 covers DDL (foreign keys, indexes, `ALTER TABLE`, `CREATE INDEX`, `RENAME TABLE`, triggers'
-`ON`), DML, views, routine and trigger bodies, `GRANT`s, and statements in versioned
+`ON`, the `DROP ... IF EXISTS` an idempotent script runs before a `CREATE`), DML, views, routine and trigger bodies, `GRANT`s, and statements in versioned
 comments, in the script and in every included file (a file included twice is edited once).
 Each reference is written as it was: in backticks or double quotes when it was, else with
 quotes only when the new name needs them.

@@ -38,7 +38,7 @@ struct Name_syms {
   S(table_ident) S(simple_ident) S(simple_ident_nospvar) S(field_ident) S(key_part_simple) S(key_part)
   S(insert_ident) S(select_alias) S(ident_table_alias) S(table_alias_clause) S(table_alias_ref)
   S(table_ident_opt_wild) S(select_sublist_qualified_asterisk) S(function_call_generic)
-  S(sp_name) S(call) S(use) S(create) S(alter) S(drop) S(table_to_table)
+  S(sp_name) S(call) S(use) S(create) S(alter) S(drop) S(drop_routine) S(table_to_table)
   S(references) S(ref_list) S(using_list) S(view_list) S(alter_list_item)
   S(field_spec) S(key_def) S(sp_param_name) S(sp_decl_ident) S(sp_decl_idents)
   S(sp_decl_idents_init_vars) S(with_element_head) S(with_list_element) S(with_column_list)
@@ -479,6 +479,16 @@ Name_ref Statement_names::classify(uint32_t token) const {
     const bool other = ancestor(a, s.trigger_tail) != npos || ancestor(a, s.event_tail) != npos;
     ref.kind = other ? Name_kind::other : Name_kind::routine;
     ref.defining = ancestor(a, s.create) != npos;
+    return ref;
+  }
+  // DROP PROCEDURE|FUNCTION [IF EXISTS] [s.]r: the name holds no sp_name.
+  if (sym == s.drop_routine) {
+    if (schema_part) {
+      ref.kind = Name_kind::schema;
+      return ref;
+    }
+    qualify();
+    ref.kind = Name_kind::routine;
     return ref;
   }
   if (sym == s.use) {

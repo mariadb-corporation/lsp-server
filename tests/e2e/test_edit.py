@@ -178,6 +178,10 @@ class Edit_fixture(unittest.TestCase):
             self.assertEqual(result["error"]["edit"], 0, edits)
 
     def test_routine_rename(self):
+        # Section 150 as MSM writes it: dropped, then created.
+        routines = self.p.dev / "sections" / "150_routines.sql"
+        routines.write_text(routines.read_text().replace(
+            "CREATE FUNCTION order_count", "DROP FUNCTION IF EXISTS order_count%%\nCREATE FUNCTION order_count"))
         code, result = self.p.edit([{"op": "rename_routine", "routine": "order_count",
                                      "new_name": "orders_of"}], "shop")
         self.assertEqual(code, 0, result)
@@ -186,6 +190,7 @@ class Edit_fixture(unittest.TestCase):
         self.assertEqual([n["kind"] for n in result["notes"]], ["routine-recreated"])
         self.p.apply(result)
         self.assertEqual(self.p.outline(), result["outline"])
+        self.assertIn("DROP FUNCTION IF EXISTS orders_of%%\nCREATE FUNCTION orders_of(", routines.read_text())
 
     def checks(self):
         check = self.p.run("check", "--source-dir", str(self.p.dev), "-")
@@ -284,6 +289,18 @@ class Edit_mrs_project(unittest.TestCase):
         # The edited project still checks.
         check = self.p.run("check", "--source-dir", str(self.p.dev), "-")
         self.assertEqual(check.returncode, 0, check.stdout.decode())
+
+    def test_rename_a_routine_and_its_drop(self):
+        code, result = self.p.edit([{"op": "rename_routine", "routine": "dump_audit_log",
+                                     "kind": "procedure", "new_name": "dump_the_audit_log"}],
+                                   "mariadb_rest_service")
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["migration"][0]["sql"], "DROP PROCEDURE `dump_audit_log`")
+        self.p.apply(result)
+        self.assertEqual(self.p.outline(), result["outline"])
+        routines = (self.p.dev / "sections" / "150-20_procedures_functions.sql").read_text()
+        self.assertIn("DROP PROCEDURE IF EXISTS `dump_the_audit_log`%%", routines)
+        self.assertNotIn("dump_audit_log`", routines)
 
     def test_add_and_drop(self):
         before = self.p.outline()

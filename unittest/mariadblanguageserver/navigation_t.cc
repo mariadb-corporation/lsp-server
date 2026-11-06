@@ -206,6 +206,15 @@ TEST(Navigation, references_to_a_column) {
             (std::vector<std::string>{"title*", "title", "title", "title", "title"}));
 }
 
+TEST(Navigation, references_to_a_routine_include_its_drop) {
+  Doc d(
+      "CALL refresh_a|ll(NOW(), @n);\n"
+      "DROP PROCEDURE IF EXISTS refresh_all;\n"
+      "DROP PROCEDURE sakila.refresh_all;\n");
+  // The use, both DROPs, and the definition in the schema script after them.
+  EXPECT_EQ(d.references(), (std::vector<std::string>{"refresh_all*", "refresh_all", "refresh_all", "refresh_all"}));
+}
+
 TEST(Navigation, references_to_an_alias_stay_in_the_statement) {
   Doc d("SELECT a.actor_id FROM actor a| WHERE a.first_name = 'x';\nSELECT a.film_id FROM film a;");
   EXPECT_EQ(d.references(), (std::vector<std::string>{"a", "a*", "a"}));

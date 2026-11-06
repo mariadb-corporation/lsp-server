@@ -410,3 +410,15 @@ Tests: `schema_edit_t.cc` (every op, placement and style, CRLF, includes with sl
 1833 migration, removal spacing, errors), `tests/e2e/test_edit.py` (fixture project: add a
 table, columns, a view, a routine, drop a table; MRS project: add a table with a foreign key,
 a column, a view, a routine, check, then drop them all and get the outline back).
+
+**Fix on PR 2, 2026-11-06 (found by msm's tests, mariadb-shell-plugins PR #89):**
+`rename_routine` left the `DROP PROCEDURE IF EXISTS old` before the renamed `CREATE`, so
+Section 150 failed on the second deployment after a rename; the self-check cannot see it, as
+the outline keeps no DROP statements. The name in `drop_routine` (`DROP sp_handler
+opt_if_exists ident`, no `sp_name`) was not classified; `sql_names` now takes it as a
+routine, which fixes references and rename in the server too. References do not tell the
+two kinds apart, so `rename_routine` skips the hits in a DROP of the other kind. The
+migration is unchanged (msm takes its `DROP PROCEDURE old`). `rename_table` and
+`rename_view` already reached their `DROP ... IF EXISTS`; no rename reaches triggers or
+events. Tests: `renames_reach_the_drop_before_the_create`, a navigation test, the fixture's
+routine rename with a DROP, and a routine rename on the MRS project.

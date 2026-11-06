@@ -25,6 +25,7 @@
 #include <cctype>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
@@ -1263,9 +1264,11 @@ class Editor {
 
   // Every name referring to `id`, by file, each rewritten to `new_name`;
   // `definition` must be among them.
+  // `skip`: a hit (in the searched text) that is not a reference after all.
   std::optional<Edit_error> rewrite_references(size_t edit, const Object_id &id,
                                                const Origin &definition, const std::string &new_name,
-                                               Changes &changes) {
+                                               Changes &changes,
+                                               const std::function<bool(const Range &)> &skip = {}) {
     Reference_options ro;
     ro.version_id = m_s.options().index.version_id;
     ro.initial_schema = m_s.options().schema;
@@ -1275,6 +1278,7 @@ class Editor {
     bool definition_found = false;
     const auto def_file = m_s.file_of(definition.source);
     for (const auto &r : refs) {
+      if (skip && skip(r.range)) continue;
       const auto m = outline().map(r.range);
       const auto file = m_s.file_of(m.source);
       if (!file) continue;
@@ -1465,7 +1469,16 @@ class Editor {
     const std::string old_name = routine->name;
     string_notes(i, {old_name}, routine->kind + " `" + old_name + "`");
     rest_notes(i, old_name, true, routine->kind + " `" + old_name + "`");
-    if (auto err = rewrite_references(i, *id, routine->origin, e.new_name, changes)) return err;
+    // References do not tell a procedure from a function: the DROP of a
+    // routine of the other kind is not this one's.
+    const std::string other = routine->kind == "procedure" ? "FUNCTION" : "PROCEDURE";
+    auto other_kind = [&](const Range &hit) {
+      const size_t k = index().find(hit.begin);
+      if (k >= index().statements().size()) return false;
+      const auto subject = subject_of(index().text_of(text(), statement(k)));
+      return subject && subject->verb == "DROP" && subject->kind == other;
+    };
+    if (auto err = rewrite_references(i, *id, routine->origin, e.new_name, changes, other_kind)) return err;
     m_old_name = old_name;
     m_routine_kind = routine->kind;
     return std::nullopt;
