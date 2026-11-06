@@ -174,6 +174,20 @@ std::string supported_edit_ops() {
   return out;
 }
 
+std::string edit_ops_json() {
+  rapidjson::StringBuffer buf;
+  rapidjson::Writer<rapidjson::StringBuffer> w(buf);
+  w.StartObject();
+  w.Key("format");
+  w.Int(1);
+  w.Key("ops");
+  w.StartArray();
+  for (const auto &o : k_ops) w.String(o.name);
+  w.EndArray();
+  w.EndObject();
+  return buf.GetString();
+}
+
 // ---------------------------------------------------------------------------
 // Edit_log
 
@@ -640,7 +654,11 @@ std::variant<Edit_request, Edit_error> parse_edit_request(std::string_view json)
       return error(i, "bad-request", "the edit has no \"op\"");
     }
     const auto op = edit_op_from_string(e["op"].GetString());
-    if (!op) return error(i, "bad-request", std::string("unknown op \"") + e["op"].GetString() + "\"");
+    // An op this binary does not know may be one a newer binary does.
+    if (!op) {
+      return error(i, "unsupported",
+                   std::string("this binary does not know the op \"") + e["op"].GetString() + "\" (a newer one may)");
+    }
     Schema_edit se;
     se.op = *op;
     Json_reader r(i);
@@ -1404,7 +1422,13 @@ class Editor {
     return std::nullopt;
   }
 
-  void migrate(size_t edit, std::string sql) { m_result.migration.push_back({edit, std::move(sql)}); }
+  // Statement `sql` of the migration: `action` on `object` `name` (of
+  // `table` for a table's member), renamed to `new_name`.
+  void migrate(size_t edit, std::string sql, std::string action, std::string object, std::string name,
+               std::string table = {}, std::string new_name = {}) {
+    m_result.migration.push_back({edit, std::move(sql), std::move(action), std::move(object), std::move(name),
+                                  std::move(table), std::move(new_name)});
+  }
 
   std::optional<Edit_error> rename_table(size_t i, const Schema_edit &e, Changes &changes) {
     const Table *table = lookup().table(e.table).second;
@@ -1433,7 +1457,8 @@ class Editor {
     // The same name again changes nothing: RENAME TABLE t TO t fails on the
     // server (the table exists).
     if (name != e.new_name) {
-      migrate(i, "RENAME TABLE " + backtick_quote(name) + " TO " + backtick_quote(e.new_name));
+      migrate(i, "RENAME TABLE " + backtick_quote(name) + " TO " + backtick_quote(e.new_name), "rename", noun, name, {},
+              e.new_name);
     }
     return std::nullopt;
   }
@@ -1454,8 +1479,10 @@ class Editor {
     string_notes(i, {old_name, table->name}, "column `" + table->name + "`.`" + old_name + "`");
     if (auto err = rewrite_references(i, *id, column->origin, e.new_name, changes)) return err;
     if (old_name != e.new_name) {
-      migrate(i, "ALTER TABLE " + backtick_quote(table->name) + " RENAME COLUMN " + backtick_quote(old_name) +
-                     " TO " + backtick_quote(e.new_name));
+      migrate(i,
+              "ALTER TABLE " + backtick_quote(table->name) + " RENAME COLUMN " + backtick_quote(old_name) + " TO " +
+                  backtick_quote(e.new_name),
+              "rename", "column", old_name, table->name, e.new_name);
     }
     m_old_name = old_name;
     return std::nullopt;
@@ -2140,8 +2167,60 @@ class Editor {
   // ---------------------------------------------------------------------
   // Tables
 
+  // Every key is named when it is created, so the migration can drop it by
+  // the name the script gives it (the server's own name for an unnamed
+  // foreign key depends on the deployed table's history).
+
+  // `base`, else `base_2`, `base_3`, ...: the first that `taken` rejects
+  // not; at most 64 bytes, cut at a character's start.
+  template <typename Taken>
+  static std::string unique_name(std::string base, Taken taken) {
+    for (int n = 1;; ++n) {
+      const std::string suffix = n == 1 ? "" : "_" + std::to_string(n);
+      std::string name = base.substr(0, 64 - suffix.size());
+      while (!name.empty() && name.size() < base.size() && (static_cast<unsigned char>(base[name.size()]) & 0xC0) == 0x80) {
+        name.pop_back();
+      }
+      name += suffix;
+      if (!taken(name)) return name;
+    }
+  }
+  // An unnamed index's name, as the server would give it: its first
+  // column's, made unique among `indexes` (and PRIMARY).
+  static std::string index_name(const std::vector<Index> &indexes, const Index &ix) {
+    const std::string base = ix.key_parts.empty() ? "idx" : ix.key_parts[0].column;
+    return unique_name(base, [&](const std::string &n) {
+      return iequals(n, "PRIMARY") ||
+             std::any_of(indexes.begin(), indexes.end(), [&](const Index &x) { return iequals(x.name, n); });
+    });
+  }
+  // An unnamed foreign key's name: fk_<table>_<referenced table>, made
+  // unique among the schema's foreign keys and `also`.
+  std::string foreign_key_name(const std::string &table, const Foreign_key &fk,
+                               const std::vector<Foreign_key> &also) const {
+    return unique_name("fk_" + table + "_" + fk.ref_table, [&](const std::string &n) {
+      for (const auto &f : also) {
+        if (iequals(f.name, n)) return true;
+      }
+      for (const Schema *sc : lookup().schemas()) {
+        for (const auto &x : sc->tables) {
+          for (const auto &f : x.foreign_keys) {
+            if (iequals(f.name, n)) return true;
+          }
+        }
+      }
+      return false;
+    });
+  }
+
   std::optional<Edit_error> add_table(size_t i, const Schema_edit &e, Changes &changes) {
-    const Table &t = *e.new_table;
+    Table t = *e.new_table;
+    for (auto &ix : t.indexes) {
+      if (ix.kind != "primary" && ix.name.empty()) ix.name = index_name(t.indexes, ix);
+    }
+    for (auto &fk : t.foreign_keys) {
+      if (fk.name.empty()) fk.name = foreign_key_name(t.name, fk, t.foreign_keys);
+    }
     const auto l = lookup();
     if (l.table(t.name).second != nullptr || l.view(t.name).second != nullptr) {
       return error(i, "name-taken", "a table or view `" + t.name + "` exists");
@@ -2198,7 +2277,7 @@ class Editor {
     if (!insert_at(changes, spot_of(place, st), laid, st, false)) {
       return error(i, "self-check", "no place for the CREATE TABLE of `" + t.name + "` was found");
     }
-    migrate(i, laid);
+    migrate(i, laid, "create", "table", t.name);
     return std::nullopt;
   }
 
@@ -2261,7 +2340,7 @@ class Editor {
   std::optional<Edit_error> drop_statements(size_t i, const std::vector<std::pair<size_t, std::string>> &gone,
                                             const std::optional<Object_id> &id, const std::string &name,
                                             const std::string &what, std::string_view rest_kind, std::string sql,
-                                            Changes &changes) {
+                                            const std::string &object, Changes &changes) {
     std::vector<Range> removed;
     for (const auto &[k, banner] : gone) {
       const auto r = remove_statement(changes, k, banner);
@@ -2271,7 +2350,7 @@ class Editor {
     still_referenced(i, id, removed, what);
     rest_notes(i, name, rest_kind, what);
     m_old_name = name;
-    migrate(i, std::move(sql));
+    migrate(i, std::move(sql), "drop", object, name);
     return std::nullopt;
   }
 
@@ -2298,7 +2377,7 @@ class Editor {
       for (const size_t k : statements_about("TRIGGER", tr.name, schema->name)) gone.push_back({k, tr.name});
     }
     return drop_statements(i, gone, id, name, "table `" + name + "`", "view", "DROP TABLE " + backtick_quote(name),
-                           changes);
+                           "table", changes);
   }
 
   // ---------------------------------------------------------------------
@@ -2370,7 +2449,7 @@ class Editor {
     std::string sql = "ALTER TABLE " + backtick_quote(table->name) + " ADD COLUMN " + edit_text::column_sql(c, {}, {});
     if (e.first) sql += " FIRST";
     else if (!e.after.empty()) sql += " AFTER " + backtick_quote(after);
-    migrate(i, sql);
+    migrate(i, sql, "add", "column", c.name, table->name);
     return std::nullopt;
   }
 
@@ -2436,11 +2515,13 @@ class Editor {
              "an unnamed foreign key of `" + x + "` uses the column: the migration cannot drop and add it again");
         continue;
       }
-      migrate(i, "ALTER TABLE " + backtick_quote(x) + " DROP FOREIGN KEY " + backtick_quote(fk.name));
+      migrate(i, "ALTER TABLE " + backtick_quote(x) + " DROP FOREIGN KEY " + backtick_quote(fk.name), "drop",
+              "foreign_key", fk.name, x);
     }
     const std::string body = edit_text::column_sql(nc, checks, {});
     migrate(i, "ALTER TABLE " + backtick_quote(table_name) +
-                   (renamed ? " CHANGE COLUMN " + backtick_quote(old_name) + " " : " MODIFY COLUMN ") + body);
+                   (renamed ? " CHANGE COLUMN " + backtick_quote(old_name) + " " : " MODIFY COLUMN ") + body,
+            "alter", "column", old_name, table_name, renamed ? nc.name : std::string());
     for (auto [x, fk] : fks) {
       if (fk.name.empty()) continue;
       for (auto &col : fk.columns) {
@@ -2449,7 +2530,8 @@ class Editor {
       for (auto &col : fk.ref_columns) {
         if (iequals(fk.ref_table, table_name) && iequals(col, old_name)) col = nc.name;
       }
-      migrate(i, "ALTER TABLE " + backtick_quote(x) + " ADD " + edit_text::foreign_key_sql(fk, {}));
+      migrate(i, "ALTER TABLE " + backtick_quote(x) + " ADD " + edit_text::foreign_key_sql(fk, {}), "add",
+              "foreign_key", fk.name, x);
     }
     return std::nullopt;
   }
@@ -2548,7 +2630,8 @@ class Editor {
     }
     still_referenced(i, id, removed, "column `" + table->name + "`.`" + name + "`");
     m_old_name = name;
-    migrate(i, "ALTER TABLE " + backtick_quote(table->name) + " DROP COLUMN " + backtick_quote(name));
+    migrate(i, "ALTER TABLE " + backtick_quote(table->name) + " DROP COLUMN " + backtick_quote(name), "drop", "column",
+            name, table->name);
     return std::nullopt;
   }
 
@@ -2629,7 +2712,10 @@ class Editor {
         return error(i, "self-check", "the options of `" + table->name + "` cannot be added to");
       }
     }
-    if (!sets.empty()) migrate(i, "ALTER TABLE " + backtick_quote(table->name) + " " + join(sets, " "));
+    if (!sets.empty()) {
+      migrate(i, "ALTER TABLE " + backtick_quote(table->name) + " " + join(sets, " "), "alter", "table_options",
+              table->name, table->name);
+    }
     if (removes) {
       note(i, "no-migration", table->origin.source, table->origin.statement.begin,
            "a table option of `" + table->name + "` was removed: no statement takes it back to the server's default");
@@ -2662,7 +2748,7 @@ class Editor {
     if (!insert_at(changes, spot_of(place, st, form.drop), laid, st, false, drop)) {
       return error(i, "self-check", "no place for the CREATE VIEW of `" + v.name + "` was found");
     }
-    migrate(i, laid);
+    migrate(i, laid, "create", "view", v.name);
     return std::nullopt;
   }
 
@@ -2673,7 +2759,7 @@ class Editor {
     std::vector<std::pair<size_t, std::string>> gone;
     for (const size_t k : statements_about("VIEW", name, schema->name)) gone.push_back({k, name});
     return drop_statements(i, gone, resolve(view->origin, Target_kind::view), name, "view `" + name + "`", "view",
-                           "DROP VIEW " + backtick_quote(name), changes);
+                           "DROP VIEW " + backtick_quote(name), "view", changes);
   }
 
   std::optional<Edit_error> add_routine(size_t i, const Schema_edit &e, Changes &changes) {
@@ -2701,7 +2787,7 @@ class Editor {
     const auto at = insert_at(changes, spot_of(place, st, form.drop), laid, st,
                               laid.find(';') != std::string::npos, drop);
     if (!at) return error(i, "self-check", "no place for the CREATE of `" + r.name + "` was found");
-    migrate(i, laid);
+    migrate(i, laid, "create", r.kind, r.name);
     m_routine_kind = r.kind;
     note_at(i, "routine-created", at->first, m_s.files()[at->first].log.to_original(at->second),
             "the migration creates the " + r.kind + " `" + r.name +
@@ -2723,7 +2809,8 @@ class Editor {
     for (const size_t k : statements_about(upper(kind), name, schema->name)) gone.push_back({k, name});
     m_routine_kind = kind;
     return drop_statements(i, gone, id, name, kind + " `" + name + "`", kind,
-                           (kind == "function" ? "DROP FUNCTION " : "DROP PROCEDURE ") + backtick_quote(name), changes);
+                           (kind == "function" ? "DROP FUNCTION " : "DROP PROCEDURE ") + backtick_quote(name), kind,
+                           changes);
   }
 
   // ---------------------------------------------------------------------
@@ -2886,7 +2973,8 @@ class Editor {
   std::optional<Edit_error> add_index(size_t i, const Schema_edit &e, Changes &changes) {
     const Table *table = lookup().table(e.table).second;
     if (table == nullptr) return error(i, "unknown-object", "there is no table `" + e.table + "`");
-    const Index &ix = *e.new_index;
+    Index ix = *e.new_index;
+    if (ix.kind != "primary" && ix.name.empty()) ix.name = index_name(table->indexes, ix);
     for (const auto &kp : ix.key_parts) {
       if (table->column(kp.column) == nullptr) {
         return error(i, "unknown-object", "table `" + table->name + "` has no column `" + kp.column + "`");
@@ -2910,7 +2998,8 @@ class Editor {
     const bool ok = primary ? add_element(changes, *table, sql, {Element::column}, st)
                             : add_element(changes, *table, sql, {Element::index, Element::primary, Element::column}, st);
     if (!ok) return error(i, "self-check", "no place for the index was found in `" + table->name + "`");
-    migrate(i, "ALTER TABLE " + backtick_quote(table->name) + " ADD " + edit_text::index_sql(ix, {}));
+    migrate(i, "ALTER TABLE " + backtick_quote(table->name) + " ADD " + edit_text::index_sql(ix, {}), "add",
+            primary ? "primary_key" : "index", primary ? "PRIMARY" : ix.name, table->name);
     return std::nullopt;
   }
 
@@ -2966,9 +3055,11 @@ class Editor {
       return error(i, "self-check", "the index cannot be removed from `" + table->name + "`");
     }
     if (ix.kind == "primary") {
-      migrate(i, "ALTER TABLE " + backtick_quote(table->name) + " DROP PRIMARY KEY");
+      migrate(i, "ALTER TABLE " + backtick_quote(table->name) + " DROP PRIMARY KEY", "drop", "primary_key", "PRIMARY",
+              table->name);
     } else if (!ix.name.empty()) {
-      migrate(i, "ALTER TABLE " + backtick_quote(table->name) + " DROP INDEX " + backtick_quote(ix.name));
+      migrate(i, "ALTER TABLE " + backtick_quote(table->name) + " DROP INDEX " + backtick_quote(ix.name), "drop", "index",
+              ix.name, table->name);
     } else {
       note(i, "no-migration", table->origin.source, table->origin.statement.begin,
            "an unnamed index of `" + table->name + "` was removed: the server's name for it is not known");
@@ -3014,15 +3105,18 @@ class Editor {
     if (!ok) return error(i, "self-check", "the primary key of `" + table->name + "` cannot be written");
     // One statement: a DROP PRIMARY KEY of its own fails when an
     // AUTO_INCREMENT column is the key.
-    migrate(i, "ALTER TABLE " + backtick_quote(table->name) + (old != nullptr ? " DROP PRIMARY KEY," : "") + " ADD " +
-                   edit_text::index_sql(pk, {}));
+    migrate(i,
+            "ALTER TABLE " + backtick_quote(table->name) + (old != nullptr ? " DROP PRIMARY KEY," : "") + " ADD " +
+                edit_text::index_sql(pk, {}),
+            old != nullptr ? "alter" : "add", "primary_key", "PRIMARY", table->name);
     return std::nullopt;
   }
 
   std::optional<Edit_error> add_foreign_key(size_t i, const Schema_edit &e, Changes &changes) {
     const Table *table = lookup().table(e.table).second;
     if (table == nullptr) return error(i, "unknown-object", "there is no table `" + e.table + "`");
-    const Foreign_key &fk = *e.new_foreign_key;
+    Foreign_key fk = *e.new_foreign_key;
+    if (fk.name.empty()) fk.name = foreign_key_name(table->name, fk, {});
     if (auto err = check_foreign_key(i, *table, fk)) return err;
     const edit_text::Style st = style_of(table->origin);
     const std::string sql = edit_text::foreign_key_sql(fk, st);
@@ -3058,7 +3152,8 @@ class Editor {
                        st);
     }
     if (!ok) return error(i, "self-check", "no place for the foreign key was found in `" + table->name + "`");
-    migrate(i, "ALTER TABLE " + backtick_quote(table->name) + " ADD " + edit_text::foreign_key_sql(fk, {}));
+    migrate(i, "ALTER TABLE " + backtick_quote(table->name) + " ADD " + edit_text::foreign_key_sql(fk, {}), "add",
+            "foreign_key", fk.name, table->name);
     return std::nullopt;
   }
 
@@ -3092,7 +3187,8 @@ class Editor {
     }
     if (!ok) return error(i, "self-check", "the " + what + " cannot be removed from `" + table->name + "`");
     if (!fk.name.empty()) {
-      migrate(i, "ALTER TABLE " + backtick_quote(table->name) + " DROP FOREIGN KEY " + backtick_quote(fk.name));
+      migrate(i, "ALTER TABLE " + backtick_quote(table->name) + " DROP FOREIGN KEY " + backtick_quote(fk.name), "drop",
+              "foreign_key", fk.name, table->name);
     } else {
       note(i, "no-migration", fk.origin.source, fk.origin.statement.begin,
            "an unnamed foreign key of `" + table->name + "` was removed: the server's name for it is not known");
@@ -3218,8 +3314,9 @@ class Editor {
         const auto &index = m_s.searched_index();
         const size_t k = at ? index.find(*at) : index.statements().size();
         if (k >= index.statements().size()) return fail("the CREATE of `" + e.new_name + "` is not found");
-        migrate(i, (kind == "function" ? "DROP FUNCTION " : "DROP PROCEDURE ") + backtick_quote(old_name));
-        migrate(i, std::string(trim(index.text_of(m_s.searched(), index.statements()[k]))));
+        migrate(i, (kind == "function" ? "DROP FUNCTION " : "DROP PROCEDURE ") + backtick_quote(old_name), "drop", kind,
+                old_name);
+        migrate(i, std::string(trim(index.text_of(m_s.searched(), index.statements()[k]))), "create", kind, e.new_name);
         note(i, "routine-recreated", r.origin.source, r.origin.statement.begin,
              "no statement renames a " + kind + ": the migration drops `" + old_name +
                  "` and creates `" + e.new_name + "`, which cannot run inside a stored procedure");
@@ -3474,6 +3571,11 @@ std::string edit_result_json(const Edit_result &result, std::string_view script_
     w.Key("edit");
     w.Uint64(m.edit);
     str(w, "sql", m.sql);
+    str(w, "action", m.action);
+    str(w, "object", m.object);
+    str(w, "name", m.name);
+    if (!m.table.empty()) str(w, "table", m.table);
+    if (!m.new_name.empty()) str(w, "new_name", m.new_name);
     w.EndObject();
   }
   w.EndArray();

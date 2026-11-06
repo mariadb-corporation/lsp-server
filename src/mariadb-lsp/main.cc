@@ -127,6 +127,8 @@ const char *const k_usage =
     "  --text             split: include each statement's text in the output\n"
     "  --at LINE:COL      complete: the position, 1-based (COL in characters)\n"
     "  --edits FILE       edit: the schema edits, JSON (docs/edit-format.md)\n"
+    "  --ops              edit: print the ops this binary does, as JSON\n"
+    "                     ({\"format\": 1, \"ops\": [...]}), and exit\n"
     "  --line-width N     format, edit: the width lines are kept within (default 80,\n"
     "                     0 = no limit)\n"
     "  --keyword-case upper|lower\n"
@@ -792,6 +794,9 @@ std::optional<Options> parse_args(int argc, char **argv) {
       std::exit(k_exit_ok);
     } else if (arg == "--version") {
       std::cout << "mariadb-lsp " MDBLS_VERSION "\n";
+      std::exit(k_exit_ok);
+    } else if (arg == "--ops" && o.command == "edit") {
+      std::cout << mdbls::edit_ops_json() << "\n";
       std::exit(k_exit_ok);
     } else if (arg == "--sql-mode") {
       const auto v = value();

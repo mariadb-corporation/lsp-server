@@ -127,6 +127,16 @@ class Edit_fixture(unittest.TestCase):
         self.assertIn("drop_routine", ops)
         self.assertIn("set_primary_key", ops)
 
+    def test_ops_as_json(self):
+        # What msm reads: a binary that answers `edit --ops` also tags its
+        # migration statements.
+        answer = subprocess.run([BINARY, "edit", "--ops"], capture_output=True, text=True)
+        self.assertEqual(answer.returncode, 0, answer.stderr)
+        listed = json.loads(answer.stdout)
+        self.assertEqual(listed["format"], 1)
+        help_text = subprocess.run([BINARY, "--help"], capture_output=True, text=True).stdout
+        self.assertEqual(listed["ops"], re.search(r"(?m)^ +edit ops: (.*)$", help_text).group(1).split())
+
     def test_rename_across_includes(self):
         code, result = self.p.edit([
             {"op": "rename_table", "table": "customer", "new_name": "client"},
@@ -137,8 +147,10 @@ class Edit_fixture(unittest.TestCase):
         self.assertEqual(sorted(files), ["sections/140_tables.sql", "sections/150_routines.sql",
                                          "sections/170_roles.sql"])
         self.assertEqual(result["migration"], [
-            {"edit": 0, "sql": "RENAME TABLE `customer` TO `client`"},
-            {"edit": 1, "sql": "ALTER TABLE `client` RENAME COLUMN `name` TO `full_name`"}])
+            {"edit": 0, "sql": "RENAME TABLE `customer` TO `client`",
+             "action": "rename", "object": "table", "name": "customer", "new_name": "client"},
+            {"edit": 1, "sql": "ALTER TABLE `client` RENAME COLUMN `name` TO `full_name`",
+             "action": "rename", "object": "column", "name": "name", "table": "client", "new_name": "full_name"}])
         self.p.apply(result)
         self.assertEqual(self.p.outline(), result["outline"])
         self.assertIn("client", table_names(result["outline"]))
@@ -169,7 +181,7 @@ class Edit_fixture(unittest.TestCase):
             ([{"op": "drop_table", "table": "customer"}], "referenced"),
             ([{"op": "add_table", "table": {"name": "x", "columns": [{"name": "a", "type": "INTT"}]}}],
              "bad-request"),
-            ([{"op": "rename_tables", "table": "customer"}], "bad-request"),
+            ([{"op": "rename_tables", "table": "customer"}], "unsupported"),
             ([{"op": "rename_table", "table": "customer"}], "bad-request"),
         ]
         for edits, kind in cases:
@@ -186,8 +198,11 @@ class Edit_fixture(unittest.TestCase):
         code, result = self.p.edit([{"op": "rename_routine", "routine": "order_count",
                                      "new_name": "orders_of"}], "shop")
         self.assertEqual(code, 0, result)
-        self.assertEqual(result["migration"][0], {"edit": 0, "sql": "DROP FUNCTION `order_count`"})
+        self.assertEqual(result["migration"][0], {"edit": 0, "sql": "DROP FUNCTION `order_count`", "action": "drop",
+                                                  "object": "function", "name": "order_count"})
         self.assertTrue(result["migration"][1]["sql"].startswith("CREATE FUNCTION orders_of(c INT)"))
+        self.assertEqual((result["migration"][1]["action"], result["migration"][1]["object"],
+                          result["migration"][1]["name"]), ("create", "function", "orders_of"))
         self.assertEqual([n["kind"] for n in result["notes"]], ["routine-recreated"])
         self.p.apply(result)
         self.assertEqual(self.p.outline(), result["outline"])
@@ -297,7 +312,8 @@ class Edit_fixture(unittest.TestCase):
     def test_drop_table(self):
         code, result = self.p.edit([{"op": "drop_table", "table": "orders"}], "shop")
         self.assertEqual(code, 0, result)
-        self.assertEqual(result["migration"], [{"edit": 0, "sql": "DROP TABLE `orders`"}])
+        self.assertEqual(result["migration"], [{"edit": 0, "sql": "DROP TABLE `orders`",
+                                                "action": "drop", "object": "table", "name": "orders"}])
         # The function and the view still select from it.
         self.assertEqual([n["kind"] for n in result["notes"]], ["still-referenced", "still-referenced"])
         self.p.apply(result)

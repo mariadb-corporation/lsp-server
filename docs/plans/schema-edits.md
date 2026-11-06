@@ -482,3 +482,19 @@ definition, as index names, no longer as columns: a column rename leaves a key n
 alone. With routines of both kinds allowed one name, `rest-reference` notes match the REST
 object's kind (a REST procedure is not the function's), and the new name of `ALTER EVENT e
 RENAME TO x` is an event's, not a reference to a routine `x`.
+
+**Migration tags, 2026-11-06 (asked for by msm, mariadb-shell-plugins #89):** msm sorted the
+migration into the update script's sections by reading its SQL with regexes. Each migration
+statement now says what it does: `action` (`create`/`drop` for tables, views and routines,
+`add`/`drop` for a table's members, `alter`, `rename`), `object` (`table`, `view`,
+`procedure`, `function`, `column`, `index`, `primary_key`, `foreign_key`, `table_options`),
+`name` (before the edit; `PRIMARY` for a primary key), `table` for a member and `new_name`
+for a rename. The 1833 sequence of `modify_column` is tagged statement by statement (`drop`
+`foreign_key`, `alter` `column`, `add` `foreign_key`), `rename_routine` as its `drop` and its
+`create`. No section numbers: placing them stays msm's. An op the binary does not know is
+`unsupported` (was `bad-request`), and `mariadb-lsp edit --ops` prints `{"format": 1, "ops":
+[...]}`; a binary that answers it has the tags. Keys are named when they are created
+(`add_index`, `add_foreign_key`, `add_table`): an index after its first column as the server
+would, a foreign key `fk_<table>_<referenced table>`, made unique, so a later `drop_index` or
+`drop_foreign_key` has a name to migrate with (the server's own name for an unnamed foreign
+key, `<table>_ibfk_N`, depends on the deployed table's history).
