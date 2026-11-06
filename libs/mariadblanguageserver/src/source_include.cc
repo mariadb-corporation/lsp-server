@@ -218,6 +218,37 @@ Source_slice slice_source(std::string_view text, std::string_view start, std::st
   return out;
 }
 
+std::optional<std::string> slice_bound_for(std::string_view text, std::string_view written,
+                                           bool is_end, uint32_t offset) {
+  if (offset > text.size()) return std::nullopt;
+  if (written.empty()) {
+    if (offset == (is_end ? text.size() : 0)) return std::string();
+    return std::nullopt;
+  }
+  const bool is_line = written.substr(0, 2) == "ln";
+  const auto number = is_line ? written.substr(2) : written;
+  const bool negative = !number.empty() && number[0] == '-';
+  if (is_line) {
+    const auto lines = line_starts(text);
+    const auto count = static_cast<int64_t>(lines.size()) - 1;
+    const auto it = std::lower_bound(lines.begin(), lines.end(), offset);
+    if (it == lines.end() || *it != offset) return std::nullopt;
+    const auto index = static_cast<int64_t>(it - lines.begin());
+    // The inverse of slice_source()'s line bounds.
+    const int64_t n = is_end ? (negative ? index - count - 1 : index) : (negative ? index - count : index + 1);
+    if (n == 0 || (negative && n > 0) || (!negative && n < 0)) return std::nullopt;
+    return "ln" + std::to_string(n);
+  }
+  if (offset < text.size() && !starts_character(text, offset)) return std::nullopt;
+  // A negative bound counts the characters after `offset`.
+  const int64_t n = negative ? -character_count(text.substr(offset)) : character_count(text.substr(0, offset));
+  if (negative && n == 0) {
+    if (is_end) return std::string();
+    return std::nullopt;
+  }
+  return std::to_string(n);
+}
+
 Source_expansion::Location map_source(const std::vector<Source_expansion::Segment> &segments,
                                       uint32_t offset) {
   if (segments.empty()) return {0, offset};
@@ -242,6 +273,17 @@ Source_expansion::Located_range map_source(
   const uint32_t stop =
       it == segments.end() ? b.offset : includes[it->source - 1].directive.statement.end;
   return {0, {b.offset, std::max(b.offset, stop)}};
+}
+
+std::optional<uint32_t> unmap_source(const std::vector<Source_expansion::Segment> &segments,
+                                     uint32_t text_size, uint32_t source, uint32_t offset) {
+  for (size_t k = 0; k < segments.size(); ++k) {
+    const auto &seg = segments[k];
+    if (seg.source != source || offset < seg.source_begin) continue;
+    const uint32_t end = k + 1 < segments.size() ? segments[k + 1].begin : text_size;
+    if (offset - seg.source_begin < end - seg.begin) return seg.begin + (offset - seg.source_begin);
+  }
+  return std::nullopt;
 }
 
 Source_expansion::Location Source_expansion::map(uint32_t offset) const {

@@ -1141,6 +1141,13 @@ MSM's `SOURCE '<path>'[<start>:<end>];` directives: the outline, diagnostics and
 of a script take in the files it includes. Plan, decisions and status in
 [`source-includes.md`](source-includes.md).
 
+### P10 — Schema edits (added 2026-11-05)
+
+`mariadb-lsp edit`: structured schema edits applied to an MSM script and its includes,
+returned as text edits, migration DDL and the edited outline, for msm's `msm.edit_schema`.
+Plan, decisions and status in [`schema-edits.md`](schema-edits.md); format in
+[`../edit-format.md`](../edit-format.md).
+
 Estimated total: about four months of one engineer's work to the end of P6, with P0–P2
 being the part that de-risks everything else and should be done first in exactly that
 order.

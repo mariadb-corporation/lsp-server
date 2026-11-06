@@ -359,11 +359,27 @@ context: a section without a `USE` gets the script's schema.
 - `mariadb/outline` lists the includes and gives objects from them a `source` and
   positions in their file ([outline-format.md](outline-format.md)). `mariadb-lsp check` and
   `outline` expand directives too; `--no-source` reads them as SQL.
-- `--source-dir DIR` (`check`, `outline`, `format`) is the folder relative SOURCE paths are
+- `--source-dir DIR` (`check`, `outline`, `format`, `edit`) is the folder relative SOURCE paths are
   taken from, in place of the file's own; stdin (`-`) has none otherwise, so MariaDB Shell's
   MCP `sql` tools pass their script's folder this way. A DIR that is not a folder, or the
   option with another command, is a usage error (exit 2); `format` only checks it, and
   `--no-source` still wins.
+
+## Schema edits
+
+`mariadb-lsp edit --edits REQUEST.json [--source-dir DIR] FILE|-` applies structured schema
+edits (renames of tables, columns, views and routines for now) to a script and the files its
+`SOURCE` directives include, and prints the text edits per file, the migration DDL and the
+outline of the edited texts as JSON. It writes no file; MSM's `msm.edit_schema` applies the
+edits. The request and output formats, the ops and the error and note kinds are in
+[edit-format.md](edit-format.md).
+
+- References are found as rename finds them, across the includes, each name resolved in the
+  script's context; an edit inside an included file is returned in that file's own text.
+- A directive whose positive end bound an edit moves gets its slice rewritten in the script.
+- Every edit is checked on the outline rebuilt from the edited texts; a request with an
+  edit that fails is refused whole (exit 1 and an `error` object).
+- MSM finds out whether the binary has the command by `edit` in `mariadb-lsp --help`.
 
 ## Live connections
 
