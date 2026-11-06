@@ -341,3 +341,41 @@ blocks, quoting, order, all or nothing, notes, the self-check), `tests/e2e/test_
 (fixture project; the MRS project: rename `url_host`, referenced by foreign keys, and a
 column of it, apply the edits, `outline` of the files equals the returned one, `check`
 passes). The decisions of §5 stand until the user says otherwise.
+
+**Interface agreed with the VS Code diagram viewer, 2026-11-06** (the viewer's palette places
+tables, views and routines and draws relationships; every change goes viewer →
+`msm.edit_schema` → `mariadb-lsp edit`). Binding for PR 2 and PR 3:
+
+- PR 2: `add_table`, `drop_table`, `add_column`, `modify_column`, `drop_column`,
+  `set_table_options`, `add_view`, `drop_view`, `add_routine`, `drop_routine`.
+  PR 3: `add_index`, `drop_index`, `add_foreign_key`, `drop_foreign_key`, `set_primary_key`.
+- An unknown member in a request struct is `bad-request` naming it. `add_table`'s generated
+  CREATE TABLE is parsed before anything is written; on failure each column is parsed alone
+  and the error is `bad-request` with the message starting "column `x`: ". Empty `columns`
+  and duplicate column names are `bad-request` too.
+- `add_foreign_key` writes no supporting index (the server creates one); the viewer sends
+  `add_index` first when it wants one written. No column type check, no note.
+- `set_primary_key {op, table, columns}`: a PR 3 op of its own because its migration must be
+  one statement, `ALTER TABLE t DROP PRIMARY KEY, ADD PRIMARY KEY (...)` (a separate DROP
+  fails when an AUTO_INCREMENT column is the key); `ADD PRIMARY KEY` alone when the table had
+  none. The CREATE TABLE's `PRIMARY KEY` element is replaced or added where `add_index` places
+  one; a column-level `PRIMARY KEY` attribute is removed; a key an `ALTER TABLE ... ADD
+  PRIMARY KEY` defines is replaced there. Columns only (DESC and prefixes go through
+  `drop_index` + `add_index`); the same columns in the same order change nothing.
+- `add_view {op, view: {name, definition, columns?, algorithm?, security?, definer?,
+  check_option?}}`: after the schema's last CREATE VIEW, else after its last CREATE TABLE;
+  `definition` is the SELECT only, `check_option` writes `WITH ... CHECK OPTION` (the outline
+  keeps it in the definition). A definition that is empty or does not parse is `bad-request`.
+  Migration: the CREATE VIEW.
+- `add_routine {op, routine: {name, kind, parameters, returns?, body, deterministic?,
+  data_access?, security?, comment?}}`: after the schema's last routine inside its DELIMITER
+  block, else a `DELIMITER $$ ... $$ DELIMITER ;` block written as the script's other routines
+  are, after the last view or table; a function needs `returns`; the whole statement is laid
+  out by the formatter. Migration: the CREATE, with the new note `routine-created` (same
+  meaning as `routine-recreated`; msm treats both alike).
+- `name-taken` for a routine (`add_routine`, `rename_routine`): any routine of either kind
+  with the name, since references cannot tell a procedure from a function of one name and the
+  pair becomes un-renameable (`rename_routine` is tightened from "same kind" in PR 2).
+- Feature detection: PR 2 adds a `--help` line under `edit`, `edit ops: <op> <op> ...`,
+  space-separated, exactly the ops the binary does; PR 3 extends it. A binary with `edit` in
+  `--help` but no `edit ops:` line does the four renames only.
