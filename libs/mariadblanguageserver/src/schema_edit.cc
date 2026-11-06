@@ -1911,6 +1911,7 @@ class Editor {
   struct Spot {
     uint32_t at = 0;
     std::string lead;       // line breaks before the new statement
+    std::string trail;      // and after it: at the start of the text
     std::string delimiter;  // the delimiter in force at `at`
   };
   // `gap_from`: the statement whose blank lines above count, when the
@@ -1981,7 +1982,7 @@ class Editor {
       const bool wrapped = wrap && s.delimiter == ";";
       const std::string body = wrapped ? block(s.delimiter) : statements(s.delimiter);
       const auto at = file_at(s.at);
-      if (!at || !change(changes, s.at, s.at, s.lead + body)) return std::nullopt;
+      if (!at || !change(changes, s.at, s.at, s.lead + body + s.trail)) return std::nullopt;
       return at;
     }
     const std::string &script = m_s.files()[0].log.text();
@@ -2151,15 +2152,20 @@ class Editor {
     return out;
   }
 
+  // The names referring to `id` in the searched text.
+  std::vector<Reference> references_in_text(const Object_id &id) const {
+    Reference_options ro;
+    ro.version_id = m_s.options().index.version_id;
+    ro.initial_schema = m_s.options().schema;
+    return find_references(text(), index(), id, 0, m_s.view(), m_s.pool(), ro);
+  }
+
   // A note on every statement that still refers to `id` outside the
   // searched ranges `removed`.
   void still_referenced(size_t edit, const std::optional<Object_id> &id, const std::vector<Range> &removed,
                         const std::string &what) {
     if (!id) return;
-    Reference_options ro;
-    ro.version_id = m_s.options().index.version_id;
-    ro.initial_schema = m_s.options().schema;
-    const auto refs = find_references(text(), index(), *id, 0, m_s.view(), m_s.pool(), ro);
+    const auto refs = references_in_text(*id);
     std::set<size_t> seen;
     for (const auto &r : refs) {
       if (std::any_of(removed.begin(), removed.end(),
@@ -2275,7 +2281,12 @@ class Editor {
     }
     Spot s;
     s.at = p > r.begin ? line_end(t, p - 1) : r.begin;
-    s.lead = eol + eol;
+    if (s.at == 0) {
+      // Nothing above: the statement starts the text, a blank line after it.
+      s.trail = eol + eol;
+    } else {
+      s.lead = eol + eol;
+    }
     s.delimiter = before ? index().delimiters()[statement(*before).active_delimiter] : ";";
     if (s.delimiter.empty()) s.delimiter = ";";
     return s;
@@ -2337,7 +2348,20 @@ class Editor {
         for (const auto &o : objects) {
           const auto k = statement_of(o.origin);
           if (!k) continue;
-          const uint32_t at = statement(form_at(*k, o.name).drop.value_or(*k)).begin;
+          // Its DROP ... IF EXISTS, and the comment lines right above (its
+          // banner), are its own.
+          uint32_t at = statement(form_at(*k, o.name).drop.value_or(*k)).begin;
+          const std::string_view t = text();
+          if (at == line_begin(t, at)) {
+            while (at > 0) {
+              const uint32_t above = line_begin(t, at - 1);
+              if (!is_comment_line(t.substr(above, at - 1 - above)) ||
+                  t.substr(above, k_msm_marker.size()) == k_msm_marker) {
+                break;
+              }
+              at = above;
+            }
+          }
           if (at >= within.begin && at < within.end) {
             within.end = at;
             cut = true;
@@ -2640,8 +2664,7 @@ class Editor {
       }
       return error(i, "bad-request", "the CREATE TABLE of `" + t.name + "` does not parse (" + *problem + ")");
     }
-    if (auto err = insert_plain(i, place, st, sql, Obj::table, t.name, changes)) return err;
-    return std::nullopt;
+    return insert_plain(i, place, st, sql, Obj::table, t.name, changes);
   }
 
   // The foreign keys (with their table) that use column `column` of `table`:
@@ -3391,10 +3414,7 @@ class Editor {
   // a column's default takes values from (NEXT VALUE FOR s, NEXTVAL(s)),
   // found as a rename finds references.
   std::vector<std::pair<std::string, std::string>> columns_referring_to(const Object_id &id) {
-    Reference_options ro;
-    ro.version_id = m_s.options().index.version_id;
-    ro.initial_schema = m_s.options().schema;
-    const auto refs = find_references(text(), index(), id, 0, m_s.view(), m_s.pool(), ro);
+    const auto refs = references_in_text(id);
     std::vector<std::pair<std::string, std::string>> out;
     for (const Schema *s : lookup().schemas()) {
       for (const auto &t : s->tables) {
@@ -4205,7 +4225,9 @@ class Editor {
         for (const auto &[table, column] : m_default_columns) {
           const Table *t = l.table(table).second;
           const Column *c = t == nullptr ? nullptr : t->column(column);
-          if (c == nullptr || !c->default_value) return fail("column `" + table + "`.`" + column + "` lost its default");
+          // A later ALTER TABLE dropped the default (or the column): the
+          // deployed column no longer names the sequence.
+          if (c == nullptr || !c->default_value) continue;
           migrate_member(i, table, "ALTER COLUMN " + backtick_quote(column) + " SET DEFAULT " + *c->default_value,
                          Act::alter, Obj::column, column);
         }

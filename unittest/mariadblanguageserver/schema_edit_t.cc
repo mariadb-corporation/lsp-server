@@ -1979,6 +1979,19 @@ TEST(Schema_edit, drop_sequence) {
   EXPECT_EQ(std::vector<std::string>{"still-referenced"}, note_kinds(r));
 }
 
+TEST(Schema_edit, a_sequence_goes_above_the_first_tables_banner) {
+  // Nothing above the first table but its banner: the sequence goes above
+  // the banner, not between it and its table.
+  const std::string script =
+      "-- Table t\n"
+      "CREATE TABLE t (a INT);\n";
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "add_sequence", "sequence": {"name": "q"}})j")));
+  const std::string got = text(r, "");
+  EXPECT_EQ("CREATE SEQUENCE `q`;\n\n" + script, got);
+  EXPECT_EQ(script, twice(script, R"j({"op": "add_sequence", "sequence": {"name": "q"}})j",
+                          R"j({"op": "drop_sequence", "sequence": "q"})j"));
+}
+
 TEST(Schema_edit, a_sequence_is_used_where_the_resolver_finds_it) {
   // Not by its words: `value` is no reference in NEXT VALUE FOR `other`, nor
   // `s` in a string.
@@ -2016,6 +2029,10 @@ TEST(Schema_edit, rename_sequence) {
   EXPECT_EQ("unknown-object", failed(edit(k_sequences, {}, request("shop", R"j({"op": "rename_sequence", "sequence": "u", "new_name": "x"})j"))).kind);
   // And back.
   EXPECT_EQ(k_sequences, text(ok(edit(text(r, ""), {}, request("shop", R"j({"op": "rename_sequence", "sequence": "ids", "new_name": "s"})j"))), ""));
+  // A default a later ALTER TABLE drops is not set again.
+  const auto d = ok(edit(k_sequences + "ALTER TABLE `t` ALTER COLUMN `id` DROP DEFAULT;\n", {},
+                         request("shop", R"j({"op": "rename_sequence", "sequence": "s", "new_name": "ids"})j")));
+  EXPECT_EQ((std::vector<std::string>{"RENAME TABLE `s` TO `ids`"}), migration(d));
 }
 
 }  // namespace mdbls
