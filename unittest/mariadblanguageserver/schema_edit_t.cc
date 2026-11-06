@@ -1015,6 +1015,16 @@ TEST(Schema_edit, a_routine_rename_leaves_triggers_and_events_of_its_name) {
   EXPECT_NE(std::string::npos, text(r, "").find("CREATE PROCEDURE y()"));
 }
 
+TEST(Schema_edit, string_literals_follow_the_sql_mode) {
+  const std::string request_json =
+      R"j({"op": "add_column", "table": "t", "column": {"name": "b", "type": "INT", "comment": "C:\\dir 'x'"}})j";
+  const auto r = ok(edit("CREATE TABLE t (\n  a INT\n);\n", {}, request("", request_json)));
+  EXPECT_NE(std::string::npos, text(r, "").find(R"(b INT COMMENT 'C:\\dir ''x'')")) << text(r, "");
+  const auto n = ok(edit("SET sql_mode = 'NO_BACKSLASH_ESCAPES';\nCREATE TABLE t (\n  a INT\n);\n", {},
+                         request("", request_json)));
+  EXPECT_NE(std::string::npos, text(n, "").find(R"(b INT COMMENT 'C:\dir ''x'')")) << text(n, "");
+}
+
 TEST(Schema_edit, rename_routine_to_a_name_of_the_other_kind) {
   const std::string script = "CREATE PROCEDURE p() SELECT 1;\nCREATE FUNCTION f() RETURNS INT RETURN 1;\n";
   EXPECT_EQ("name-taken",

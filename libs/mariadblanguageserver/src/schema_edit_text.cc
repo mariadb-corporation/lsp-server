@@ -41,12 +41,12 @@ bool plugin_type(std::string_view name) {
   return std::any_of(std::begin(k_types), std::end(k_types), [&](const char *k) { return iequals(n, k); });
 }
 
-std::string sql_string(std::string_view value) {
+std::string sql_string(std::string_view value, bool backslash_escapes) {
   std::string out = "'";
   for (const char c : value) {
     if (c == '\'') out += "''";
-    else if (c == '\\') out += "\\\\";
-    else if (c == '\0') out += "\\0";
+    else if (c == '\\' && backslash_escapes) out += "\\\\";
+    else if (c == '\0' && backslash_escapes) out += "\\0";
     else out += c;
   }
   return out + "'";
@@ -102,7 +102,7 @@ std::string column_sql(const Column &c, const std::vector<Check> &checks, const 
     if (c.auto_increment && !serial) out += " " + st.kw("AUTO_INCREMENT");
   }
   if (c.invisible) out += " " + st.kw("INVISIBLE");
-  if (c.comment) out += " " + st.kw("COMMENT") + " " + sql_string(*c.comment);
+  if (c.comment) out += " " + st.kw("COMMENT") + " " + sql_string(*c.comment, st.backslash_escapes);
   if (c.system_versioning) {
     out += " " + st.kw(*c.system_versioning ? "WITH SYSTEM VERSIONING" : "WITHOUT SYSTEM VERSIONING");
   }
@@ -134,7 +134,7 @@ std::string index_sql(const Index &ix, const Style &st) {
     if (k == "parser") out += " " + st.kw("WITH PARSER") + " " + v;
     else out += " " + option_sql(k, v, st);
   }
-  if (ix.comment) out += " " + st.kw("COMMENT") + " " + sql_string(*ix.comment);
+  if (ix.comment) out += " " + st.kw("COMMENT") + " " + sql_string(*ix.comment, st.backslash_escapes);
   if (ix.ignored) out += " " + st.kw("IGNORED");
   return out;
 }
@@ -168,7 +168,7 @@ std::string table_option_sql(std::string_view name, std::string_view value, cons
   if (name == "engine") return st.kw("ENGINE") + "=" + std::string(value);
   if (name == "charset") return st.kw("DEFAULT CHARSET") + "=" + std::string(value);
   if (name == "collation") return st.kw("COLLATE") + "=" + std::string(value);
-  if (name == "comment") return st.kw("COMMENT") + "=" + sql_string(value);
+  if (name == "comment") return st.kw("COMMENT") + "=" + sql_string(value, st.backslash_escapes);
   if (name == "data") return st.kw("DATA DIRECTORY") + "=" + std::string(value);
   if (name == "index") return st.kw("INDEX DIRECTORY") + "=" + std::string(value);
   return option_sql(name, value, st);
@@ -219,7 +219,7 @@ std::string create_routine_sql(const Routine &r, const Style &st) {
   }
   out += ")";
   if (function) out += " " + st.kw("RETURNS") + " " + r.returns;
-  if (r.comment) out += " " + st.kw("COMMENT") + " " + sql_string(*r.comment);
+  if (r.comment) out += " " + st.kw("COMMENT") + " " + sql_string(*r.comment, st.backslash_escapes);
   if (r.deterministic) out += " " + st.kw(*r.deterministic ? "DETERMINISTIC" : "NOT DETERMINISTIC");
   if (!r.data_access.empty()) out += " " + st.kw(upper(r.data_access));
   if (!r.security.empty()) out += " " + st.kw("SQL SECURITY") + " " + st.kw(upper(r.security));

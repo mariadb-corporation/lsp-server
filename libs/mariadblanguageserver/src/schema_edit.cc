@@ -176,7 +176,7 @@ bool edit_op_supported(Edit_op op) {
 std::string supported_edit_ops() {
   std::string out;
   for (const auto &o : k_ops) {
-    if (!edit_op_supported(o.op)) continue;
+    if (!o.supported) continue;
     if (!out.empty()) out += ' ';
     out += o.name;
   }
@@ -258,6 +258,13 @@ namespace {
 
 using Json = rapidjson::Value;
 
+// An option's name as a request gives it: letters, digits, underscores.
+bool option_name(std::string_view key) {
+  return !key.empty() && std::all_of(key.begin(), key.end(), [](char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+  });
+}
+
 // Reads the members of request objects, stopping at the first problem.
 class Json_reader {
  public:
@@ -311,7 +318,7 @@ class Json_reader {
     if (ok()) *out = std::move(v);
   }
   // A string that must be one of `values` (compared in any case), stored
-  // in upper case; "" when not given.
+  // spelt as in `values`; "" when not given.
   void choice(const Json &o, const char *m, std::string *out, std::initializer_list<const char *> values,
               const std::string &what) {
     str(o, m, out, false, what);
@@ -368,11 +375,16 @@ class Json_reader {
     }
     for (auto it = o[m].MemberBegin(); it != o[m].MemberEnd(); ++it) {
       if (it->value.IsNull()) continue;
-      if (!it->value.IsString()) {
-        fail("the option \"" + std::string(it->name.GetString()) + "\" of " + what + " is not a string");
+      const std::string key(it->name.GetString(), it->name.GetStringLength());
+      if (!option_name(key)) {
+        fail("\"" + key + "\" of " + what + " is not an option");
         return;
       }
-      out->emplace_back(lower(it->name.GetString()), it->value.GetString());
+      if (!it->value.IsString()) {
+        fail("the option \"" + key + "\" of " + what + " is not a string");
+        return;
+      }
+      out->emplace_back(lower(key), std::string(it->value.GetString(), it->value.GetStringLength()));
     }
   }
   // An array member, each element read by `each`.
@@ -435,7 +447,6 @@ std::optional<Index> read_index(Json_reader &r, const Json &v, const std::string
   const std::string w = ix.name.empty() ? what : "index `" + ix.name + "`";
   r.choice(v, "kind", &ix.kind, {"primary", "unique", "index", "fulltext", "spatial", "vector"}, w);
   if (r.ok() && ix.kind.empty()) r.fail(w + " has no \"kind\"");
-  ix.kind = lower(ix.kind);
   std::vector<std::string> columns;
   r.strings(v, "columns", &columns, false, w);
   for (auto &c : columns) ix.key_parts.emplace_back().column = std::move(c);
@@ -574,12 +585,14 @@ std::optional<Routine> read_routine(Json_reader &r, const Json &v) {
   const std::string w = "routine `" + rt.name + "`";
   r.choice(v, "kind", &rt.kind, {"procedure", "function"}, w);
   if (r.ok() && rt.kind.empty()) r.fail(w + " has no \"kind\"");
-  rt.kind = lower(rt.kind);
   r.array(v, "parameters", w, [&](const Json &x, size_t k) {
     const std::string pw = "parameter " + std::to_string(k + 1) + " of " + w;
     if (!r.object(x, pw, {"mode", "name", "type"})) return;
     Parameter p;
     r.choice(x, "mode", &p.mode, {"IN", "OUT", "INOUT"}, pw);
+    if (r.ok() && rt.kind == "function" && !p.mode.empty() && p.mode != "IN") {
+      r.fail(pw + ": a function's parameters are IN");
+    }
     r.str(x, "name", &p.name, true, pw);
     r.str(x, "type", &p.type, true, pw);
     rt.parameters.push_back(std::move(p));
@@ -596,6 +609,7 @@ std::optional<Routine> read_routine(Json_reader &r, const Json &v) {
   r.str(v, "definer", &rt.definer, false, w);
   r.opt_str(v, "comment", &rt.comment, w);
   r.boolean(v, "aggregate", &rt.aggregate, w);
+  if (r.ok() && rt.aggregate && rt.kind != "function") r.fail(w + ": only a function is AGGREGATE");
   if (r.ok() && Json_reader::given(v, "soname")) r.fail(w + ": a function from a library (SONAME) cannot be added");
   if (!r.ok()) return std::nullopt;
   return rt;
@@ -715,9 +729,8 @@ std::variant<Edit_request, Edit_error> parse_edit_request(std::string_view json)
             r.fail("\"options\" of " + what + " is not an object of options");
           } else {
             for (auto it = o->MemberBegin(); it != o->MemberEnd(); ++it) {
-              const std::string key = lower(it->name.GetString());
-              const auto option_char = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; };
-              if (key.empty() || !std::all_of(key.begin(), key.end(), option_char)) {
+              const std::string key = lower(std::string_view(it->name.GetString(), it->name.GetStringLength()));
+              if (!option_name(key)) {
                 r.fail("\"" + std::string(it->name.GetString()) + "\" is not a table option");
               } else if (it->value.IsNull()) {
                 se.options.emplace_back(key, std::nullopt);
@@ -748,7 +761,6 @@ std::variant<Edit_request, Edit_error> parse_edit_request(std::string_view json)
         members({"op", "routine", "kind"});
         name("routine", &se.routine);
         r.choice(e, "kind", &se.routine_kind, {"procedure", "function"}, what);
-        se.routine_kind = lower(se.routine_kind);
         break;
       default:
         break;  // apply_schema_edits() answers unsupported
@@ -1487,14 +1499,9 @@ class Editor {
   // Replaces the searched range [b, e) with `with`, in the file it comes
   // from; false when the range does not lie in one file's text.
   bool change(Changes &changes, uint32_t b, uint32_t e, std::string with) {
+    if (!mappable(b, e)) return false;
     const auto m = outline().map({b, e});
-    const auto file = m_s.file_of(m.source);
-    if (!file || m.range.end - m.range.begin != e - b) return false;
-    const std::string &ft = m_s.files()[*file].log.text();
-    if (m.range.end > ft.size() || std::string_view(ft).substr(m.range.begin, e - b) != text().substr(b, e - b)) {
-      return false;
-    }
-    changes[*file].push_back({m.range.begin, m.range.end, std::move(with)});
+    changes[*m_s.file_of(m.source)].push_back({m.range.begin, m.range.end, std::move(with)});
     return true;
   }
 
@@ -1554,8 +1561,10 @@ class Editor {
     edit_text::Style st;
     if (!k) {
       st.eol = std::string(eol_of(m_s.files()[0].log.text()));
+      st.backslash_escapes = !icontains(m_s.options().index.sql_mode, "NO_BACKSLASH_ESCAPES");
       return st;
     }
+    st.backslash_escapes = (index().modes()[statement(*k).mode].bits & k_no_backslash_escapes) == 0;
     const std::string_view sql = index().text_of(text(), statement(*k));
     size_t p = 0;
     while (p < sql.size() && std::isalpha(static_cast<unsigned char>(sql[p]))) ++p;
@@ -1982,6 +1991,10 @@ class Editor {
     mdbp_result r;
     if (p != nullptr && mdbp_parse_sql(p, sql.data(), sql.size(), &r) == MDBP_OK && r.accepted) {
       const Syntax_tree t = Syntax_tree::build(p, r, 0);
+      // An attribute holding `, b INT` would add a column of its own.
+      if (!t.empty() && find_all_in(t, t.roots()[0], gram().field_list_item).size() != 1) {
+        return error(i, "bad-request", "column `" + c.name + "`: its attributes hold more than its definition");
+      }
       const uint32_t udt = t.empty() ? k_npos : find_in(t, t.roots()[0], gram().udt_name);
       if (udt != k_npos && !edit_text::plugin_type(t.text(sql, udt))) {
         return error(i, "bad-request", "column `" + c.name + "`: `" + c.type + "` is not a MariaDB data type");
@@ -2183,6 +2196,9 @@ class Editor {
     }
     if (!e.after.empty() && table->column(e.after) == nullptr) {
       return error(i, "unknown-object", "table `" + table->name + "` has no column `" + e.after + "`");
+    }
+    if (table->columns.empty()) {
+      return error(i, "unsupported", "the columns of `" + table->name + "` are not known (CREATE TABLE ... AS or LIKE)");
     }
     const std::string after = e.first ? "" : e.after.empty() ? table->columns.back().name : table->column(e.after)->name;
     m_columns = table->columns.size();
@@ -2451,14 +2467,20 @@ class Editor {
           }
           continue;
         }
-        // Removed, with the blanks and comma before it.
+        // Removed, with the blanks and comma before it; the first of a
+        // comma-separated list with the comma after it.
         uint32_t b = t.begin(n);
+        uint32_t end = t.end(n);
         while (b > 0 && (text()[b - 1] == ' ' || text()[b - 1] == '\t' || text()[b - 1] == '\n' || text()[b - 1] == '\r')) --b;
         if (b > 0 && text()[b - 1] == ',') {
           --b;
           while (b > 0 && (text()[b - 1] == ' ' || text()[b - 1] == '\t')) --b;
+        } else {
+          uint32_t q = end;
+          while (q < text().size() && (text()[q] == ' ' || text()[q] == '\t')) ++q;
+          if (q < text().size() && text()[q] == ',') end = q + 1;
         }
-        if (!change(changes, b, t.end(n), "")) {
+        if (!change(changes, b, end, "")) {
           return error(i, "self-check", "the option " + key + " of `" + table->name + "` cannot be removed");
         }
       }

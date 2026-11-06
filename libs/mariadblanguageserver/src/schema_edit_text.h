@@ -34,6 +34,7 @@ struct Style {
   bool backticks = true;  // names in backticks, else quoted only when needed
   bool upper = true;      // keywords in upper case
   std::string eol = "\n";
+  bool backslash_escapes = true;  // false under NO_BACKSLASH_ESCAPES
 
   std::string id(std::string_view name) const;
   // `keyword` (given in upper case) in the file's case.
@@ -45,8 +46,9 @@ struct Style {
 // place too (udt_name), so a misspelt type parses.
 bool plugin_type(std::string_view name);
 
-// A string literal: in single quotes, quotes and backslashes escaped.
-std::string sql_string(std::string_view value);
+// A string literal: in single quotes, quotes doubled, backslashes (and a
+// NUL) escaped unless `backslash_escapes` is false (NO_BACKSLASH_ESCAPES).
+std::string sql_string(std::string_view value, bool backslash_escapes = true);
 
 // The column-level CHECKs of column `column` of `t`.
 std::vector<Check> column_checks(const Table &t, std::string_view column);
