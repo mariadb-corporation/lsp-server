@@ -161,6 +161,22 @@ TEST(Catalog, rename_table_renames_views_and_sequences) {
   EXPECT_EQ("s", d->sequences[0].name);
   ASSERT_EQ(1u, d->views.size());
   EXPECT_EQ("v", d->views[0].name);
+  // A chain through a schema the statement itself creates.
+  const auto y = outline_of(
+      "CREATE TABLE a (x INT);\n"
+      "RENAME TABLE a TO db.b, db.b TO db.c;\n");
+  const Schema *db = schema(y, "db");
+  ASSERT_NE(nullptr, db);
+  ASSERT_EQ(1u, db->tables.size());
+  EXPECT_EQ("c", db->tables[0].name);
+  // A view renamed in the statement and then moved: nothing is renamed.
+  const auto z = outline_of(
+      "CREATE VIEW v AS SELECT 1;\n"
+      "RENAME TABLE v TO w, w TO db.x;\n");
+  const Schema *dz = schema(z, "");
+  ASSERT_NE(nullptr, dz);
+  ASSERT_EQ(1u, dz->views.size());
+  EXPECT_EQ("v", dz->views[0].name);
 }
 
 TEST(Catalog, routines_triggers_events) {

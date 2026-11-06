@@ -2011,6 +2011,20 @@ TEST(Schema_edit, a_sequence_set_as_a_default_by_alter_table) {
   EXPECT_EQ("referenced", failed(edit(modified, {}, request("", R"j({"op": "drop_sequence", "sequence": "s"})j"))).kind);
   EXPECT_EQ(Tags{"rename sequence s -> ids"},
             tags(ok(edit(modified, {}, request("", R"j({"op": "rename_sequence", "sequence": "s", "new_name": "ids"})j")))));
+  // A default a later ALTER COLUMN sets to a constant is not set again.
+  const std::string reset =
+      "CREATE SEQUENCE s;\n"
+      "CREATE TABLE t (id INT DEFAULT NEXT VALUE FOR s);\n"
+      "ALTER TABLE t ALTER COLUMN id SET DEFAULT 0;\n";
+  EXPECT_EQ(Tags{"rename sequence s -> ids"},
+            tags(ok(edit(reset, {}, request("", R"j({"op": "rename_sequence", "sequence": "s", "new_name": "ids"})j")))));
+  // An ALTER TABLE of the sequence itself does not keep it from being dropped.
+  const std::string altered =
+      "CREATE SEQUENCE s;\n"
+      "ALTER TABLE s COMMENT 'ids';\n"
+      "CREATE TABLE t (id INT);\n";
+  const auto da = edit(altered, {}, request("", R"j({"op": "drop_sequence", "sequence": "s"})j"));
+  if (const auto *err = std::get_if<Edit_error>(&da)) EXPECT_NE("referenced", err->kind);
 }
 
 TEST(Schema_edit, a_sequence_is_used_where_the_resolver_finds_it) {

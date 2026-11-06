@@ -185,7 +185,7 @@ has above it (a banner's comment lines not counted); no banner is written.
   comments; in an MSM script in Section 140. Its numbers (`start`, `increment`, `minvalue`,
   `maxvalue`, `cache`) are strings of an integer, as the outline writes them; `cache` `"0"` writes
   `NOCACHE`. Sequences share the namespace of tables and views (`name-taken`). A sequence a
-  `CREATE TABLE` or `ALTER TABLE` of the script names (a column default, also one a later
+  `CREATE TABLE` or `ALTER TABLE` of another table names (a column default, also one a later
   statement changed) cannot be dropped (`referenced`): that statement fails without it
   (MariaDB error 1146).
 - **A statement removed** (with the `DROP ... IF EXISTS` of the object before it, which is

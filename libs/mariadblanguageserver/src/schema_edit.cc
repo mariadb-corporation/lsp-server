@@ -3420,8 +3420,8 @@ class Editor {
     for (const Schema *s : lookup().schemas()) {
       for (const auto &t : s->tables) {
         for (const auto &c : t.columns) {
-          // In its definition, or where a later ALTER TABLE sets its default.
-          if (refers_in(c.origin) || (c.default_origin && refers_in(*c.default_origin))) out.push_back({t.name, c.name});
+          // Where a later ALTER TABLE sets its default, else in its definition.
+          if (c.default_origin ? refers_in(*c.default_origin) : refers_in(c.origin)) out.push_back({t.name, c.name});
         }
       }
     }
@@ -3448,15 +3448,20 @@ class Editor {
     if (sequence == nullptr) return error(i, "unknown-object", "there is no sequence `" + e.sequence + "`");
     const std::string name = sequence->name;
     const auto id = resolve(sequence->origin, Target_kind::table);
+    // Without it, what still uses the sequence is unknown: refused, as
+    // rename_sequence does.
     if (!id) return error(i, "self-check", "the definition of sequence `" + name + "` cannot be resolved");
     // A CREATE TABLE or ALTER TABLE naming a sequence that does not exist
     // (a column default) fails (MariaDB error 1146): the script's, wherever
-    // it is, not only the column's last definition.
+    // it is, not only the column's last definition. An ALTER TABLE of the
+    // sequence itself is not one.
     for (const auto &r : references_in_text(*id)) {
       const size_t k = index().find(r.range.begin);
       if (k >= index().statements().size()) continue;
       const auto subject = subject_of(index().text_of(text(), statement(k)));
-      if (subject && subject->kind == "TABLE" && (subject->verb == "CREATE" || subject->verb == "ALTER")) {
+      if (subject && subject->kind == "TABLE" && (subject->verb == "CREATE" || subject->verb == "ALTER") &&
+          !(iequals(subject->names[0].second, name) &&
+            (subject->names[0].first.empty() || iequals(subject->names[0].first, schema->name)))) {
         return error(i, "referenced", "the " + subject->verb + " TABLE of `" + subject->names[0].second +
                                           "` takes values from `" + name + "`");
       }
@@ -4227,9 +4232,10 @@ class Editor {
         for (const auto &[table, column] : m_default_columns) {
           const Table *t = l.table(table).second;
           const Column *c = t == nullptr ? nullptr : t->column(column);
-          // A later ALTER TABLE dropped the default (or the column): the
-          // deployed column no longer names the sequence.
-          if (c == nullptr || !c->default_value) continue;
+          if (c == nullptr) return fail("the edited script has no column `" + table + "`.`" + column + "`");
+          // A later ALTER TABLE dropped the default: the deployed column no
+          // longer names the sequence.
+          if (!c->default_value) continue;
           migrate_member(i, table, "ALTER COLUMN " + backtick_quote(column) + " SET DEFAULT " + *c->default_value,
                          Act::alter, Obj::column, column);
         }
