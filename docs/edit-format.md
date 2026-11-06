@@ -185,8 +185,9 @@ has above it (a banner's comment lines not counted); no banner is written.
   comments; in an MSM script in Section 140. Its numbers (`start`, `increment`, `minvalue`,
   `maxvalue`, `cache`) are strings of an integer, as the outline writes them; `cache` `"0"` writes
   `NOCACHE`. Sequences share the namespace of tables and views (`name-taken`). A sequence a
-  column's default takes values from cannot be dropped (`referenced`): that table's `CREATE
-  TABLE` fails without it (MariaDB error 1146).
+  `CREATE TABLE` or `ALTER TABLE` of the script names (a column default, also one a later
+  statement changed) cannot be dropped (`referenced`): that statement fails without it
+  (MariaDB error 1146).
 - **A statement removed** (with the `DROP ... IF EXISTS` of the object before it, which is
   also removed) goes with its lines, with the comment lines right above it when
   one of them names the object (a Workbench banner), and the blank lines above it, as
@@ -290,7 +291,7 @@ Each statement says what it does, so a program need not read its SQL:
 | `rename_event` | `ALTER EVENT a RENAME TO b`; none for a change of case (event names do not tell case apart) | `rename` `event` |
 | `add_sequence` | the `CREATE SEQUENCE` as written | `create` `sequence` |
 | `drop_sequence` | `DROP SEQUENCE s` | `drop` `sequence` |
-| `rename_sequence` | `RENAME TABLE a TO b`, then for each column whose default takes values from it `ALTER TABLE t ALTER COLUMN c SET DEFAULT ...` with the default as the edited script writes it: a deployed default still names the old sequence after `RENAME TABLE` | `rename` `sequence`, then `alter` `column` for each such column |
+| `rename_sequence` | `RENAME TABLE a TO b`, then for each column whose default takes values from it (in its definition, or set by `ALTER COLUMN c SET DEFAULT`) `ALTER TABLE t ALTER COLUMN c SET DEFAULT ...` with the default as the edited script writes it: a deployed default still names the old sequence after `RENAME TABLE` | `rename` `sequence`, then `alter` `column` for each such column |
 
 ## Notes
 
@@ -324,7 +325,7 @@ A refused request writes no edits, whatever edits before the failing one did:
 | `unsupported` | an op this binary does not do or does not know (a newer binary may), or a column added to a table whose columns the script does not list (`CREATE TABLE ... AS SELECT`, `LIKE`) |
 | `unknown-object` | the table, column, view, routine, trigger, event or sequence is not in the outline, nor the table or column a foreign key references, nor the column `after` names, nor a trigger's table (a view is not one) or the trigger its `order` names; `drop_trigger`'s `table` is not the trigger's |
 | `name-taken` | the new name is taken: by a table, view or sequence for a table, view or sequence (they share a namespace), by a column of the table, by a routine of the same kind, by an index of the table, by a foreign key of the schema, by a trigger or an event of the schema for a trigger or event; a second primary key (use `set_primary_key`); a change of case only is a rename |
-| `referenced` | `drop_table` of a table another table's foreign key references; `drop_column` of a column a foreign key uses; `drop_index` or `set_primary_key` taking away the index a foreign key or an `AUTO_INCREMENT` column needs; `drop_trigger` of a trigger another one follows or precedes; `drop_sequence` of a sequence a column's default takes values from |
+| `referenced` | `drop_table` of a table another table's foreign key references; `drop_column` of a column a foreign key uses; `drop_index` or `set_primary_key` taking away the index a foreign key or an `AUTO_INCREMENT` column needs; `drop_trigger` of a trigger another one follows or precedes; `drop_sequence` of a sequence a `CREATE TABLE` or `ALTER TABLE` names |
 | `edit-outside-slice` | an edit of an included file would cross the bound of a directive's slice, lie outside every slice of the file, or leave a slice that cannot be written to select the edited text |
 | `self-check` | the outline of the edited texts does not show the edit (the table under its new name, the old name gone from every foreign key, trigger and index; an added object where it was asked for; a dropped one gone), or has a statement it cannot read that the input's outline read (an unapplied note the input did not have) |
 

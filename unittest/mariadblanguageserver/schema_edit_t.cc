@@ -1992,6 +1992,27 @@ TEST(Schema_edit, a_sequence_goes_above_the_first_tables_banner) {
                           R"j({"op": "drop_sequence", "sequence": "q"})j"));
 }
 
+TEST(Schema_edit, a_sequence_set_as_a_default_by_alter_table) {
+  // ALTER COLUMN ... SET DEFAULT: the deployed default names it too.
+  const std::string script =
+      "CREATE SEQUENCE s;\n"
+      "CREATE TABLE t (id INT, b INT);\n"
+      "ALTER TABLE t ALTER COLUMN id SET DEFAULT NEXT VALUE FOR s;\n";
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "rename_sequence", "sequence": "s", "new_name": "ids"})j")));
+  EXPECT_EQ((Tags{"rename sequence s -> ids", "alter column id (t)"}), tags(r));
+  EXPECT_EQ("ALTER TABLE `t` ALTER COLUMN `id` SET DEFAULT NEXT VALUE FOR ids", migration(r).back());
+  EXPECT_EQ("referenced", failed(edit(script, {}, request("", R"j({"op": "drop_sequence", "sequence": "s"})j"))).kind);
+  // A default changed by a later MODIFY: the CREATE TABLE still names it,
+  // and fails without it.
+  const std::string modified =
+      "CREATE SEQUENCE s;\n"
+      "CREATE TABLE t (id INT DEFAULT NEXT VALUE FOR s);\n"
+      "ALTER TABLE t MODIFY id INT DEFAULT 0;\n";
+  EXPECT_EQ("referenced", failed(edit(modified, {}, request("", R"j({"op": "drop_sequence", "sequence": "s"})j"))).kind);
+  EXPECT_EQ(Tags{"rename sequence s -> ids"},
+            tags(ok(edit(modified, {}, request("", R"j({"op": "rename_sequence", "sequence": "s", "new_name": "ids"})j")))));
+}
+
 TEST(Schema_edit, a_sequence_is_used_where_the_resolver_finds_it) {
   // Not by its words: `value` is no reference in NEXT VALUE FOR `other`, nor
   // `s` in a string.

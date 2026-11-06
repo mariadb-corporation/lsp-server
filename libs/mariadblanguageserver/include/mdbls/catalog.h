@@ -83,6 +83,9 @@ struct Column {
   std::optional<std::string> collation;
   std::optional<std::string> generated;      // the generation expression
   Origin origin;
+  // Where `default_value` is written when not in the definition: an ALTER
+  // TABLE ... ALTER COLUMN c SET DEFAULT (`statement` is the expression).
+  std::optional<Origin> default_origin;
   std::optional<std::string> charset;        // lower-cased
   std::optional<std::string> on_update;      // ON UPDATE CURRENT_TIMESTAMP(6), as written
   bool invisible = false;

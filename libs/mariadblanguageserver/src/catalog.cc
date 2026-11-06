@@ -1345,8 +1345,13 @@ bool Catalog_fold::alter(uint32_t n) {
       if (it != tb->indexes.end()) it->ignored = !has_child(child(item, s_.ignorability), s_.NOT_SYM);
     } else if (first == s_.ALTER && has_child(item, s_.field_ident)) {
       if (Column *c = tb->column(name_of(child(item, s_.field_ident)))) {
-        if (const uint32_t d = child(item, s_.column_default_expr); d != npos) c->default_value = text(d);
-        else if (has_child(item, s_.DROP)) c->default_value.reset();
+        if (const uint32_t d = child(item, s_.column_default_expr); d != npos) {
+          c->default_value = text(d);
+          c->default_origin = origin(range(d), range(d));
+        } else if (has_child(item, s_.DROP)) {
+          c->default_value.reset();
+          c->default_origin.reset();
+        }
       }
     } else if (first == s_.RENAME) {
       std::vector<uint32_t> ids;
@@ -1447,7 +1452,13 @@ bool Catalog_fold::drop(uint32_t n) {
 }
 
 bool Catalog_fold::rename(uint32_t n) {
-  bool changed = false;
+  // RENAME TABLE renames a table, a view or a sequence (one namespace).
+  // MariaDB refuses to move a view to another schema (error 1450), and then
+  // renames nothing of the statement.
+  struct Pair {
+    std::string from_schema, from_name, to_schema, to_name;
+  };
+  std::vector<Pair> pairs;
   for (const uint32_t tt : find_all(n, s_.table_to_table)) {
     std::vector<uint32_t> idents;
     for (const uint32_t c : t_.children(tt)) {
@@ -1458,17 +1469,23 @@ bool Catalog_fold::rename(uint32_t n) {
     auto [to_schema, to_id] = qualified(idents[1]);
     Schema *from = c_.find_schema(from_schema);
     if (from == nullptr) continue;
-    // RENAME TABLE renames a table, a view or a sequence (one namespace).
     const std::string from_name = name_of(from_id);
-    const std::string to_name = name_of(to_id);
+    if (from->view(from_name) != nullptr && !iequals(to_schema, from_schema)) return false;
+    pairs.push_back({from_schema, from_name, to_schema, name_of(to_id)});
+  }
+  bool changed = false;
+  for (const auto &p : pairs) {
+    // Looked up again: c_.schema() below may add a schema and move them.
+    Schema *from = c_.find_schema(p.from_schema);
+    if (from == nullptr) continue;
     auto move = [&](auto member) {
       auto &v = from->*member;
-      auto it = find_named(v, from_name);
+      auto it = find_named(v, p.from_name);
       if (it == v.end()) return false;
       auto moved = std::move(*it);
       v.erase(it);
-      moved.name = to_name;
-      (c_.schema(to_schema).*member).push_back(std::move(moved));
+      moved.name = p.to_name;
+      (c_.schema(p.to_schema).*member).push_back(std::move(moved));
       return true;
     };
     if (move(&Schema::tables) || move(&Schema::views) || move(&Schema::sequences)) changed = true;

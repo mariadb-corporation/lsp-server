@@ -28,7 +28,8 @@ creates the table. A statement that parses but changes nothing (`CREATE`/`DROP U
 function, event or sequence, an `ALTER PROCEDURE`, `FUNCTION`, `EVENT` or `SEQUENCE` of an
 object the file does not create, a `RENAME` of a table, view or sequence the file does not
 create, `USE REST SERVICE`) is not applied and gets no note. `RENAME TABLE` renames or moves a
-table, a view or a sequence, as MariaDB does. `ALTER PROCEDURE`/`FUNCTION` changes the
+table, a view or a sequence, as MariaDB does; a statement that would move a view to another
+schema renames nothing (MariaDB refuses it). `ALTER PROCEDURE`/`FUNCTION` changes the
 characteristics it writes, `ALTER EVENT` what it writes (schedule, completion, status, comment,
 body, definer; `RENAME TO` renames or moves the event), `ALTER SEQUENCE` the options it writes.
 

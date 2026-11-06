@@ -3419,12 +3419,14 @@ class Editor {
     for (const Schema *s : lookup().schemas()) {
       for (const auto &t : s->tables) {
         for (const auto &c : t.columns) {
-          const auto r = searched_range(c.origin.source, c.origin.statement);
-          if (r && std::any_of(refs.begin(), refs.end(), [&](const Reference &x) {
-                return r->begin <= x.range.begin && x.range.end <= r->end;
-              })) {
-            out.push_back({t.name, c.name});
-          }
+          // In its definition, or where a later ALTER TABLE sets its default.
+          auto refers_in = [&](const Origin &o) {
+            const auto r = searched_range(o.source, o.statement);
+            return r && std::any_of(refs.begin(), refs.end(), [&](const Reference &x) {
+                     return r->begin <= x.range.begin && x.range.end <= r->end;
+                   });
+          };
+          if (refers_in(c.origin) || (c.default_origin && refers_in(*c.default_origin))) out.push_back({t.name, c.name});
         }
       }
     }
@@ -3451,13 +3453,18 @@ class Editor {
     if (sequence == nullptr) return error(i, "unknown-object", "there is no sequence `" + e.sequence + "`");
     const std::string name = sequence->name;
     const auto id = resolve(sequence->origin, Target_kind::table);
-    // A CREATE TABLE whose column default names a sequence that does not
-    // exist fails (MariaDB error 1146).
-    std::vector<std::pair<std::string, std::string>> columns;
-    if (id) columns = columns_referring_to(*id);
-    if (!columns.empty()) {
-      const auto &[table, column] = columns[0];
-      return error(i, "referenced", "column `" + table + "`.`" + column + "` takes its default from `" + name + "`");
+    if (!id) return error(i, "self-check", "the definition of sequence `" + name + "` cannot be resolved");
+    // A CREATE TABLE or ALTER TABLE naming a sequence that does not exist
+    // (a column default) fails (MariaDB error 1146): the script's, wherever
+    // it is, not only the column's last definition.
+    for (const auto &r : references_in_text(*id)) {
+      const size_t k = index().find(r.range.begin);
+      if (k >= index().statements().size()) continue;
+      const auto subject = subject_of(index().text_of(text(), statement(k)));
+      if (subject && subject->kind == "TABLE" && (subject->verb == "CREATE" || subject->verb == "ALTER")) {
+        return error(i, "referenced", "the " + subject->verb + " TABLE of `" + subject->names[0].second +
+                                          "` takes values from `" + name + "`");
+      }
     }
     std::vector<std::pair<size_t, std::string>> gone;
     for (const size_t k : statements_about("SEQUENCE", name, schema->name)) gone.push_back({k, name});
