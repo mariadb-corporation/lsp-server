@@ -1475,9 +1475,9 @@ bool Catalog_fold::rename(uint32_t n) {
   }
   bool changed = false;
   for (const auto &p : pairs) {
-    // Looked up again: c_.schema() below may add a schema and move them.
+    // Looked up again (the first loop found it): c_.schema() below may add
+    // a schema and move them.
     Schema *from = c_.find_schema(p.from_schema);
-    if (from == nullptr) continue;
     auto move = [&](auto member) {
       auto &v = from->*member;
       auto it = find_named(v, p.from_name);

@@ -1543,11 +1543,7 @@ class Editor {
   std::optional<Edit_error> rewrite_references(size_t edit, const Object_id &id,
                                                const Origin &definition, const std::string &new_name,
                                                Changes &changes) {
-    Reference_options ro;
-    ro.version_id = m_s.options().index.version_id;
-    ro.initial_schema = m_s.options().schema;
-    const Catalog_view view = m_s.view();
-    const auto refs = find_references(m_s.searched(), m_s.searched_index(), id, 0, view, m_s.pool(), ro);
+    const auto refs = references_in_text(id);
     std::set<std::tuple<size_t, uint32_t, uint32_t>> seen;
     bool definition_found = false;
     const auto def_file = m_s.file_of(definition.source);
@@ -1910,8 +1906,7 @@ class Editor {
   // force there.
   struct Spot {
     uint32_t at = 0;
-    std::string lead;       // line breaks before the new statement
-    std::string trail;      // and after it: at the start of the text
+    std::string lead;       // line breaks before the new statement (after it at the start of the text)
     std::string delimiter;  // the delimiter in force at `at`
   };
   // `gap_from`: the statement whose blank lines above count, when the
@@ -1941,7 +1936,7 @@ class Editor {
         // A comment block is the statement's banner, unless it is an MSM
         // section's: the blank lines above that are the section's.
         if (trim(line).empty()) ++blanks;
-        else if (!is_comment_line(line) || line.substr(0, k_msm_marker.size()) == k_msm_marker) break;
+        else if (!is_banner_line(line)) break;
         lb = pb;
       }
     }
@@ -1982,7 +1977,8 @@ class Editor {
       const bool wrapped = wrap && s.delimiter == ";";
       const std::string body = wrapped ? block(s.delimiter) : statements(s.delimiter);
       const auto at = file_at(s.at);
-      if (!at || !change(changes, s.at, s.at, s.lead + body + s.trail)) return std::nullopt;
+      // At the start of the text, nothing is above: the line breaks go after.
+      if (!at || !change(changes, s.at, s.at, s.at == 0 ? body + s.lead : s.lead + body)) return std::nullopt;
       return at;
     }
     const std::string &script = m_s.files()[0].log.text();
@@ -2235,6 +2231,22 @@ class Editor {
 
   // The start of an MSM section's marker line: `-- MSM Section 150: ...`.
   static constexpr std::string_view k_msm_marker = "-- MSM Section ";
+  // A line of a statement's banner: a comment, not an MSM section's marker.
+  static bool is_banner_line(std::string_view line) {
+    return is_comment_line(line) && line.substr(0, k_msm_marker.size()) != k_msm_marker;
+  }
+  // The start of the banner right above searched offset `at`, a line's
+  // start (`at` when it has none, or `at` is inside a line).
+  uint32_t banner_top(uint32_t at) const {
+    const std::string_view t = text();
+    if (at != line_begin(t, at)) return at;
+    while (at > 0) {
+      const uint32_t above = line_begin(t, at - 1);
+      if (!is_banner_line(t.substr(above, at - 1 - above))) break;
+      at = above;
+    }
+    return at;
+  }
   // An MSM script's section `id`: from its marker (a line `-- MSM Section
   // 150: ...`) to the next one, in the searched text; nullopt when the
   // script has no such marker (it is not an MSM script).
@@ -2281,12 +2293,7 @@ class Editor {
     }
     Spot s;
     s.at = p > r.begin ? line_end(t, p - 1) : r.begin;
-    if (s.at == 0) {
-      // Nothing above: the statement starts the text, a blank line after it.
-      s.trail = eol + eol;
-    } else {
-      s.lead = eol + eol;
-    }
+    s.lead = eol + eol;
     s.delimiter = before ? index().delimiters()[statement(*before).active_delimiter] : ";";
     if (s.delimiter.empty()) s.delimiter = ";";
     return s;
@@ -2348,20 +2355,8 @@ class Editor {
         for (const auto &o : objects) {
           const auto k = statement_of(o.origin);
           if (!k) continue;
-          // Its DROP ... IF EXISTS, and the comment lines right above (its
-          // banner), are its own.
-          uint32_t at = statement(form_at(*k, o.name).drop.value_or(*k)).begin;
-          const std::string_view t = text();
-          if (at == line_begin(t, at)) {
-            while (at > 0) {
-              const uint32_t above = line_begin(t, at - 1);
-              if (!is_comment_line(t.substr(above, at - 1 - above)) ||
-                  t.substr(above, k_msm_marker.size()) == k_msm_marker) {
-                break;
-              }
-              at = above;
-            }
-          }
+          // Its DROP ... IF EXISTS, and its banner, are its own.
+          const uint32_t at = banner_top(statement(form_at(*k, o.name).drop.value_or(*k)).begin);
           if (at >= within.begin && at < within.end) {
             within.end = at;
             cut = true;
@@ -3415,17 +3410,17 @@ class Editor {
   // found as a rename finds references.
   std::vector<std::pair<std::string, std::string>> columns_referring_to(const Object_id &id) {
     const auto refs = references_in_text(id);
+    auto refers_in = [&](const Origin &o) {
+      const auto r = searched_range(o.source, o.statement);
+      return r && std::any_of(refs.begin(), refs.end(), [&](const Reference &x) {
+               return r->begin <= x.range.begin && x.range.end <= r->end;
+             });
+    };
     std::vector<std::pair<std::string, std::string>> out;
     for (const Schema *s : lookup().schemas()) {
       for (const auto &t : s->tables) {
         for (const auto &c : t.columns) {
           // In its definition, or where a later ALTER TABLE sets its default.
-          auto refers_in = [&](const Origin &o) {
-            const auto r = searched_range(o.source, o.statement);
-            return r && std::any_of(refs.begin(), refs.end(), [&](const Reference &x) {
-                     return r->begin <= x.range.begin && x.range.end <= r->end;
-                   });
-          };
           if (refers_in(c.origin) || (c.default_origin && refers_in(*c.default_origin))) out.push_back({t.name, c.name});
         }
       }
