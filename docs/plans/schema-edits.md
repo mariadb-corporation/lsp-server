@@ -498,3 +498,19 @@ for a rename. The 1833 sequence of `modify_column` is tagged statement by statem
 would, a foreign key `fk_<table>_<referenced table>`, made unique, so a later `drop_index` or
 `drop_foreign_key` has a name to migrate with (the server's own name for an unnamed foreign
 key, `<table>_ibfk_N`, depends on the deployed table's history).
+
+**Triggers and events, 2026-11-06 (asked for by the schema diagrams, vscode-extension #30):**
+`add_trigger`, `drop_trigger`, `rename_trigger`, `add_event`, `drop_event` and `rename_event`
+take the outline's `Trigger` and `Event` shapes (a trigger's `events` is its string, `INSERT`
+or `UPDATE OR DELETE`). New ones go after the schema's last of their kind, else after its
+last trigger, routine, view or table (a trigger never before its table), into Section 150 in
+an MSM script with a `DROP ... IF EXISTS` before them. Neither is referenced by name in SQL
+outside the statements about it (`CREATE`, `ALTER EVENT`, `DROP`) and other triggers'
+`FOLLOWS`/`PRECEDES`, so a rename rewrites those by position, without the reference search.
+`CREATE TRIGGER` (error 1303) and `CREATE EVENT` with a body (error 1576) cannot run inside a
+stored procedure, checked against MariaDB 12.3: the migration notes them `trigger-created`,
+`trigger-recreated` and `event-created`, as routines. `rename_event` migrates with `ALTER
+EVENT ... RENAME TO`, `rename_trigger` with a `DROP` and the `CREATE`. A trigger another one
+follows or precedes is `referenced`. Migration `object`s `trigger` and `event`. Sequences
+(`add_sequence`, `drop_sequence`, `rename_sequence`) come next: their references (`NEXT VALUE
+FOR s`, `NEXTVAL(s)`) need the resolver first.

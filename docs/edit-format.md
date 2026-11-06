@@ -55,7 +55,7 @@ Names compare without regard to case, as in the outline. A new name is at most 6
 characters, does not end in a space and holds no NUL.
 
 The ops that add or change an object carry it in the outline's shape
-([outline-format.md](outline-format.md)): a `Column`, `Table`, `View` or `Routine` object
+([outline-format.md](outline-format.md)): a `Column`, `Table`, `View`, `Routine`, `Trigger` or `Event` object
 with the members the outline gives it. A member left out takes the outline's default
 (`nullable` true, `default` null, `comment` null, ...), so `modify_column` with only `name`
 and `type` drops the column's comment. An unknown member is `bad-request`, naming it; the
@@ -86,6 +86,12 @@ unknown members.
 | `set_primary_key` | `table`, `columns` | done | the primary key's columns where it is written; a column's `PRIMARY KEY` becomes an element; added when there is none |
 | `add_foreign_key` | `table`, `foreign_key` (Foreign key) | done | an element of the `CREATE TABLE`, or an `ALTER TABLE ... ADD` (below) |
 | `drop_foreign_key` | `table`, and `name` or `columns` (an unnamed key) | done | its element, `ALTER TABLE` change, or a column's `REFERENCES` |
+| `add_trigger` | `trigger` (Trigger: `name`, `timing`, `events`, `table`, `body`; `update_columns`, `order`, `definer` optional) | done | a `CREATE TRIGGER` after the schema's last trigger (below) |
+| `drop_trigger` | `trigger`, `table` (optional: refused when the trigger is on another table) | done | its `CREATE` and `DROP` statements |
+| `rename_trigger` | `trigger`, `new_name` | done | its `CREATE`, its `DROP TRIGGER [IF EXISTS]`, and the `FOLLOWS` / `PRECEDES` of other triggers |
+| `add_event` | `event` (Event: `name`, `schedule`, `body`; `on_completion_preserve`, `status`, `comment`, `definer` optional) | done | a `CREATE EVENT` after the schema's last event (below) |
+| `drop_event` | `event` | done | its `CREATE`, `ALTER` and `DROP` statements |
+| `rename_event` | `event`, `new_name` | done | its `CREATE`, `ALTER EVENT` and `DROP EVENT [IF EXISTS]` statements |
 
 An op this binary does not do, or does not know (one added after it was built), is refused
 with `unsupported`. `mariadb-lsp edit --ops` lists the ops the binary does as JSON (see
@@ -153,11 +159,29 @@ has above it (a banner's comment lines not counted); no banner is written.
   migration holds the `CREATE` alone. A function needs `returns`.
   Its name must be free among the routines of its kind (`name-taken`); a procedure and a
   function may share a name, as in MariaDB.
+- **A trigger** goes after the schema's last trigger, else its last routine, else its last
+  view, else its last table, never before its own table's `CREATE TABLE` and never after the
+  schema's first event (nor that event's `DROP EVENT IF EXISTS`); an **event**
+  after the schema's last event, else its last trigger, routine, view or table. In an MSM script
+  both go into Section 150: after the last object of that order there, else at the end of the
+  section. They are written as their neighbour of their own kind is, dropped first or `CREATE OR
+  REPLACE`, and in Section 150 always one of the two, the `DROP TRIGGER|EVENT IF EXISTS` unless
+  the neighbour uses `OR REPLACE`; inside a `DELIMITER` block when the body holds `;`, as a
+  routine. A trigger's `events` is the outline's string (`INSERT`, `UPDATE OR DELETE`), not an
+  array; `update_columns` needs `UPDATE` among them. Its table must exist and be a table
+  (`unknown-object`), as must the columns of its `update_columns` and the trigger its `order`
+  names: on the same table, with the same timing, firing on every event of the new one (else
+  MariaDB refuses it, error 4031). Trigger names and event names must be free in the schema
+  (`name-taken`). A trigger that another trigger
+  follows or precedes cannot be dropped (`referenced`): that one's `CREATE` fails without it.
+  A trigger or event rename changes the statements about it by name (no reference search: SQL
+  names neither elsewhere), with `name-in-string` notes as the other renames.
 - **A statement removed** (with the `DROP ... IF EXISTS` of the object before it, which is
   also removed) goes with its lines, with the comment lines right above it when
   one of them names the object (a Workbench banner), and the blank lines above it, as
-  adding put them there (those below when nothing is above it). So adding an object and
-  dropping it again gives the files back as they were.
+  adding put them there (those below when nothing is above it). A `DELIMITER` block left
+  without statements goes too, its two `DELIMITER` lines with the blank lines above it. So
+  adding an object and dropping it again gives the files back as they were.
 - **A key** goes into the `CREATE TABLE`: a primary key after the last column, another index
   after the last index (else the last column), a foreign key after the last foreign key (else
   the last index, else the last column). A table whose `CREATE TABLE` has no column list gets
@@ -226,10 +250,10 @@ Each statement says what it does, so a program need not read its SQL:
 
 | Member | Values |
 | --- | --- |
-| `action` | `create`, `drop` (a table, view or routine); `add`, `drop` (a member of a table); `alter`; `rename` |
-| `object` | `table`, `view`, `procedure`, `function`; `column`, `index`, `primary_key`, `foreign_key`, `table_options` |
+| `action` | `create`, `drop` (a table, view, routine, trigger or event); `add`, `drop` (a member of a table); `alter`; `rename` |
+| `object` | `table`, `view`, `procedure`, `function`, `trigger`, `event`; `column`, `index`, `primary_key`, `foreign_key`, `table_options` |
 | `name` | the object's name before the edit (for a `create` or `add`, the new object's); `PRIMARY` for a primary key; for `table_options`, the table's |
-| `table` | a member's table (as named when the statement runs); left out for a table, view or routine |
+| `table` | a member's table (as named when the statement runs); left out for a table, view, routine, trigger or event |
 | `new_name` | the name after a `rename`, or after an `alter` of a column that `CHANGE COLUMN` renames; left out otherwise |
 
 | op | Statements | Tags (`action` `object`) |
@@ -249,6 +273,10 @@ Each statement says what it does, so a program need not read its SQL:
 | `set_primary_key` | `ALTER TABLE t DROP PRIMARY KEY, ADD PRIMARY KEY (...)`, or `ADD PRIMARY KEY (...)` when the table had none | `alter` `primary_key`, or `add` when the table had none |
 | `add_foreign_key` | `ALTER TABLE t ADD CONSTRAINT name FOREIGN KEY (...) REFERENCES ...` | `add` `foreign_key` |
 | `drop_foreign_key` | `ALTER TABLE t DROP FOREIGN KEY name`; an unnamed key has no statement (note `no-migration`) | `drop` `foreign_key` |
+| `add_trigger`, `add_event` | the `CREATE TRIGGER` or `CREATE EVENT` as written; with the note `trigger-created` or `event-created` | `create` `trigger` or `event` |
+| `drop_trigger`, `drop_event` | `DROP TRIGGER t`, `DROP EVENT e` | `drop` `trigger` or `event` |
+| `rename_trigger` | `DROP TRIGGER a`, then the trigger's `CREATE` from the edited script, its included text expanded; with the note `trigger-recreated`. MariaDB fires a table's triggers of one timing and event in the order they were created, so the triggers the script creates after it on its table, at its timing, on an event it or one of them fires on, are dropped after it and created again after it, each with a `trigger-recreated` note | `drop` `trigger` (the old name, then those after it), then `create` `trigger` (the new name, then those after it) |
+| `rename_event` | `ALTER EVENT a RENAME TO b`; none for a change of case (event names do not tell case apart) | `rename` `event` |
 
 ## Notes
 
@@ -258,7 +286,9 @@ Each statement says what it does, so a program need not read its SQL:
 | `rest-reference` | a REST object (`CREATE REST VIEW ... AS t`, `CREATE REST PROCEDURE ... AS p`) names the renamed table, view or routine; its REST SQL was not changed |
 | `routine-recreated` | no statement renames a routine: the migration drops it and creates it again, and a `CREATE PROCEDURE` or `FUNCTION` cannot run inside a stored procedure, so msm or a person must place it |
 | `routine-created` | the same for a routine `add_routine` creates: its `CREATE` in the migration cannot run inside a stored procedure. msm treats it as `routine-recreated` |
-| `still-referenced` | after a drop, a statement still refers to the dropped table, view, routine or column (a view's `SELECT`, a trigger or routine body, an `INSERT`); one note per statement |
+| `trigger-created`, `trigger-recreated` | the same for a trigger `add_trigger` creates or `rename_trigger` drops and creates again: MariaDB refuses `CREATE TRIGGER` inside a stored procedure (error 1303) |
+| `event-created` | the same for an event `add_event` creates: MariaDB refuses `CREATE EVENT` with its body inside a stored procedure (error 1576). `ALTER EVENT ... RENAME TO` runs there |
+| `still-referenced` | after a drop, a statement still refers to the dropped table, view, routine or column (a view's `SELECT`, a trigger, event or routine body, an `INSERT`); one note per statement |
 | `no-migration` | the edit has no statement for part of it: an option removed by `set_table_options`, an unnamed index or foreign key dropped, an unnamed foreign key around a `modify_column` |
 
 A kind is never removed or renamed within format 1; a consumer that does not know a kind
@@ -278,9 +308,9 @@ A refused request writes no edits, whatever edits before the failing one did:
 | --- | --- |
 | `bad-request` | the request is not JSON of format 1, a member is missing, empty, unknown or of the wrong type, a new name is too long, a routine name is ambiguous without `kind`, a column's type is not a MariaDB data type, or a definition does not parse |
 | `unsupported` | an op this binary does not do or does not know (a newer binary may), or a column added to a table whose columns the script does not list (`CREATE TABLE ... AS SELECT`, `LIKE`) |
-| `unknown-object` | the table, column, view or routine is not in the outline, nor the table or column a foreign key references, nor the column `after` names |
-| `name-taken` | the new name is taken: by a table or view for a table or view (they share a namespace), by a column of the table, by a routine of the same kind, by an index of the table, by a foreign key of the schema; a second primary key (use `set_primary_key`); a change of case only is a rename |
-| `referenced` | `drop_table` of a table another table's foreign key references; `drop_column` of a column a foreign key uses; `drop_index` or `set_primary_key` taking away the index a foreign key or an `AUTO_INCREMENT` column needs |
+| `unknown-object` | the table, column, view, routine, trigger or event is not in the outline, nor the table or column a foreign key references, nor the column `after` names, nor a trigger's table (a view is not one) or the trigger its `order` names; `drop_trigger`'s `table` is not the trigger's |
+| `name-taken` | the new name is taken: by a table or view for a table or view (they share a namespace), by a column of the table, by a routine of the same kind, by an index of the table, by a foreign key of the schema, by a trigger or an event of the schema for a trigger or event; a second primary key (use `set_primary_key`); a change of case only is a rename |
+| `referenced` | `drop_table` of a table another table's foreign key references; `drop_column` of a column a foreign key uses; `drop_index` or `set_primary_key` taking away the index a foreign key or an `AUTO_INCREMENT` column needs; `drop_trigger` of a trigger another one follows or precedes |
 | `edit-outside-slice` | an edit of an included file would cross the bound of a directive's slice, lie outside every slice of the file, or leave a slice that cannot be written to select the edited text |
 | `self-check` | the outline of the edited texts does not show the edit (the table under its new name, the old name gone from every foreign key, trigger and index; an added object where it was asked for; a dropped one gone), or has a statement it cannot read that the input's outline read (an unapplied note the input did not have) |
 

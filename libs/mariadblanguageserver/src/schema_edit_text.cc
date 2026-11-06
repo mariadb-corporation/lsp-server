@@ -227,4 +227,28 @@ std::string create_routine_sql(const Routine &r, const Style &st, bool or_replac
   return out;
 }
 
+std::string create_trigger_sql(const Trigger &t, const Style &st, bool or_replace) {
+  std::string out = st.kw(or_replace ? "CREATE OR REPLACE" : "CREATE");
+  if (!t.definer.empty()) out += " " + st.kw("DEFINER") + "=" + t.definer;
+  out += " " + st.kw("TRIGGER") + " " + st.id(t.name) + " " + st.kw(upper(t.timing)) + " " + st.kw(upper(t.events));
+  if (!t.update_columns.empty()) out += " " + st.kw("OF") + " " + ids(t.update_columns, st);
+  out += " " + st.kw("ON") + " " + st.id(t.table) + " " + st.kw("FOR EACH ROW");
+  if (!t.order_kind.empty()) out += " " + st.kw(upper(t.order_kind)) + " " + st.id(t.order_trigger);
+  out += " " + std::string(trim(t.body));
+  return out;
+}
+
+std::string create_event_sql(const Event &e, const Style &st, bool or_replace) {
+  std::string out = st.kw(or_replace ? "CREATE OR REPLACE" : "CREATE");
+  if (!e.definer.empty()) out += " " + st.kw("DEFINER") + "=" + e.definer;
+  out += " " + st.kw("EVENT") + " " + st.id(e.name) + " " + st.kw("ON SCHEDULE") + " " + std::string(trim(e.schedule));
+  if (e.on_completion_preserve) {
+    out += " " + st.kw(*e.on_completion_preserve ? "ON COMPLETION PRESERVE" : "ON COMPLETION NOT PRESERVE");
+  }
+  if (!e.status.empty()) out += " " + st.kw(upper(e.status));
+  if (e.comment) out += " " + st.kw("COMMENT") + " " + sql_string(*e.comment, st.backslash_escapes);
+  out += " " + st.kw("DO") + " " + std::string(trim(e.body));
+  return out;
+}
+
 }  // namespace mdbls::edit_text
