@@ -1654,7 +1654,7 @@ TEST(Schema_edit, add_trigger) {
 }
 
 TEST(Schema_edit, add_trigger_with_all_its_members) {
-  const std::string script = "CREATE TABLE t (a INT, b INT);\nCREATE TRIGGER t1 BEFORE UPDATE ON t FOR EACH ROW SET NEW.a = 1;\n";
+  const std::string script = "CREATE TABLE t (a INT, b INT);\nCREATE TRIGGER t1 BEFORE INSERT OR UPDATE ON t FOR EACH ROW SET NEW.a = 1;\n";
   const auto r = ok(edit(script, {}, request("", R"j({"op": "add_trigger", "trigger": {"name": "t2", "timing": "before", "events": "update or insert", "table": "T", "update_columns": ["b"], "order": {"kind": "follows", "trigger": "T1"}, "definer": "`root`@`localhost`", "body": "SET NEW.b = 2"}})j")));
   // After the last trigger; names as the request's objects spell them.
   EXPECT_EQ(script +
@@ -1726,14 +1726,51 @@ TEST(Schema_edit, rename_trigger) {
       "CREATE TRIGGER t2 BEFORE INSERT ON t FOR EACH ROW PRECEDES `t one` SET NEW.a = 2;;\n"
       "DELIMITER ;\n",
       text(r, ""));
-  EXPECT_EQ((Tags{"drop trigger t1", "create trigger t one"}), tags(r));
-  ASSERT_EQ(2u, migration(r).size());
+  // t2 fires after the trigger created again unless it is created again
+  // after it too.
+  EXPECT_EQ((Tags{"drop trigger t1", "drop trigger t2", "create trigger t one", "create trigger t2"}), tags(r));
+  ASSERT_EQ(4u, migration(r).size());
   EXPECT_EQ("DROP TRIGGER `t1`", migration(r)[0]);
-  EXPECT_EQ(0u, migration(r)[1].find("/*!50003 CREATE*/"));
-  EXPECT_EQ((std::vector<std::string>{"name-in-string", "trigger-recreated"}), note_kinds(r));
+  EXPECT_EQ(0u, migration(r)[2].find("/*!50003 CREATE*/"));
+  EXPECT_EQ("CREATE TRIGGER t2 BEFORE INSERT ON t FOR EACH ROW PRECEDES `t one` SET NEW.a = 2", migration(r)[3]);
+  EXPECT_EQ((std::vector<std::string>{"name-in-string", "trigger-recreated", "trigger-recreated"}), note_kinds(r));
   EXPECT_EQ("name-taken", failed(edit(script, {}, request("", R"j({"op": "rename_trigger", "trigger": "t1", "new_name": "T2"})j"))).kind);
   // The same name again changes nothing to migrate.
   EXPECT_EQ(Tags{}, tags(ok(edit(script, {}, request("", R"j({"op": "rename_trigger", "trigger": "t1", "new_name": "t1"})j")))));
+}
+
+TEST(Schema_edit, a_renamed_trigger_keeps_its_place_in_the_firing_order) {
+  // MariaDB orders a table's triggers of one timing and event by when they
+  // were created: those created after the renamed one, on an event it (or
+  // one of them) fires on, are created again after it.
+  const std::string script =
+      "CREATE TABLE t (a INT);\n"
+      "CREATE TRIGGER a BEFORE INSERT ON t FOR EACH ROW SET NEW.a = 1;\n"
+      "CREATE TRIGGER other_timing AFTER INSERT ON t FOR EACH ROW SET @x = 1;\n"
+      "CREATE TRIGGER other_event BEFORE DELETE ON t FOR EACH ROW SET @x = 2;\n"
+      "CREATE TRIGGER b BEFORE INSERT OR UPDATE ON t FOR EACH ROW SET @x = 3;\n"
+      "CREATE TRIGGER c BEFORE UPDATE ON t FOR EACH ROW FOLLOWS b SET @x = 4;\n";
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "rename_trigger", "trigger": "a", "new_name": "a2"})j")));
+  EXPECT_EQ((Tags{"drop trigger a", "drop trigger b", "drop trigger c", "create trigger a2", "create trigger b",
+                  "create trigger c"}),
+            tags(r));
+}
+
+TEST(Schema_edit, a_trigger_follows_one_of_its_timing_and_events) {
+  // MariaDB error 4031 otherwise.
+  const std::string script = "CREATE TABLE t (a INT);\nCREATE TRIGGER m BEFORE UPDATE OR DELETE ON t FOR EACH ROW SET @x = 1;\n";
+  auto follows_m = [&](const std::string &timing, const std::string &events) {
+    const auto r = edit(script, {}, request("", R"j({"op": "add_trigger", "trigger": {"name": "x", "timing": ")j" + timing +
+                                                    R"j(", "events": ")j" + events +
+                                                    R"j(", "table": "t", "body": "SET @y = 1", "order": {"kind": "FOLLOWS", "trigger": "m"}}})j"));
+    return std::holds_alternative<Edit_result>(r) ? std::string("ok") : std::get<Edit_error>(r).kind;
+  };
+  EXPECT_EQ("ok", follows_m("BEFORE", "UPDATE"));
+  EXPECT_EQ("ok", follows_m("BEFORE", "DELETE OR UPDATE"));
+  EXPECT_EQ("unknown-object", follows_m("AFTER", "UPDATE"));
+  EXPECT_EQ("unknown-object", follows_m("BEFORE", "INSERT"));
+  EXPECT_EQ("unknown-object", follows_m("BEFORE", "INSERT OR DELETE"));
+  EXPECT_EQ("unknown-object", follows_m("BEFORE", "UPDATE OR DELETE OR INSERT"));
 }
 
 TEST(Schema_edit, add_drop_and_rename_event) {

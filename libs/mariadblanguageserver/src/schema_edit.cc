@@ -680,6 +680,18 @@ std::string trigger_events(std::string_view events) {
   return out;
 }
 
+// The events of a trigger's `events` (INSERT, UPDATE OR DELETE).
+std::set<std::string> event_set(std::string_view events) {
+  std::set<std::string> out;
+  std::string all = trigger_events(events);
+  for (size_t p = 0; p < all.size();) {
+    const size_t q = std::min(all.find(" OR ", p), all.size());
+    out.insert(all.substr(p, q - p));
+    p = q + 4;
+  }
+  return out;
+}
+
 std::optional<Trigger> read_trigger(Json_reader &r, const Json &v) {
   const std::string what = "\"trigger\"";
   if (!r.object(v, what, {"name", "timing", "events", "table", "body", "order", "definer", "update_columns"})) {
@@ -3196,11 +3208,16 @@ class Editor {
       return error(i, "name-taken", "a trigger `" + t.name + "` exists on table `" + x->table + "`");
     }
     if (!t.order_kind.empty()) {
+      // On the same table, with the same timing, and firing on every event
+      // of the new one: else MariaDB refuses it (error 4031).
       const Trigger *o = l.trigger(t.order_trigger).second;
-      if (o == nullptr || !iequals(o->table, table->name)) {
+      const auto events = event_set(t.events);
+      const auto theirs = o == nullptr ? std::set<std::string>{} : event_set(o->events);
+      if (o == nullptr || !iequals(o->table, table->name) || !iequals(o->timing, t.timing) ||
+          !std::includes(theirs.begin(), theirs.end(), events.begin(), events.end())) {
         return error(i, "unknown-object",
-                     "there is no trigger `" + t.order_trigger + "` on table `" + table->name + "` to " +
-                         lower(t.order_kind));
+                     "there is no trigger `" + t.order_trigger + "` " + t.timing + " " + t.events + " on table `" +
+                         table->name + "` to " + lower(t.order_kind));
       }
       t.order_trigger = o->name;
     }
@@ -3699,18 +3716,59 @@ class Editor {
   // No statement renames a routine or a trigger: the migration drops it
   // and creates it again, with the CREATE as it runs, from the expanded text
   // (a body that includes a file holds that file's text), and a note that
-  // the CREATE cannot run inside a stored procedure.
+  // the CREATE cannot run inside a stored procedure.  `after`: triggers
+  // dropped with it and created again after it, in that order.
   std::optional<Edit_error> migrate_recreate(size_t i, Obj o, const Origin &origin, const std::string &old_name,
-                                             const std::string &new_name) {
-    const auto k = statement_of(origin);
-    if (!k) return error(i, "self-check", "the CREATE of `" + new_name + "` is not found");
+                                             const std::string &new_name,
+                                             const std::vector<const Trigger *> &after = {}) {
+    const auto create_sql = [&](const Origin &x) -> std::optional<std::string> {
+      const auto k = statement_of(x);
+      if (!k) return std::nullopt;
+      return std::string(trim(index().text_of(text(), statement(*k))));
+    };
+    const auto sql = create_sql(origin);
+    if (!sql) return error(i, "self-check", "the CREATE of `" + new_name + "` is not found");
     const std::string noun = to_string(o);
     migrate_drop(i, o, old_name);
-    migrate(i, std::string(trim(index().text_of(text(), statement(*k)))), Act::create, o, new_name);
+    for (const Trigger *x : after) migrate_drop(i, Obj::trigger, x->name);
+    migrate(i, *sql, Act::create, o, new_name);
     note(i, o == Obj::trigger ? "trigger-recreated" : "routine-recreated", origin.source, origin.statement.begin,
          "no statement renames a " + noun + ": the migration drops `" + old_name + "` and creates `" + new_name +
              "`, which cannot run inside a stored procedure");
+    for (const Trigger *x : after) {
+      const auto again = create_sql(x->origin);
+      if (!again) return error(i, "self-check", "the CREATE of `" + x->name + "` is not found");
+      migrate(i, *again, Act::create, Obj::trigger, x->name);
+      note(i, "trigger-recreated", x->origin.source, x->origin.statement.begin,
+           "the migration drops and creates the trigger `" + x->name + "` again after `" + new_name +
+               "`, to keep the order in which they fire; its CREATE cannot run inside a stored procedure");
+    }
     return std::nullopt;
+  }
+
+  // The triggers that fire after trigger `t` of schema `s` because the
+  // script creates them later (on its table, at its timing, on an event it
+  // or one of them fires on): created again after it, they keep their order.
+  std::vector<const Trigger *> fired_after(const Schema &s, const Trigger &t) const {
+    std::vector<std::pair<size_t, const Trigger *>> later;
+    const auto kt = statement_of(t.origin);
+    for (const auto &x : s.triggers) {
+      const auto k = statement_of(x.origin);
+      if (&x == &t || !kt || !k || *k < *kt || !iequals(x.table, t.table) || !iequals(x.timing, t.timing)) continue;
+      later.push_back({*k, &x});
+    }
+    std::sort(later.begin(), later.end());
+    std::set<std::string> events = event_set(t.events);
+    std::vector<const Trigger *> out;
+    for (const auto &[k, x] : later) {
+      const auto theirs = event_set(x->events);
+      if (std::none_of(theirs.begin(), theirs.end(), [&](const std::string &ev) { return events.count(ev) != 0; })) {
+        continue;
+      }
+      events.insert(theirs.begin(), theirs.end());
+      out.push_back(x);
+    }
+    return out;
   }
 
   // The edited outline shows the edit.
@@ -3958,7 +4016,10 @@ class Editor {
           }
         }
         if (old_name == e.new_name) break;  // the same name again: nothing to migrate
-        if (auto err = migrate_recreate(i, Obj::trigger, t->origin, old_name, e.new_name)) return err;
+        const Schema *sc = l.trigger(e.new_name).first;
+        if (auto err = migrate_recreate(i, Obj::trigger, t->origin, old_name, e.new_name, fired_after(*sc, *t))) {
+          return err;
+        }
         break;
       }
       case Edit_op::add_event: {
