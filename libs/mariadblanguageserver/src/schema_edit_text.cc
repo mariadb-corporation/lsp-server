@@ -18,10 +18,10 @@
 #include "schema_edit_text.h"
 
 #include <algorithm>
-#include <cctype>
 #include <iterator>
 
 #include "mdbls/keywords.h"
+#include "mdbls/sql_names.h"
 #include "text_util.h"
 
 namespace mdbls::edit_text {
@@ -32,21 +32,13 @@ std::string Style::id(std::string_view name) const {
 
 std::string Style::kw(std::string_view keyword) const { return upper ? std::string(keyword) : lower(keyword); }
 
-bool known_type(std::string_view type) {
-  static const char *const k_types[] = {
-      "TINYINT", "SMALLINT", "MEDIUMINT", "MIDDLEINT", "INT", "INTEGER", "BIGINT", "INT1", "INT2", "INT3",
-      "INT4", "INT8", "DECIMAL", "DEC", "NUMERIC", "FIXED", "NUMBER", "FLOAT", "FLOAT4", "FLOAT8", "DOUBLE",
-      "REAL", "BIT", "BOOL", "BOOLEAN", "SERIAL", "CHAR", "CHARACTER", "NCHAR", "NATIONAL", "VARCHAR",
-      "VARCHAR2", "NVARCHAR", "VARCHARACTER", "VARBINARY", "BINARY", "RAW", "TINYTEXT", "TEXT", "MEDIUMTEXT",
-      "LONGTEXT", "LONG", "CLOB", "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB", "ENUM", "SET", "JSON", "DATE",
-      "TIME", "DATETIME", "TIMESTAMP", "YEAR", "GEOMETRY", "POINT", "LINESTRING", "POLYGON", "MULTIPOINT",
-      "MULTILINESTRING", "MULTIPOLYGON", "GEOMETRYCOLLECTION", "GEOMCOLLECTION", "INET4", "INET6", "UUID",
-      "VECTOR", "XMLTYPE", "SIGNED", "UNSIGNED"};
-  const std::string_view t = trim(type);
-  size_t n = 0;
-  while (n < t.size() && (std::isalnum(static_cast<unsigned char>(t[n])) || t[n] == '_')) ++n;
-  const std::string_view word = t.substr(0, n);
-  return std::any_of(std::begin(k_types), std::end(k_types), [&](const char *k) { return iequals(word, k); });
+bool plugin_type(std::string_view name) {
+  static const char *const k_types[] = {"GEOMETRY",     "POINT",           "LINESTRING",   "POLYGON",
+                                        "MULTIPOINT",   "MULTILINESTRING", "MULTIPOLYGON", "GEOMETRYCOLLECTION",
+                                        "GEOMCOLLECTION", "INET4",         "INET6",        "UUID",
+                                        "VECTOR",       "XMLTYPE"};
+  const std::string n = unquote_name(trim(name));
+  return std::any_of(std::begin(k_types), std::end(k_types), [&](const char *k) { return iequals(n, k); });
 }
 
 std::string sql_string(std::string_view value) {
@@ -84,6 +76,14 @@ std::string parenthesized(std::string_view e) {
 }
 
 }  // namespace
+
+std::vector<Check> column_checks(const Table &t, std::string_view column) {
+  std::vector<Check> out;
+  for (const auto &ck : t.checks) {
+    if (!ck.column.empty() && iequals(ck.column, column)) out.push_back(ck);
+  }
+  return out;
+}
 
 std::string column_sql(const Column &c, const std::vector<Check> &checks, const Style &st) {
   std::string out = st.id(c.name) + " " + c.type;
@@ -176,13 +176,7 @@ std::string table_option_sql(std::string_view name, std::string_view value, cons
 
 std::string create_table_sql(const Table &t, const Style &st) {
   std::vector<std::string> elements;
-  for (const auto &c : t.columns) {
-    std::vector<Check> own;
-    for (const auto &ck : t.checks) {
-      if (!ck.column.empty() && iequals(ck.column, c.name)) own.push_back(ck);
-    }
-    elements.push_back(column_sql(c, own, st));
-  }
+  for (const auto &c : t.columns) elements.push_back(column_sql(c, column_checks(t, c.name), st));
   for (const auto &p : t.periods) elements.push_back(period_sql(p, st));
   for (const auto &ix : t.indexes) elements.push_back(index_sql(ix, st));
   for (const auto &fk : t.foreign_keys) elements.push_back(foreign_key_sql(fk, st));

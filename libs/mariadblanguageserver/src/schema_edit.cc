@@ -49,6 +49,7 @@ namespace {
 struct Op_name {
   Edit_op op;
   const char *name;
+  bool supported = true;  // false: answers `unsupported` (PR 3)
 };
 
 constexpr Op_name k_ops[] = {
@@ -61,16 +62,16 @@ constexpr Op_name k_ops[] = {
     {Edit_op::add_column, "add_column"},
     {Edit_op::modify_column, "modify_column"},
     {Edit_op::drop_column, "drop_column"},
-    {Edit_op::add_index, "add_index"},
-    {Edit_op::drop_index, "drop_index"},
-    {Edit_op::add_foreign_key, "add_foreign_key"},
-    {Edit_op::drop_foreign_key, "drop_foreign_key"},
+    {Edit_op::add_index, "add_index", false},
+    {Edit_op::drop_index, "drop_index", false},
+    {Edit_op::add_foreign_key, "add_foreign_key", false},
+    {Edit_op::drop_foreign_key, "drop_foreign_key", false},
     {Edit_op::set_table_options, "set_table_options"},
     {Edit_op::add_view, "add_view"},
     {Edit_op::drop_view, "drop_view"},
     {Edit_op::add_routine, "add_routine"},
     {Edit_op::drop_routine, "drop_routine"},
-    {Edit_op::set_primary_key, "set_primary_key"},
+    {Edit_op::set_primary_key, "set_primary_key", false},
 };
 
 // The longest name the server takes for a table, column or routine.
@@ -166,16 +167,10 @@ const char *to_string(Edit_op op) {
 }
 
 bool edit_op_supported(Edit_op op) {
-  switch (op) {
-    case Edit_op::add_index:
-    case Edit_op::drop_index:
-    case Edit_op::add_foreign_key:
-    case Edit_op::drop_foreign_key:
-    case Edit_op::set_primary_key:
-      return false;  // PR 3
-    default:
-      return true;
+  for (const auto &o : k_ops) {
+    if (o.op == op) return o.supported;
   }
+  return false;
 }
 
 std::string supported_edit_ops() {
@@ -676,12 +671,8 @@ std::variant<Edit_request, Edit_error> parse_edit_request(std::string_view json)
         break;
       case Edit_op::rename_routine:
         name("routine", &se.routine);
-        name("kind", &se.routine_kind, false);
+        r.choice(e, "kind", &se.routine_kind, {"procedure", "function"}, what);
         name("new_name", &se.new_name);
-        if (r.ok() && !se.routine_kind.empty() && se.routine_kind != "procedure" &&
-            se.routine_kind != "function") {
-          r.fail("\"kind\" is procedure or function");
-        }
         break;
       case Edit_op::add_table:
         members({"op", "table"});
@@ -1009,38 +1000,12 @@ class Lookup {
   std::vector<const Schema *> m_schemas;
 };
 
-// The grammar symbols the edits look for in parse trees.
+// The grammar symbols the edits look for in parse trees: those of the
+// catalog fold, whose test checks that the grammar has every one.
 struct Grammar {
-  int verb_clause = grammar::symbol("verb_clause");
-  int create = grammar::symbol("create");
-  int alter = grammar::symbol("alter");
-  int create_body = grammar::symbol("create_body");
-  int create_field_list_parens = grammar::symbol("create_field_list_parens");
-  int field_list_item = grammar::symbol("field_list_item");
-  int column_def = grammar::symbol("column_def");
-  int field_spec = grammar::symbol("field_spec");
-  int field_ident = grammar::symbol("field_ident");
-  int key_def = grammar::symbol("key_def");
-  int key_list = grammar::symbol("key_list");
-  int key_part = grammar::symbol("key_part");
-  int key_part_simple = grammar::symbol("key_part_simple");
-  int order_dir = grammar::symbol("order_dir");
-  int ident = grammar::symbol("ident");
-  int alter_commands = grammar::symbol("alter_commands");
-  int alter_list_item = grammar::symbol("alter_list_item");
-  int add_column = grammar::symbol("add_column");
-  int CHANGE = grammar::symbol("CHANGE");
-  int MODIFY_SYM = grammar::symbol("MODIFY_SYM");
-  int ALTER = grammar::symbol("ALTER");
-  int ADD = grammar::symbol("ADD");
-  int opt_create_table_options = grammar::symbol("opt_create_table_options");
-  int create_table_option = grammar::symbol("create_table_option");
-  int default_charset = grammar::symbol("default_charset");
-  int default_collation = grammar::symbol("default_collation");
-  int COMMENT_SYM = grammar::symbol("COMMENT_SYM");
-  int ENGINE_SYM = grammar::symbol("ENGINE_SYM");
-  int engine_defined_option = grammar::symbol("engine_defined_option");
-  int versioning_option = grammar::symbol("versioning_option");
+#define SYM(x) int x = grammar::symbol(#x);
+#include "catalog_symbols.inc"
+#undef SYM
 };
 
 const Grammar &gram() {
@@ -1065,17 +1030,28 @@ struct Word {
 };
 
 // The first `max` words of `sql`: names, keywords, quoted names, and single
-// punctuation characters; comments and strings are skipped.
+// punctuation characters.  Comments and strings are skipped; a versioned
+// comment's text is read as if it were not commented (mysqldump writes
+// `/*!50003 CREATE*/ ... TRIGGER`).
 std::vector<Word> words_of(std::string_view sql, size_t max) {
   std::vector<Word> out;
   size_t p = 0;
+  bool versioned = false;  // inside /*! ... */
+  auto blank_or_end = [&](size_t q) { return q >= sql.size() || std::isspace(static_cast<unsigned char>(sql[q])); };
   while (p < sql.size() && out.size() < max) {
     const char c = sql[p];
     if (std::isspace(static_cast<unsigned char>(c))) {
       ++p;
-    } else if (c == '#' || (c == '-' && sql.substr(p, 3) == "-- ")) {
+    } else if (c == '#' || (c == '-' && sql.substr(p, 2) == "--" && blank_or_end(p + 2))) {
       while (p < sql.size() && sql[p] != '\n') ++p;
-    } else if (c == '/' && sql.substr(p, 2) == "/*" && sql.substr(p, 3) != "/*!") {
+    } else if (sql.substr(p, 3) == "/*!") {
+      p += 3;
+      while (p < sql.size() && std::isdigit(static_cast<unsigned char>(sql[p]))) ++p;
+      versioned = true;
+    } else if (versioned && sql.substr(p, 2) == "*/") {
+      p += 2;
+      versioned = false;
+    } else if (sql.substr(p, 2) == "/*") {
       const size_t e = sql.find("*/", p + 2);
       p = e == std::string_view::npos ? sql.size() : e + 2;
     } else if (c == '`' || c == '"' || c == '\'') {
@@ -1602,7 +1578,8 @@ class Editor {
   std::string laid_out(const std::string &sql, const edit_text::Style &st, bool compound) {
     Index_options io = m_s.options().index;
     io.delimiter = compound ? "$$" : ";";
-    const std::string whole = sql + io.delimiter;
+    // The formatter breaks lines as the text does: give it the file's.
+    const std::string whole = sql + io.delimiter + st.eol;
     const auto idx = Statement_index::build(whole, io);
     std::string out = sql;
     if (idx.statements().size() == 1) {
@@ -1618,14 +1595,6 @@ class Editor {
         }
         out = std::string(trim(f));
       }
-    }
-    if (st.eol == "\r\n") {
-      std::string crlf;
-      for (size_t i = 0; i < out.size(); ++i) {
-        if (out[i] == '\n' && (i == 0 || out[i - 1] != '\r')) crlf += '\r';
-        crlf += out[i];
-      }
-      out = std::move(crlf);
     }
     return out;
   }
@@ -1887,34 +1856,43 @@ class Editor {
     }
   }
 
-  // The searched statement of the object placed last among `origins`.
-  std::optional<size_t> last_of(const std::vector<const Origin *> &origins) const {
-    std::optional<size_t> best;
-    for (const Origin *o : origins) {
-      const auto k = statement_of(*o);
-      if (k && (!best || *k > *best)) best = k;
-    }
-    return best;
-  }
   // The schema new objects go to: the request's, else the part of the
   // script that names none.
   const Schema *home() const {
     const auto l = lookup();
     return l.schemas().empty() ? nullptr : l.schemas()[0];
   }
-  std::vector<const Origin *> origins_of_tables(const Schema *s) const {
-    std::vector<const Origin *> out;
-    if (s != nullptr) {
-      for (const auto &t : s->tables) out.push_back(&t.origin);
+
+  // Where a new object goes after: the statement of an existing one, and
+  // its origin, whose name's quoting the new text follows.
+  struct Anchor {
+    std::optional<size_t> k;
+    const Origin *origin = nullptr;
+  };
+  // The object of `objects` (a schema's tables, views or routines) placed
+  // last in the searched text.
+  template <typename Objects>
+  Anchor last_of(const Objects &objects) const {
+    Anchor best;
+    for (const auto &o : objects) {
+      const auto k = statement_of(o.origin);
+      if (k && (!best.k || *k > *best.k)) best = {k, &o.origin};
     }
-    return out;
+    return best;
   }
-  std::vector<const Origin *> origins_of_views(const Schema *s) const {
-    std::vector<const Origin *> out;
-    if (s != nullptr) {
-      for (const auto &v : s->views) out.push_back(&v.origin);
-    }
-    return out;
+  // The home schema's last routine (with `routines`), else its last view
+  // (with `views`), else its last table.
+  Anchor anchor(bool routines, bool views) const {
+    const Schema *h = home();
+    if (h == nullptr) return {};
+    Anchor a;
+    if (routines) a = last_of(h->routines);
+    if (!a.k && views) a = last_of(h->views);
+    if (!a.k) a = last_of(h->tables);
+    return a;
+  }
+  edit_text::Style style_of(const Anchor &a) const {
+    return a.origin == nullptr ? style_at(std::nullopt, std::nullopt) : style_of(*a.origin);
   }
 
   // The items of a field list (CREATE TABLE's elements) with what each is:
@@ -1995,11 +1973,19 @@ class Editor {
   // A column definition the server takes: a known type, and text that
   // parses in a CREATE TABLE.
   std::optional<Edit_error> check_column(size_t i, const Column &c, const std::string &def) {
-    if (!edit_text::known_type(c.type)) {
-      return error(i, "bad-request", "column `" + c.name + "`: `" + c.type + "` is not a MariaDB data type");
-    }
-    if (const auto p = parse_problem("CREATE TABLE x (" + def + ")")) {
+    const std::string sql = "CREATE TABLE x (" + def + ")";
+    if (const auto p = parse_problem(sql)) {
       return error(i, "bad-request", "column `" + c.name + "`: `" + c.type + "` and its attributes do not parse (" + *p + ")");
+    }
+    // The grammar takes any name as a type plugin's: a misspelt type parses.
+    mdbp_parser *p = m_s.cache().get(m_s.options().index.sql_mode, m_s.options().index.version_id, true);
+    mdbp_result r;
+    if (p != nullptr && mdbp_parse_sql(p, sql.data(), sql.size(), &r) == MDBP_OK && r.accepted) {
+      const Syntax_tree t = Syntax_tree::build(p, r, 0);
+      const uint32_t udt = t.empty() ? k_npos : find_in(t, t.roots()[0], gram().udt_name);
+      if (udt != k_npos && !edit_text::plugin_type(t.text(sql, udt))) {
+        return error(i, "bad-request", "column `" + c.name + "`: `" + c.type + "` is not a MariaDB data type");
+      }
     }
     return std::nullopt;
   }
@@ -2040,15 +2026,12 @@ class Editor {
     for (const auto &fk : t.foreign_keys) {
       if (auto err = check_foreign_key(i, t, fk)) return err;
     }
-    const Schema *h = home();
-    const auto anchor = last_of(origins_of_tables(h));
-    const edit_text::Style st = style_of(anchor ? origin_at(*anchor, h) : nullptr);
+    const Anchor at = anchor(false, false);
+    const edit_text::Style st = style_of(at);
     for (const auto &c : t.columns) {
-      std::vector<Check> own;
-      for (const auto &ck : t.checks) {
-        if (iequals(ck.column, c.name)) own.push_back(ck);
+      if (auto err = check_column(i, c, edit_text::column_sql(c, edit_text::column_checks(t, c.name), st))) {
+        return err;
       }
-      if (auto err = check_column(i, c, edit_text::column_sql(c, own, st))) return err;
     }
     const std::string sql = edit_text::create_table_sql(t, st);
     if (const auto problem = parse_problem(sql)) {
@@ -2063,30 +2046,28 @@ class Editor {
       return error(i, "bad-request", "the CREATE TABLE of `" + t.name + "` does not parse (" + *problem + ")");
     }
     const std::string laid = laid_out(sql, st, false);
-    if (!insert_statement(changes, anchor, laid, st, false)) {
+    if (!insert_statement(changes, at.k, laid, st, false)) {
       return error(i, "self-check", "no place for the CREATE TABLE of `" + t.name + "` was found");
     }
     migrate(i, laid);
     return std::nullopt;
   }
 
-  // The origin of the object whose statement is searched statement `k`
-  // among the tables of `s` (for its name's quoting).
-  const Origin *origin_at(size_t k, const Schema *s) const {
-    if (s == nullptr) return nullptr;
-    for (const auto &t : s->tables) {
-      if (statement_of(t.origin) == k) return &t.origin;
+  // The foreign keys (with their table) that use column `column` of `table`:
+  // its own, and the other tables' that reference it.
+  std::vector<std::pair<const Table *, const Foreign_key *>> foreign_keys_using(const Table &table,
+                                                                                 const std::string &column) const {
+    std::vector<std::pair<const Table *, const Foreign_key *>> out;
+    for (const Schema *s : lookup().schemas()) {
+      for (const auto &x : s->tables) {
+        for (const auto &fk : x.foreign_keys) {
+          const bool own = &x == &table && names(fk.columns, column);
+          const bool refs = iequals(fk.ref_table, table.name) && names(fk.ref_columns, column);
+          if (own || refs) out.push_back({&x, &fk});
+        }
+      }
     }
-    for (const auto &v : s->views) {
-      if (statement_of(v.origin) == k) return &v.origin;
-    }
-    for (const auto &r : s->routines) {
-      if (statement_of(r.origin) == k) return &r.origin;
-    }
-    return nullptr;
-  }
-  edit_text::Style style_of(const Origin *o) const {
-    return o == nullptr ? style_at(std::nullopt, std::nullopt) : style_of(*o);
+    return out;
   }
 
   // A foreign key of table `t` (new or existing): its columns, the table and
@@ -2126,6 +2107,25 @@ class Editor {
     return std::nullopt;
   }
 
+  // Removes the statements `gone` (with the word their banner names), then
+  // notes what still refers to the object and migrates with `sql`.
+  std::optional<Edit_error> drop_statements(size_t i, const std::vector<std::pair<size_t, std::string>> &gone,
+                                            const std::optional<Object_id> &id, const std::string &name,
+                                            const std::string &what, bool routine, std::string sql,
+                                            Changes &changes) {
+    std::vector<Range> removed;
+    for (const auto &[k, banner] : gone) {
+      const auto r = remove_statement(changes, k, banner);
+      if (!r) return error(i, "self-check", "a statement on `" + name + "` cannot be removed");
+      removed.push_back(*r);
+    }
+    still_referenced(i, id, removed, what);
+    rest_notes(i, name, routine, what);
+    m_old_name = name;
+    migrate(i, std::move(sql));
+    return std::nullopt;
+  }
+
   std::optional<Edit_error> drop_table(size_t i, const Schema_edit &e, Changes &changes) {
     const auto [schema, table] = lookup().table(e.table);
     if (table == nullptr) return error(i, "unknown-object", "there is no table `" + e.table + "`");
@@ -2148,18 +2148,8 @@ class Editor {
       if (!iequals(tr.table, name)) continue;
       for (const size_t k : statements_about("TRIGGER", tr.name, schema->name)) gone.push_back({k, tr.name});
     }
-    std::vector<Range> removed;
-    for (const auto &[k, banner] : gone) {
-      const auto r = remove_statement(changes, k, banner);
-      if (!r) return error(i, "self-check", "a statement on `" + name + "` cannot be removed");
-      removed.push_back(*r);
-    }
-    const std::string what = "table `" + name + "`";
-    still_referenced(i, id, removed, what);
-    rest_notes(i, name, false, what);
-    m_old_name = name;
-    migrate(i, "DROP TABLE " + backtick_quote(name));
-    return std::nullopt;
+    return drop_statements(i, gone, id, name, "table `" + name + "`", false, "DROP TABLE " + backtick_quote(name),
+                           changes);
   }
 
   // ---------------------------------------------------------------------
@@ -2248,16 +2238,8 @@ class Editor {
     }
     // The foreign keys using the column go before the change and come back
     // after it (MariaDB refuses to change such a column: 1833).
-    std::vector<std::pair<std::string, Foreign_key>> fks;  // (table, key)
-    for (const Schema *s : lookup().schemas()) {
-      for (const auto &x : s->tables) {
-        for (const auto &fk : x.foreign_keys) {
-          const bool own = &x == table && names(fk.columns, old_name);
-          const bool refs = iequals(fk.ref_table, table_name) && names(fk.ref_columns, old_name);
-          if (own || refs) fks.push_back({x.name, fk});
-        }
-      }
-    }
+    std::vector<std::pair<std::string, Foreign_key>> fks;  // (table, key), copied: the rename rebuilds
+    for (const auto &[x, fk] : foreign_keys_using(*table, old_name)) fks.push_back({x->name, *fk});
     m_old_name = old_name;
     if (renamed) {
       const auto id = resolve(column->origin, Target_kind::column);
@@ -2271,10 +2253,7 @@ class Editor {
       column = table == nullptr ? nullptr : table->column(nc.name);
       if (column == nullptr) return error(i, "self-check", "column `" + nc.name + "` is lost by its rename");
     }
-    std::vector<Check> checks;
-    for (const auto &ck : table->checks) {
-      if (iequals(ck.column, column->name)) checks.push_back(ck);
-    }
+    const std::vector<Check> checks = edit_text::column_checks(*table, column->name);
     // A column-level PRIMARY KEY or UNIQUE belongs to the definition.
     std::string key;
     bool in_primary = false;
@@ -2335,16 +2314,9 @@ class Editor {
     if (table->columns.size() == 1) {
       return error(i, "bad-request", "`" + name + "` is the only column of `" + table->name + "`: drop the table");
     }
-    for (const Schema *s : lookup().schemas()) {
-      for (const auto &x : s->tables) {
-        for (const auto &fk : x.foreign_keys) {
-          const bool own = &x == table && names(fk.columns, name);
-          const bool refs = iequals(fk.ref_table, table->name) && names(fk.ref_columns, name);
-          if (own || refs) {
-            return error(i, "referenced", "a foreign key of `" + x.name + "` uses the column `" + table->name + "`.`" + name + "`");
-          }
-        }
-      }
+    if (const auto fks = foreign_keys_using(*table, name); !fks.empty()) {
+      return error(i, "referenced",
+                   "a foreign key of `" + fks[0].first->name + "` uses the column `" + table->name + "`.`" + name + "`");
     }
     const auto id = resolve(column->origin, Target_kind::column);
     m_columns = table->columns.size();
@@ -2360,9 +2332,11 @@ class Editor {
       if (!p) continue;
       const auto &t = p->tree;
       const int verb = t.node(p->verb).symbol;
-      if (verb == gram().create && !is_index &&
-          find_in(t, child_of(t, p->verb, gram().create_body), gram().create_field_list_parens) != k_npos) {
-        const uint32_t list = find_in(t, child_of(t, p->verb, gram().create_body), gram().create_field_list_parens);
+      const uint32_t list =
+          verb == gram().create && !is_index
+              ? find_in(t, child_of(t, p->verb, gram().create_body), gram().create_field_list_parens)
+              : k_npos;
+      if (list != k_npos) {
         const auto items = field_items(*p, list);
         std::set<size_t> gone;
         for (size_t j = 0; j < items.nodes.size(); ++j) {
@@ -2387,11 +2361,11 @@ class Editor {
           removed.push_back(*r);
         }
       } else if (verb == gram().alter) {
-        const auto list = find_all_in(t, child_of(t, p->verb, gram().alter_commands), gram().alter_list_item);
+        const auto items = find_all_in(t, child_of(t, p->verb, gram().alter_commands), gram().alter_list_item);
         std::vector<Range> ranges;
         std::set<size_t> gone;
-        for (size_t j = 0; j < list.size(); ++j) {
-          const uint32_t item = list[j];
+        for (size_t j = 0; j < items.size(); ++j) {
+          const uint32_t item = items[j];
           ranges.push_back({t.begin(item), t.end(item)});
           const auto ch = t.children(item);
           if (ch.empty()) continue;
@@ -2405,14 +2379,14 @@ class Editor {
             gone.insert(j);
           } else if (first == gram().ADD && child_of(t, item, gram().key_def) != k_npos) {
             const uint32_t kd = child_of(t, item, gram().key_def);
-            if (t.child(kd, grammar::symbol("FOREIGN")) != k_npos) continue;
+            if (t.child(kd, gram().FOREIGN) != k_npos) continue;
             bool whole = false;
             if (!drop_key_part(changes, *p, kd, name, &removed, &whole)) return fail();
             if (whole) gone.insert(j);
           }
         }
         if (gone.empty()) continue;
-        if (gone.size() == list.size()) {
+        if (gone.size() == items.size()) {
           const auto r = remove_statement(changes, k, table->name);
           if (!r) return fail();
           removed.push_back(*r);
@@ -2515,16 +2489,14 @@ class Editor {
     if (l.table(v.name).second != nullptr || l.view(v.name).second != nullptr) {
       return error(i, "name-taken", "a table or view `" + v.name + "` exists");
     }
-    const Schema *h = home();
-    auto anchor = last_of(origins_of_views(h));
-    if (!anchor) anchor = last_of(origins_of_tables(h));
-    const edit_text::Style st = style_of(anchor ? origin_at(*anchor, h) : nullptr);
+    const Anchor at = anchor(false, true);
+    const edit_text::Style st = style_of(at);
     const std::string sql = edit_text::create_view_sql(v, st);
     if (const auto p = parse_problem(sql)) {
       return error(i, "bad-request", "view `" + v.name + "` does not parse (" + *p + ")");
     }
     const std::string laid = laid_out(sql, st, false);
-    if (!insert_statement(changes, anchor, laid, st, false)) {
+    if (!insert_statement(changes, at.k, laid, st, false)) {
       return error(i, "self-check", "no place for the CREATE VIEW of `" + v.name + "` was found");
     }
     migrate(i, laid);
@@ -2535,19 +2507,10 @@ class Editor {
     const auto [schema, view] = lookup().view(e.view);
     if (view == nullptr) return error(i, "unknown-object", "there is no view `" + e.view + "`");
     const std::string name = view->name;
-    const auto id = resolve(view->origin, Target_kind::view);
-    std::vector<Range> removed;
-    for (const size_t k : statements_about("VIEW", name, schema->name)) {
-      const auto r = remove_statement(changes, k, name);
-      if (!r) return error(i, "self-check", "a statement on `" + name + "` cannot be removed");
-      removed.push_back(*r);
-    }
-    const std::string what = "view `" + name + "`";
-    still_referenced(i, id, removed, what);
-    rest_notes(i, name, false, what);
-    m_old_name = name;
-    migrate(i, "DROP VIEW " + backtick_quote(name));
-    return std::nullopt;
+    std::vector<std::pair<size_t, std::string>> gone;
+    for (const size_t k : statements_about("VIEW", name, schema->name)) gone.push_back({k, name});
+    return drop_statements(i, gone, resolve(view->origin, Target_kind::view), name, "view `" + name + "`", false,
+                           "DROP VIEW " + backtick_quote(name), changes);
   }
 
   std::optional<Edit_error> add_routine(size_t i, const Schema_edit &e, Changes &changes) {
@@ -2556,21 +2519,14 @@ class Editor {
     // Any kind: references cannot tell a procedure from a function of one
     // name, so such a pair could not be renamed.
     if (!l.routines(r.name, "").empty()) return error(i, "name-taken", "a routine `" + r.name + "` exists");
-    const Schema *h = home();
-    std::vector<const Origin *> routines;
-    if (h != nullptr) {
-      for (const auto &x : h->routines) routines.push_back(&x.origin);
-    }
-    auto anchor = last_of(routines);
-    if (!anchor) anchor = last_of(origins_of_views(h));
-    if (!anchor) anchor = last_of(origins_of_tables(h));
-    const edit_text::Style st = style_of(anchor ? origin_at(*anchor, h) : nullptr);
+    const Anchor after = anchor(true, true);
+    const edit_text::Style st = style_of(after);
     const std::string sql = edit_text::create_routine_sql(r, st);
     if (const auto p = parse_problem(sql)) {
       return error(i, "bad-request", r.kind + " `" + r.name + "` does not parse (" + *p + ")");
     }
     const std::string laid = laid_out(sql, st, true);
-    const auto at = insert_statement(changes, anchor, laid, st, laid.find(';') != std::string::npos);
+    const auto at = insert_statement(changes, after.k, laid, st, laid.find(';') != std::string::npos);
     if (!at) return error(i, "self-check", "no place for the CREATE of `" + r.name + "` was found");
     migrate(i, laid);
     m_routine_kind = r.kind;
@@ -2592,19 +2548,11 @@ class Editor {
     // References cannot tell a procedure from a function of one name.
     std::optional<Object_id> id;
     if (lookup().routines(name, "").size() == 1) id = resolve(routine->origin, Target_kind::routine);
-    std::vector<Range> removed;
-    for (const size_t k : statements_about(upper(kind), name, schema->name)) {
-      const auto r = remove_statement(changes, k, name);
-      if (!r) return error(i, "self-check", "a statement on `" + name + "` cannot be removed");
-      removed.push_back(*r);
-    }
-    const std::string what = kind + " `" + name + "`";
-    still_referenced(i, id, removed, what);
-    rest_notes(i, name, true, what);
-    m_old_name = name;
+    std::vector<std::pair<size_t, std::string>> gone;
+    for (const size_t k : statements_about(upper(kind), name, schema->name)) gone.push_back({k, name});
     m_routine_kind = kind;
-    migrate(i, (kind == "function" ? "DROP FUNCTION " : "DROP PROCEDURE ") + backtick_quote(name));
-    return std::nullopt;
+    return drop_statements(i, gone, id, name, kind + " `" + name + "`", true,
+                           (kind == "function" ? "DROP FUNCTION " : "DROP PROCEDURE ") + backtick_quote(name), changes);
   }
 
   // The changes of one edit, sorted; the same change twice (a file

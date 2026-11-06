@@ -40,14 +40,16 @@ struct Style {
   std::string kw(std::string_view keyword) const;
 };
 
-// Whether the first word of `type` names a MariaDB data type: a built-in
-// one or one of the type plugins MariaDB ships (INET4, INET6, UUID,
-// VECTOR).  The grammar takes any name as a plugin type, so a misspelt
-// type parses.
-bool known_type(std::string_view type);
+// Whether `name` is a type plugin MariaDB ships: the spatial types, INET4,
+// INET6, UUID, VECTOR, XMLTYPE.  The grammar reads any other name in their
+// place too (udt_name), so a misspelt type parses.
+bool plugin_type(std::string_view name);
 
 // A string literal: in single quotes, quotes and backslashes escaped.
 std::string sql_string(std::string_view value);
+
+// The column-level CHECKs of column `column` of `t`.
+std::vector<Check> column_checks(const Table &t, std::string_view column);
 
 // `name type ...`: the column's whole definition, its column-level CHECKs
 // (`checks`, those whose `column` is this column) at the end.

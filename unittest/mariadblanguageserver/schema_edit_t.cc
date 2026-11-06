@@ -1002,6 +1002,19 @@ TEST(Schema_edit, renames_reach_the_drop_before_the_create) {
   EXPECT_EQ("DROP TABLE IF EXISTS `mydb`.`u` ;\nCREATE TABLE IF NOT EXISTS `mydb`.`u` (`a` INT);\n", text(t, ""));
 }
 
+TEST(Schema_edit, a_routine_rename_leaves_triggers_and_events_of_its_name) {
+  const std::string script =
+      "CREATE TABLE t (a INT);\n"
+      "CREATE PROCEDURE x() SELECT 1;\n"
+      "DROP TRIGGER IF EXISTS x;\n"
+      "CREATE TRIGGER x BEFORE INSERT ON t FOR EACH ROW SET NEW.a = 1;\n"
+      "DROP EVENT IF EXISTS x;\n"
+      "ALTER EVENT x DISABLE;\n";
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "rename_routine", "routine": "x", "new_name": "y"})j")));
+  EXPECT_EQ(1u, edit_count(r, ""));
+  EXPECT_NE(std::string::npos, text(r, "").find("CREATE PROCEDURE y()"));
+}
+
 TEST(Schema_edit, rename_routine_to_a_name_of_the_other_kind) {
   const std::string script = "CREATE PROCEDURE p() SELECT 1;\nCREATE FUNCTION f() RETURNS INT RETURN 1;\n";
   EXPECT_EQ("name-taken",

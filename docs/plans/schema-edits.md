@@ -422,3 +422,15 @@ migration is unchanged (msm takes its `DROP PROCEDURE old`). `rename_table` and
 `rename_view` already reached their `DROP ... IF EXISTS`; no rename reaches triggers or
 events. Tests: `renames_reach_the_drop_before_the_create`, a navigation test, the fixture's
 routine rename with a DROP, and a routine rename on the MRS project.
+
+**Cleanup on PR 2 (/simplify), 2026-11-06:** the edits' grammar symbols come from
+`catalog_symbols.inc`, so the catalog's missing-symbol test covers them (`udt_name` added).
+A misspelt type is caught on the parse tree: a `udt_name` must be one of the type plugins
+MariaDB ships (the list of all built-in types is gone; the grammar knows those, by mode).
+`subject_of` reads versioned comments (`/*!50003 CREATE*/ ... TRIGGER`) and `--` followed by
+any blank. The formatter writes a CRLF file's line breaks itself. `sql_names` no longer takes
+the name in `DROP TRIGGER`, `DROP EVENT` or `ALTER EVENT` for a routine's, so renaming a
+routine leaves a trigger or event of its name alone. Left for later: a routine kind in
+`Object_id` (it would replace `rename_routine`'s DROP filter and the "both kinds" refusal),
+and `ALTER TABLE ... DROP INDEX|CONSTRAINT|FOREIGN KEY name`, whose name `sql_names` still
+takes for a column.

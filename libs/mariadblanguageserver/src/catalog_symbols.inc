@@ -1,5 +1,6 @@
-// The grammar symbols src/catalog.cc looks for, one per line.  Included
-// twice there, with SYM defined to make a member and to make a name.
+// The grammar symbols src/catalog.cc and src/schema_edit.cc look for, one
+// per line.  Included with SYM defined to make a member and to make a name;
+// catalog_missing_grammar_symbols() checks that the grammar has each.
 SYM(verb_clause)
 SYM(create)
 SYM(alter)
@@ -241,3 +242,4 @@ SYM(sp_c_chistics)
 SYM(opt_partitioning)
 SYM(udf_type)
 SYM(serial_attribute)
+SYM(udt_name)

@@ -51,7 +51,7 @@ struct Name_syms {
   S(query_specification_start) S(from_clause) S(table_reference_list) S(DUAL_SYM)
   S(verb_clause) S(sp_proc_stmt) S(sp_decl)
   // tokens
-  S(TABLE_SYM) S(VIEW_SYM) S(SEQUENCE_SYM) S(INDEX_SYM) S(DATABASE)
+  S(TABLE_SYM) S(VIEW_SYM) S(SEQUENCE_SYM) S(INDEX_SYM) S(DATABASE) S(TRIGGER_SYM) S(EVENT_SYM)
 #undef S
   int delete_ = grammar::symbol("delete");
   int dot = grammar::symbol("'.'");
@@ -475,8 +475,11 @@ Name_ref Statement_names::classify(uint32_t token) const {
       ref.kind = Name_kind::routine;
       return ref;
     }
-    // A trigger's or event's name is not a routine's.
-    const bool other = ancestor(a, s.trigger_tail) != npos || ancestor(a, s.event_tail) != npos;
+    // A trigger's or event's name is not a routine's: CREATE (their tails),
+    // and DROP TRIGGER, DROP EVENT, ALTER EVENT (the keyword beside it).
+    const uint32_t p = m_tree.node(a).parent;
+    const bool beside = p != npos && (m_tree.child(p, s.TRIGGER_SYM) != npos || m_tree.child(p, s.EVENT_SYM) != npos);
+    const bool other = beside || ancestor(a, s.trigger_tail) != npos || ancestor(a, s.event_tail) != npos;
     ref.kind = other ? Name_kind::other : Name_kind::routine;
     ref.defining = ancestor(a, s.create) != npos;
     return ref;
