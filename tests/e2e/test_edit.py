@@ -132,7 +132,8 @@ class Edit_fixture(unittest.TestCase):
         self.assertIn("add_table", ops)
         self.assertIn("drop_routine", ops)
         self.assertIn("set_primary_key", ops)
-        for op in ("add_trigger", "drop_trigger", "rename_trigger", "add_event", "drop_event", "rename_event"):
+        for op in ("add_trigger", "drop_trigger", "rename_trigger", "add_event", "drop_event", "rename_event",
+                   "add_sequence", "drop_sequence", "rename_sequence"):
             self.assertIn(op, ops)
 
     def test_ops_as_json(self):
@@ -424,6 +425,18 @@ class Edit_msm_sections(unittest.TestCase):
         self.assertEqual([m["sql"].split("\n")[0] for m in result["migration"]],
                          ["CREATE PROCEDURE `count_orders`()"])
         self.apply([{"op": "drop_routine", "routine": "count_orders"}])
+        self.assertEqual(self.p.script, MSM_SCRIPT)
+
+    def test_a_sequence_goes_before_the_first_table(self):
+        result = self.apply([{"op": "add_sequence", "sequence": {"name": "order_ids"}}])
+        section = self.section(140)
+        self.assertLess(section.index("CREATE SEQUENCE `order_ids`;"), section.index("CREATE TABLE"))
+        self.assertEqual([(m["action"], m["object"], m["name"]) for m in result["migration"]],
+                         [("create", "sequence", "order_ids")])
+        self.assertEqual(result["notes"], [])
+        result = self.apply([{"op": "rename_sequence", "sequence": "order_ids", "new_name": "order_numbers"}])
+        self.assertEqual([m["sql"] for m in result["migration"]], ["RENAME TABLE `order_ids` TO `order_numbers`"])
+        self.apply([{"op": "drop_sequence", "sequence": "order_numbers"}])
         self.assertEqual(self.p.script, MSM_SCRIPT)
 
     def test_a_trigger_and_an_event_are_dropped_before_their_create(self):

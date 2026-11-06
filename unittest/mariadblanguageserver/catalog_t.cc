@@ -137,6 +137,48 @@ TEST(Catalog, drop_rename_like_and_if_not_exists) {
   EXPECT_TRUE(dflt->views.empty());
 }
 
+TEST(Catalog, rename_table_renames_views_and_sequences) {
+  // RENAME TABLE renames whatever has the name: a table, view or sequence.
+  const auto o = outline_of(
+      "CREATE SEQUENCE s;\n"
+      "CREATE VIEW v AS SELECT 1;\n"
+      "RENAME TABLE s TO s2, v TO w;\n");
+  const Schema *dflt = schema(o, "");
+  ASSERT_NE(nullptr, dflt);
+  ASSERT_EQ(1u, dflt->sequences.size());
+  EXPECT_EQ("s2", dflt->sequences[0].name);
+  ASSERT_EQ(1u, dflt->views.size());
+  EXPECT_EQ("w", dflt->views[0].name);
+  // A view does not move to another schema (MariaDB error 1450), and then
+  // nothing of the statement is renamed.
+  const auto x = outline_of(
+      "CREATE SEQUENCE s;\n"
+      "CREATE VIEW v AS SELECT 1;\n"
+      "RENAME TABLE s TO s2, v TO db.w;\n");
+  const Schema *d = schema(x, "");
+  ASSERT_NE(nullptr, d);
+  ASSERT_EQ(1u, d->sequences.size());
+  EXPECT_EQ("s", d->sequences[0].name);
+  ASSERT_EQ(1u, d->views.size());
+  EXPECT_EQ("v", d->views[0].name);
+  // A chain through a schema the statement itself creates.
+  const auto y = outline_of(
+      "CREATE TABLE a (x INT);\n"
+      "RENAME TABLE a TO db.b, db.b TO db.c;\n");
+  const Schema *db = schema(y, "db");
+  ASSERT_NE(nullptr, db);
+  ASSERT_EQ(1u, db->tables.size());
+  EXPECT_EQ("c", db->tables[0].name);
+  // A view renamed in the statement and then moved: nothing is renamed.
+  const auto z = outline_of(
+      "CREATE VIEW v AS SELECT 1;\n"
+      "RENAME TABLE v TO w, w TO db.x;\n");
+  const Schema *dz = schema(z, "");
+  ASSERT_NE(nullptr, dz);
+  ASSERT_EQ(1u, dz->views.size());
+  EXPECT_EQ("v", dz->views[0].name);
+}
+
 TEST(Catalog, routines_triggers_events) {
   const auto o = outline_of(
       "DELIMITER //\n"

@@ -238,6 +238,23 @@ std::string create_trigger_sql(const Trigger &t, const Style &st, bool or_replac
   return out;
 }
 
+std::string create_sequence_sql(const Sequence &q, const Style &st) {
+  std::string out = st.kw("CREATE SEQUENCE") + " " + st.id(q.name);
+  if (!q.type.empty()) out += " " + st.kw("AS") + " " + q.type;
+  auto number = [&](const char *keyword, const std::string &value) {
+    if (!value.empty()) out += " " + st.kw(keyword) + " " + value;
+  };
+  number("START WITH", q.start);
+  number("INCREMENT BY", q.increment);
+  number("MINVALUE", q.minvalue);
+  number("MAXVALUE", q.maxvalue);
+  if (q.cache == "0") out += " " + st.kw("NOCACHE");
+  else number("CACHE", q.cache);
+  if (q.cycle) out += " " + st.kw(*q.cycle ? "CYCLE" : "NOCYCLE");
+  for (const auto &[name, value] : q.options) out += " " + table_option_sql(name, value, st);
+  return out;
+}
+
 std::string create_event_sql(const Event &e, const Style &st, bool or_replace) {
   std::string out = st.kw(or_replace ? "CREATE OR REPLACE" : "CREATE");
   if (!e.definer.empty()) out += " " + st.kw("DEFINER") + "=" + e.definer;

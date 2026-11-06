@@ -198,6 +198,11 @@ const Event *Schema::event(std::string_view n) const {
   return it == events.end() ? nullptr : &*it;
 }
 
+const Sequence *Schema::sequence(std::string_view n) const {
+  auto it = find_named(sequences, n);
+  return it == sequences.end() ? nullptr : &*it;
+}
+
 const Routine *Schema::routine(std::string_view n, std::string_view kind) const {
   auto it = std::find_if(routines.begin(), routines.end(), [&](const Routine &r) {
     return iequals(r.name, n) && (kind.empty() || iequals(r.kind, kind));
@@ -1340,8 +1345,13 @@ bool Catalog_fold::alter(uint32_t n) {
       if (it != tb->indexes.end()) it->ignored = !has_child(child(item, s_.ignorability), s_.NOT_SYM);
     } else if (first == s_.ALTER && has_child(item, s_.field_ident)) {
       if (Column *c = tb->column(name_of(child(item, s_.field_ident)))) {
-        if (const uint32_t d = child(item, s_.column_default_expr); d != npos) c->default_value = text(d);
-        else if (has_child(item, s_.DROP)) c->default_value.reset();
+        if (const uint32_t d = child(item, s_.column_default_expr); d != npos) {
+          c->default_value = text(d);
+          c->default_origin = origin(range(d), range(d));
+        } else if (has_child(item, s_.DROP)) {
+          c->default_value.reset();
+          c->default_origin.reset();
+        }
       }
     } else if (first == s_.RENAME) {
       std::vector<uint32_t> ids;
@@ -1442,7 +1452,20 @@ bool Catalog_fold::drop(uint32_t n) {
 }
 
 bool Catalog_fold::rename(uint32_t n) {
-  bool changed = false;
+  // RENAME TABLE renames a table, a view or a sequence (one namespace).
+  // MariaDB refuses to move a view to another schema (error 1450), and then
+  // renames nothing of the statement.
+  struct Pair {
+    std::string from_schema, from_name, to_schema, to_name;
+  };
+  std::vector<Pair> pairs;
+  // The views an earlier pair of the statement renamed (a chain a TO b, b TO c).
+  std::vector<std::pair<std::string, std::string>> renamed_views;
+  auto renamed_view = [&](const std::string &schema, const std::string &name) {
+    return std::find_if(renamed_views.begin(), renamed_views.end(), [&](const auto &v) {
+      return iequals(v.first, schema) && iequals(v.second, name);
+    });
+  };
   for (const uint32_t tt : find_all(n, s_.table_to_table)) {
     std::vector<uint32_t> idents;
     for (const uint32_t c : t_.children(tt)) {
@@ -1451,15 +1474,35 @@ bool Catalog_fold::rename(uint32_t n) {
     if (idents.size() != 2) continue;
     auto [from_schema, from_id] = qualified(idents[0]);
     auto [to_schema, to_id] = qualified(idents[1]);
-    Schema *from = c_.find_schema(from_schema);
+    const std::string from_name = name_of(from_id);
+    const std::string to_name = name_of(to_id);
+    // Not looked up here: an earlier pair may create its schema.
+    const Schema *from = c_.find_schema(from_schema);
+    const auto rv = renamed_view(from_schema, from_name);
+    const bool is_view = rv != renamed_views.end() || (from != nullptr && from->view(from_name) != nullptr);
+    if (is_view) {
+      if (!iequals(to_schema, from_schema)) return false;
+      if (rv != renamed_views.end()) renamed_views.erase(rv);
+      renamed_views.push_back({to_schema, to_name});
+    }
+    pairs.push_back({from_schema, from_name, to_schema, to_name});
+  }
+  bool changed = false;
+  for (const auto &p : pairs) {
+    // Looked up here: c_.schema() below may add a schema and move them.
+    Schema *from = c_.find_schema(p.from_schema);
     if (from == nullptr) continue;
-    auto it = find_named(from->tables, name_of(from_id));
-    if (it == from->tables.end()) continue;
-    Table moved = std::move(*it);
-    from->tables.erase(it);
-    moved.name = name_of(to_id);
-    c_.schema(to_schema).tables.push_back(std::move(moved));
-    changed = true;
+    auto move = [&](auto member) {
+      auto &v = from->*member;
+      auto it = find_named(v, p.from_name);
+      if (it == v.end()) return false;
+      auto moved = std::move(*it);
+      v.erase(it);
+      moved.name = p.to_name;
+      (c_.schema(p.to_schema).*member).push_back(std::move(moved));
+      return true;
+    };
+    if (move(&Schema::tables) || move(&Schema::views) || move(&Schema::sequences)) changed = true;
   }
   return changed;
 }
