@@ -1838,6 +1838,30 @@ TEST(Schema_edit, msm_triggers_and_events_are_dropped_before_they_are_created) {
             text(e, ""));
 }
 
+TEST(Schema_edit, an_empty_section_ends_above_the_next_ones_banner) {
+  // Section 150 empty, Section 160's banner right after it: new objects go
+  // after Section 150's banner, not between Section 160's top border and its
+  // marker line (msm would no longer find that section).
+  const std::string border = "-- #############################################################################\n";
+  const std::string head = "-- MSM Section 110: Database Schema Creation\nUSE `shop`;\n\n" + border +
+                           "-- MSM Section 140: Non-idempotent Schema Objects\n" + border +
+                           "\nCREATE TABLE `orders` (`id` INT NOT NULL, `note` TEXT);\n\n" + border +
+                           "-- MSM Section 150: Idempotent Schema Objects\n" + border;
+  const std::string tail = border + "-- MSM Section 160: Schema Diagrams\n" + border + "\n\n";
+  const auto r = ok(edit(head + tail, {}, request("shop", std::string(k_add_view) + ", " + k_add_routine + ", " +
+                                                               k_add_trigger + ", " + k_add_event)));
+  const std::string t = text(r, "");
+  EXPECT_EQ(head, t.substr(0, head.size()));
+  EXPECT_EQ(tail, t.substr(t.size() - tail.size()));
+  const Schema *s = r.outline.catalog.find("shop");
+  ASSERT_NE(nullptr, s);
+  EXPECT_EQ(1u, s->views.size());
+  EXPECT_EQ(1u, s->routines.size());
+  EXPECT_EQ(1u, s->triggers.size());
+  EXPECT_EQ(1u, s->events.size());
+  EXPECT_EQ(head + tail, twice(head + tail, k_add_view, R"j({"op": "drop_view", "view": "order_ids"})j"));
+}
+
 TEST(Schema_edit, msm_triggers_go_before_the_events) {
   // Section 150 with an event only: the trigger goes before it, after the
   // banner, not at the end of the section.

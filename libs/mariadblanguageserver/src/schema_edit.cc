@@ -2182,7 +2182,16 @@ class Editor {
       size_t q = p + marker.size();
       int n = 0;
       while (q < t.size() && std::isdigit(static_cast<unsigned char>(t[q]))) n = n * 10 + (t[q++] - '0');
-      if (out && out->end == t.size()) out->end = static_cast<uint32_t>(p);
+      // The section ends where the next one's banner starts: at the comment
+      // line right above its marker (the banner's top border), if any.
+      if (out && out->end == t.size()) {
+        uint32_t e = static_cast<uint32_t>(p);
+        if (e > out->begin) {
+          const uint32_t above = line_begin(t, e - 1);
+          if (above > out->begin && is_comment_line(t.substr(above, e - 1 - above))) e = above;
+        }
+        out->end = e;
+      }
       if (n == id && !out) out = Range{static_cast<uint32_t>(p), static_cast<uint32_t>(t.size())};
     }
     return out;
