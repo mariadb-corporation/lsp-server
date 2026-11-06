@@ -1979,6 +1979,21 @@ TEST(Schema_edit, drop_sequence) {
   EXPECT_EQ(std::vector<std::string>{"still-referenced"}, note_kinds(r));
 }
 
+TEST(Schema_edit, a_sequence_is_used_where_the_resolver_finds_it) {
+  // Not by its words: `value` is no reference in NEXT VALUE FOR `other`, nor
+  // `s` in a string.
+  const std::string script =
+      "CREATE SEQUENCE `value`;\n"
+      "CREATE SEQUENCE `other`;\n"
+      "CREATE SEQUENCE s;\n"
+      "CREATE TABLE t (a INT DEFAULT NEXT VALUE FOR `other`, b TEXT DEFAULT 'next s');\n";
+  const auto d = ok(edit(script, {}, request("", R"j({"op": "drop_sequence", "sequence": "value"}, {"op": "drop_sequence", "sequence": "s"})j")));
+  EXPECT_EQ((Tags{"drop sequence value", "drop sequence s"}), tags(d));
+  EXPECT_EQ("referenced", failed(edit(script, {}, request("", R"j({"op": "drop_sequence", "sequence": "other"})j"))).kind);
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "rename_sequence", "sequence": "value", "new_name": "v2"})j")));
+  EXPECT_EQ(Tags{"rename sequence value -> v2"}, tags(r));
+}
+
 TEST(Schema_edit, rename_sequence) {
   const auto r = ok(edit(k_sequences, {}, request("shop", R"j({"op": "rename_sequence", "sequence": "s", "new_name": "ids"})j")));
   EXPECT_EQ(

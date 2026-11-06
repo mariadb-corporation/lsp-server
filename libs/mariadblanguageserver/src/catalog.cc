@@ -1459,13 +1459,15 @@ bool Catalog_fold::rename(uint32_t n) {
     Schema *from = c_.find_schema(from_schema);
     if (from == nullptr) continue;
     // RENAME TABLE renames a table, a view or a sequence (one namespace).
+    const std::string from_name = name_of(from_id);
+    const std::string to_name = name_of(to_id);
     auto move = [&](auto member) {
       auto &v = from->*member;
-      auto it = find_named(v, name_of(from_id));
+      auto it = find_named(v, from_name);
       if (it == v.end()) return false;
       auto moved = std::move(*it);
       v.erase(it);
-      moved.name = name_of(to_id);
+      moved.name = to_name;
       (c_.schema(to_schema).*member).push_back(std::move(moved));
       return true;
     };

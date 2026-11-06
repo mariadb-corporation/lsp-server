@@ -686,12 +686,10 @@ std::string trigger_events(std::string_view events) {
 
 // The events of a trigger's `events` (INSERT, UPDATE OR DELETE).
 std::set<std::string> event_set(std::string_view events) {
+  const std::string all = trigger_events(events);
   std::set<std::string> out;
-  std::string all = trigger_events(events);
-  for (size_t p = 0; p < all.size();) {
-    const size_t q = std::min(all.find(" OR ", p), all.size());
-    out.insert(all.substr(p, q - p));
-    p = q + 4;
+  for (const char *w : {"INSERT", "UPDATE", "DELETE"}) {
+    if (has_word(all, w)) out.insert(w);
   }
   return out;
 }
@@ -1692,19 +1690,20 @@ class Editor {
   std::optional<Edit_error> rename_table(size_t i, const Schema_edit &e, Changes &changes) {
     const Table *table = lookup().table(e.table).second;
     if (table == nullptr) return error(i, "unknown-object", "there is no table `" + e.table + "`");
-    return rename_relation(i, e, "table", table->name, table->origin, Target_kind::table, changes);
+    return rename_relation(i, e, "table", table->name, table->origin, Target_kind::table, Obj::table, changes);
   }
 
   std::optional<Edit_error> rename_view(size_t i, const Schema_edit &e, Changes &changes) {
     const View *view = lookup().view(e.view).second;
     if (view == nullptr) return error(i, "unknown-object", "there is no view `" + e.view + "`");
-    return rename_relation(i, e, "view", view->name, view->origin, Target_kind::view, changes);
+    return rename_relation(i, e, "view", view->name, view->origin, Target_kind::view, Obj::view, changes);
   }
 
-  // A table or a view: they share a namespace and RENAME TABLE.
+  // A table, a view or a sequence (`object`): they share a namespace and
+  // RENAME TABLE.  A sequence's name resolves as a table's.
   std::optional<Edit_error> rename_relation(size_t i, const Schema_edit &e, const std::string &noun,
                                             const std::string &name, const Origin &origin,
-                                            Target_kind kind, Changes &changes) {
+                                            Target_kind kind, Obj object, Changes &changes) {
     if (auto err = table_name_free(i, name, e.new_name)) return err;
     const auto id = resolve(origin, kind);
     if (!id) return error(i, "self-check", "the definition of " + noun + " `" + name + "` cannot be resolved");
@@ -1716,8 +1715,8 @@ class Editor {
     // The same name again changes nothing: RENAME TABLE t TO t fails on the
     // server (the table exists).
     if (name != e.new_name) {
-      migrate(i, "RENAME TABLE " + backtick_quote(name) + " TO " + backtick_quote(e.new_name), Act::rename,
-              kind == Target_kind::view ? Obj::view : Obj::table, name, e.new_name);
+      migrate(i, "RENAME TABLE " + backtick_quote(name) + " TO " + backtick_quote(e.new_name), Act::rename, object,
+              name, e.new_name);
     }
     return std::nullopt;
   }
@@ -2245,12 +2244,9 @@ class Editor {
       // The section ends where the next one's banner starts: at the comment
       // line right above its marker (the banner's top border), if any.
       if (out && out->end == t.size()) {
-        uint32_t e = static_cast<uint32_t>(p);
-        if (e > out->begin) {
-          const uint32_t above = line_begin(t, e - 1);
-          if (above > out->begin && is_comment_line(t.substr(above, e - 1 - above))) e = above;
-        }
-        out->end = e;
+        const auto e = static_cast<uint32_t>(p);  // after out->begin: a later marker
+        const uint32_t above = line_begin(t, e - 1);
+        out->end = above > out->begin && is_comment_line(t.substr(above, e - 1 - above)) ? above : e;
       }
       if (n == id && !out) out = Range{static_cast<uint32_t>(p), static_cast<uint32_t>(t.size())};
     }
@@ -2333,6 +2329,7 @@ class Editor {
     const auto r = msm_section(section);
     p.msm = r.has_value();
     Range within = r.value_or(Range{0, static_cast<uint32_t>(text().size())});
+    bool cut = false;  // an object of `before` ends the range
     const Schema *h = home();
     if (h == nullptr) return p;
     for (const Kind b : before) {
@@ -2341,7 +2338,10 @@ class Editor {
           const auto k = statement_of(o.origin);
           if (!k) continue;
           const uint32_t at = statement(form_at(*k, o.name).drop.value_or(*k)).begin;
-          if (at >= within.begin && at < within.end) within.end = at;
+          if (at >= within.begin && at < within.end) {
+            within.end = at;
+            cut = true;
+          }
         }
       });
     }
@@ -2355,12 +2355,25 @@ class Editor {
     }
     // In a section, or before the first object of `before`: at the end of
     // that range.
-    const bool bounded = r || within.end < text().size();
-    if (bounded && !p.anchor.k) p.spot = end_of_section(within, style_at(std::nullopt, std::nullopt).eol);
+    if ((r || cut) && !p.anchor.k) p.spot = end_of_section(within, style_at(std::nullopt, std::nullopt).eol);
     return p;
   }
   std::optional<Spot> spot_of(const Place &p, const edit_text::Style &st) const {
     return p.anchor.k ? std::optional<Spot>(after_create(*p.anchor.k, st.eol)) : p.spot;
+  }
+
+  // Inserts the CREATE `sql` of a new table, view or sequence (`object`)
+  // named `name` at `place`, laid out in style `st`, with statement `drop`
+  // (a DROP ... IF EXISTS) before it, and migrates it.
+  std::optional<Edit_error> insert_plain(size_t i, const Place &place, const edit_text::Style &st,
+                                         const std::string &sql, Obj object, const std::string &name,
+                                         Changes &changes, const std::string &drop = "") {
+    const std::string laid = laid_out(sql, st, false);
+    if (!insert_at(changes, spot_of(place, st), laid, st, false, drop)) {
+      return error(i, "self-check", "no place for the CREATE " + upper(to_string(object)) + " of `" + name + "` was found");
+    }
+    migrate(i, laid, Act::create, object, name);
+    return std::nullopt;
   }
 
   // Inserts the CREATE of a new routine, trigger or event (`object`, of
@@ -2579,7 +2592,6 @@ class Editor {
 
   std::optional<Edit_error> add_table(size_t i, const Schema_edit &e, Changes &changes) {
     const Table &t = *e.new_table;
-    const auto l = lookup();
     if (auto err = table_name_free(i, "", t.name)) return err;
     for (size_t a = 0; a < t.columns.size(); ++a) {
       for (size_t b = a + 1; b < t.columns.size(); ++b) {
@@ -2628,11 +2640,7 @@ class Editor {
       }
       return error(i, "bad-request", "the CREATE TABLE of `" + t.name + "` does not parse (" + *problem + ")");
     }
-    const std::string laid = laid_out(sql, st, false);
-    if (!insert_at(changes, spot_of(place, st), laid, st, false)) {
-      return error(i, "self-check", "no place for the CREATE TABLE of `" + t.name + "` was found");
-    }
-    migrate(i, laid, Act::create, Obj::table, t.name);
+    if (auto err = insert_plain(i, place, st, sql, Obj::table, t.name, changes)) return err;
     return std::nullopt;
   }
 
@@ -3157,12 +3165,7 @@ class Editor {
     if (const auto p = parse_problem(sql)) {
       return error(i, "bad-request", "view `" + v.name + "` does not parse (" + *p + ")");
     }
-    const std::string laid = laid_out(sql, st, false);
-    if (!insert_at(changes, spot_of(place, st), laid, st, false, drop)) {
-      return error(i, "self-check", "no place for the CREATE VIEW of `" + v.name + "` was found");
-    }
-    migrate(i, laid, Act::create, Obj::view, v.name);
-    return std::nullopt;
+    return insert_plain(i, place, st, sql, Obj::view, v.name, changes, drop);
   }
 
   std::optional<Edit_error> drop_view(size_t i, const Schema_edit &e, Changes &changes) {
@@ -3278,10 +3281,12 @@ class Editor {
       // On the same table, with the same timing, and firing on every event
       // of the new one: else MariaDB refuses it (error 4031).
       const Trigger *o = l.trigger(t.order_trigger).second;
-      const auto events = event_set(t.events);
-      const auto theirs = o == nullptr ? std::set<std::string>{} : event_set(o->events);
-      if (o == nullptr || !iequals(o->table, table->name) || !iequals(o->timing, t.timing) ||
-          !std::includes(theirs.begin(), theirs.end(), events.begin(), events.end())) {
+      auto covers = [&] {
+        const auto theirs = event_set(o->events);
+        const auto ours = event_set(t.events);
+        return std::includes(theirs.begin(), theirs.end(), ours.begin(), ours.end());
+      };
+      if (o == nullptr || !iequals(o->table, table->name) || !iequals(o->timing, t.timing) || !covers()) {
         return error(i, "unknown-object",
                      "there is no trigger `" + t.order_trigger + "` " + t.timing + " " + t.events + " on table `" +
                          table->name + "` to " + lower(t.order_kind));
@@ -3382,13 +3387,28 @@ class Editor {
   // ---------------------------------------------------------------------
   // Sequences
 
-  // Whether a column default takes its values from sequence `name`
-  // (NEXT VALUE FOR s, NEXTVAL(s), ...).
-  static bool default_uses(const std::optional<std::string> &value, const std::string &name) {
-    if (!value) return false;
-    const std::string v = upper(*value);
-    return has_word(v, upper(name)) && (has_word(v, "NEXT") || has_word(v, "NEXTVAL") || has_word(v, "LASTVAL") ||
-                                        has_word(v, "PREVIOUS") || has_word(v, "SETVAL"));
+  // The (table, column) pairs whose definition refers to `id`: a sequence
+  // a column's default takes values from (NEXT VALUE FOR s, NEXTVAL(s)),
+  // found as a rename finds references.
+  std::vector<std::pair<std::string, std::string>> columns_referring_to(const Object_id &id) {
+    Reference_options ro;
+    ro.version_id = m_s.options().index.version_id;
+    ro.initial_schema = m_s.options().schema;
+    const auto refs = find_references(text(), index(), id, 0, m_s.view(), m_s.pool(), ro);
+    std::vector<std::pair<std::string, std::string>> out;
+    for (const Schema *s : lookup().schemas()) {
+      for (const auto &t : s->tables) {
+        for (const auto &c : t.columns) {
+          const auto r = searched_range(c.origin.source, c.origin.statement);
+          if (r && std::any_of(refs.begin(), refs.end(), [&](const Reference &x) {
+                return r->begin <= x.range.begin && x.range.end <= r->end;
+              })) {
+            out.push_back({t.name, c.name});
+          }
+        }
+      }
+    }
+    return out;
   }
 
   std::optional<Edit_error> add_sequence(size_t i, const Schema_edit &e, Changes &changes) {
@@ -3403,53 +3423,36 @@ class Editor {
     if (const auto p = parse_problem(sql)) {
       return error(i, "bad-request", "sequence `" + q.name + "` does not parse (" + *p + ")");
     }
-    const std::string laid = laid_out(sql, st, false);
-    if (!insert_at(changes, spot_of(place, st), laid, st, false)) {
-      return error(i, "self-check", "no place for the CREATE SEQUENCE of `" + q.name + "` was found");
-    }
-    migrate(i, laid, Act::create, Obj::sequence, q.name);
-    return std::nullopt;
+    return insert_plain(i, place, st, sql, Obj::sequence, q.name, changes);
   }
 
   std::optional<Edit_error> drop_sequence(size_t i, const Schema_edit &e, Changes &changes) {
-    const auto l = lookup();
-    const auto [schema, sequence] = l.sequence(e.sequence);
+    const auto [schema, sequence] = lookup().sequence(e.sequence);
     if (sequence == nullptr) return error(i, "unknown-object", "there is no sequence `" + e.sequence + "`");
     const std::string name = sequence->name;
+    const auto id = resolve(sequence->origin, Target_kind::table);
     // A CREATE TABLE whose column default names a sequence that does not
     // exist fails (MariaDB error 1146).
-    for (const Schema *s : l.schemas()) {
-      for (const auto &t : s->tables) {
-        for (const auto &c : t.columns) {
-          if (default_uses(c.default_value, name)) {
-            return error(i, "referenced", "column `" + t.name + "`.`" + c.name + "` takes its default from `" + name + "`");
-          }
-        }
-      }
+    std::vector<std::pair<std::string, std::string>> columns;
+    if (id) columns = columns_referring_to(*id);
+    if (!columns.empty()) {
+      const auto &[table, column] = columns[0];
+      return error(i, "referenced", "column `" + table + "`.`" + column + "` takes its default from `" + name + "`");
     }
     std::vector<std::pair<size_t, std::string>> gone;
     for (const size_t k : statements_about("SEQUENCE", name, schema->name)) gone.push_back({k, name});
-    return drop_statements(i, gone, resolve(sequence->origin, Target_kind::table), name, "sequence `" + name + "`",
-                           "view", Obj::sequence, changes);
+    return drop_statements(i, gone, id, name, "sequence `" + name + "`", "view", Obj::sequence, changes);
   }
 
   std::optional<Edit_error> rename_sequence(size_t i, const Schema_edit &e, Changes &changes) {
     const Sequence *sequence = lookup().sequence(e.sequence).second;
     if (sequence == nullptr) return error(i, "unknown-object", "there is no sequence `" + e.sequence + "`");
-    if (auto err = table_name_free(i, sequence->name, e.new_name)) return err;
-    // A sequence's name resolves as a table's: NEXT VALUE FOR s, NEXTVAL(s),
-    // FROM s and RENAME TABLE s all name a table.
-    const auto id = resolve(sequence->origin, Target_kind::table);
-    if (!id) return error(i, "self-check", "the definition of sequence `" + sequence->name + "` cannot be resolved");
-    const std::string old_name = sequence->name;
-    string_notes(i, {old_name}, "sequence `" + old_name + "`");
-    if (auto err = rewrite_references(i, *id, sequence->origin, e.new_name, changes)) return err;
-    if (old_name != e.new_name) {
-      migrate(i, "RENAME TABLE " + backtick_quote(old_name) + " TO " + backtick_quote(e.new_name), Act::rename,
-              Obj::sequence, old_name, e.new_name);
-    }
-    m_old_name = old_name;
-    return std::nullopt;
+    // The columns whose default takes values from it: verify() migrates
+    // them, as the edit wrote them.
+    m_default_columns.clear();
+    if (const auto id = resolve(sequence->origin, Target_kind::table)) m_default_columns = columns_referring_to(*id);
+    return rename_relation(i, e, "sequence", sequence->name, sequence->origin, Target_kind::table, Obj::sequence,
+                           changes);
   }
 
   // ---------------------------------------------------------------------
@@ -3862,24 +3865,25 @@ class Editor {
   std::optional<Edit_error> migrate_recreate(size_t i, Obj o, const Origin &origin, const std::string &old_name,
                                              const std::string &new_name,
                                              const std::vector<const Trigger *> &after = {}) {
-    const auto create_sql = [&](const Origin &x) -> std::optional<std::string> {
-      const auto k = statement_of(x);
-      if (!k) return std::nullopt;
-      return std::string(trim(index().text_of(text(), statement(*k))));
-    };
-    const auto sql = create_sql(origin);
-    if (!sql) return error(i, "self-check", "the CREATE of `" + new_name + "` is not found");
+    // Every CREATE first: nothing is migrated when one is not found.
+    std::vector<const Origin *> origins{&origin};
+    for (const Trigger *t : after) origins.push_back(&t->origin);
+    std::vector<std::string> sqls;
+    for (const Origin *x : origins) {
+      const auto k = statement_of(*x);
+      if (!k) return error(i, "self-check", "the CREATE of `" + new_name + "` or one fired after it is not found");
+      sqls.emplace_back(trim(index().text_of(text(), statement(*k))));
+    }
     const std::string noun = to_string(o);
     migrate_drop(i, o, old_name);
     for (const Trigger *x : after) migrate_drop(i, Obj::trigger, x->name);
-    migrate(i, *sql, Act::create, o, new_name);
+    migrate(i, sqls[0], Act::create, o, new_name);
     note(i, o == Obj::trigger ? "trigger-recreated" : "routine-recreated", origin.source, origin.statement.begin,
          "no statement renames a " + noun + ": the migration drops `" + old_name + "` and creates `" + new_name +
              "`, which cannot run inside a stored procedure");
-    for (const Trigger *x : after) {
-      const auto again = create_sql(x->origin);
-      if (!again) return error(i, "self-check", "the CREATE of `" + x->name + "` is not found");
-      migrate(i, *again, Act::create, Obj::trigger, x->name);
+    for (size_t n = 0; n < after.size(); ++n) {
+      const Trigger *x = after[n];
+      migrate(i, sqls[n + 1], Act::create, Obj::trigger, x->name);
       note(i, "trigger-recreated", x->origin.source, x->origin.statement.begin,
            "the migration drops and creates the trigger `" + x->name + "` again after `" + new_name +
                "`, to keep the order in which they fire; its CREATE cannot run inside a stored procedure");
@@ -3891,12 +3895,13 @@ class Editor {
   // script creates them later (on its table, at its timing, on an event it
   // or one of them fires on): created again after it, they keep their order.
   std::vector<const Trigger *> fired_after(const Schema &s, const Trigger &t) const {
-    std::vector<std::pair<size_t, const Trigger *>> later;
     const auto kt = statement_of(t.origin);
+    if (!kt) return {};
+    std::vector<std::pair<size_t, const Trigger *>> later;
     for (const auto &x : s.triggers) {
+      if (!iequals(x.table, t.table) || !iequals(x.timing, t.timing)) continue;
       const auto k = statement_of(x.origin);
-      if (&x == &t || !kt || !k || *k < *kt || !iequals(x.table, t.table) || !iequals(x.timing, t.timing)) continue;
-      later.push_back({*k, &x});
+      if (k && *k > *kt) later.push_back({*k, &x});
     }
     std::sort(later.begin(), later.end());
     std::set<std::string> events = event_set(t.events);
@@ -3941,9 +3946,7 @@ class Editor {
         const View *v = l.view(e.new_name).second;
         const std::string got = is_table ? (t ? t->name : "") : (v ? v->name : "");
         if (got != e.new_name) return fail("the edited script has no " + std::string(is_table ? "table" : "view") + " `" + e.new_name + "`");
-        if (!case_only && (l.table(old_name).second != nullptr || l.view(old_name).second != nullptr)) {
-          return fail("the edited script still has `" + old_name + "`");
-        }
+        if (!case_only && l.relation(old_name)) return fail("the edited script still has `" + old_name + "`");
         if (case_only) break;
         for (const Schema *sc : l.schemas()) {
           for (const auto &tb : sc->tables) {
@@ -4142,7 +4145,7 @@ class Editor {
         if (l.trigger(old_name).second != nullptr) return fail("the edited script still has trigger `" + old_name + "`");
         break;
       case Edit_op::rename_trigger: {
-        const Trigger *t = l.trigger(e.new_name).second;
+        const auto [sc, t] = l.trigger(e.new_name);
         if (t == nullptr || t->name != e.new_name) return fail("the edited script has no trigger `" + e.new_name + "`");
         if (!case_only) {
           if (l.trigger(old_name).second != nullptr) {
@@ -4157,7 +4160,6 @@ class Editor {
           }
         }
         if (old_name == e.new_name) break;  // the same name again: nothing to migrate
-        const Schema *sc = l.trigger(e.new_name).first;
         if (auto err = migrate_recreate(i, Obj::trigger, t->origin, old_name, e.new_name, fired_after(*sc, *t))) {
           return err;
         }
@@ -4194,22 +4196,18 @@ class Editor {
       case Edit_op::rename_sequence: {
         const Sequence *q = l.sequence(e.new_name).second;
         if (q == nullptr || q->name != e.new_name) return fail("the edited script has no sequence `" + e.new_name + "`");
-        if (case_only) break;
-        if (l.sequence(old_name).second != nullptr) return fail("the edited script still has sequence `" + old_name + "`");
+        if (!case_only && l.sequence(old_name).second != nullptr) {
+          return fail("the edited script still has sequence `" + old_name + "`");
+        }
+        if (old_name == e.new_name) break;  // the same name again: nothing to migrate
         // A deployed column default still names the old sequence after
-        // RENAME TABLE: set it again.
-        for (const Schema *s : l.schemas()) {
-          for (const auto &t : s->tables) {
-            for (const auto &c : t.columns) {
-              if (default_uses(c.default_value, old_name)) {
-                return fail("column `" + t.name + "`.`" + c.name + "` still takes its default from `" + old_name + "`");
-              }
-              if (default_uses(c.default_value, e.new_name)) {
-                migrate_member(i, t.name, "ALTER COLUMN " + backtick_quote(c.name) + " SET DEFAULT " + *c.default_value,
-                               Act::alter, Obj::column, c.name);
-              }
-            }
-          }
+        // RENAME TABLE: set it again, as the edit wrote it.
+        for (const auto &[table, column] : m_default_columns) {
+          const Table *t = l.table(table).second;
+          const Column *c = t == nullptr ? nullptr : t->column(column);
+          if (c == nullptr || !c->default_value) return fail("column `" + table + "`.`" + column + "` lost its default");
+          migrate_member(i, table, "ALTER COLUMN " + backtick_quote(column) + " SET DEFAULT " + *c->default_value,
+                         Act::alter, Obj::column, column);
         }
         break;
       }
@@ -4225,6 +4223,7 @@ class Editor {
   // Of the edit being run, for verify().
   std::string m_old_name;
   std::string m_routine_kind;
+  std::vector<std::pair<std::string, std::string>> m_default_columns;  // rename_sequence: (table, column)
   size_t m_position = 0;     // add_column: where the column goes
   size_t m_columns = 0;      // add_column, drop_column: the table's columns before
   size_t m_count = 0;        // add_/drop_index, add_/drop_foreign_key: the table's keys before
