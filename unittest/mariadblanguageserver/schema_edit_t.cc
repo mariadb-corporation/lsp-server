@@ -2023,8 +2023,8 @@ TEST(Schema_edit, a_sequence_set_as_a_default_by_alter_table) {
       "CREATE SEQUENCE s;\n"
       "ALTER TABLE s COMMENT 'ids';\n"
       "CREATE TABLE t (id INT);\n";
-  const auto da = edit(altered, {}, request("", R"j({"op": "drop_sequence", "sequence": "s"})j"));
-  if (const auto *err = std::get_if<Edit_error>(&da)) EXPECT_NE("referenced", err->kind);
+  EXPECT_EQ(Tags{"drop sequence s"},
+            tags(ok(edit(altered, {}, request("", R"j({"op": "drop_sequence", "sequence": "s"})j")))));
 }
 
 TEST(Schema_edit, a_sequence_is_used_where_the_resolver_finds_it) {
