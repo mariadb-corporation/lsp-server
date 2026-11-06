@@ -54,11 +54,21 @@ enum class Edit_op {
   add_foreign_key,
   drop_foreign_key,
   set_table_options,
+  add_view,
+  drop_view,
+  add_routine,
+  drop_routine,
+  set_primary_key,
 };
 
 // The request's `op` spelling; nullopt for an unknown one.
 std::optional<Edit_op> edit_op_from_string(std::string_view op);
 const char *to_string(Edit_op op);
+// Whether this binary does `op`; the others answer `unsupported`.
+bool edit_op_supported(Edit_op op);
+// The ops edit_op_supported() takes, space-separated, in the order of
+// Edit_op: the `edit ops:` line of `mariadb-lsp --help`.
+std::string supported_edit_ops();
 
 // One edit of a request.  Which members it uses depends on the op.
 struct Schema_edit {
@@ -69,6 +79,16 @@ struct Schema_edit {
   std::string routine;
   std::string routine_kind;  // procedure, function, or "" when not given
   std::string new_name;
+  // add_table: the table; its columns, keys, checks, options.
+  std::optional<Table> new_table;
+  // add_column: the column; modify_column: what `column` becomes.
+  std::optional<Column> new_column;
+  std::string after;   // add_column: the column it goes after, or ""
+  bool first = false;  // add_column: first
+  std::optional<View> new_view;        // add_view
+  std::optional<Routine> new_routine;  // add_routine
+  // set_table_options: outline option name and value; nullopt removes it.
+  std::vector<std::pair<std::string, std::optional<std::string>>> options;
 };
 
 struct Edit_request {
@@ -98,7 +118,8 @@ struct Edited_file {
 };
 
 // Something an edit could not do itself, for a person to check.  `kind` is
-// stable: name-in-string, rest-reference, routine-recreated.
+// stable: name-in-string, rest-reference, routine-recreated,
+// routine-created, still-referenced, no-migration.
 struct Edit_note {
   size_t edit = 0;
   std::string kind;

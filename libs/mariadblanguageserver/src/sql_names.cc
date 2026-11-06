@@ -35,7 +35,7 @@ struct Name_syms {
 #define S(x) int x = grammar::symbol(#x);
   S(ident)
   // names
-  S(table_ident) S(simple_ident) S(simple_ident_nospvar) S(field_ident) S(key_part_simple)
+  S(table_ident) S(simple_ident) S(simple_ident_nospvar) S(field_ident) S(key_part_simple) S(key_part)
   S(insert_ident) S(select_alias) S(ident_table_alias) S(table_alias_clause) S(table_alias_ref)
   S(table_ident_opt_wild) S(select_sublist_qualified_asterisk) S(function_call_generic)
   S(sp_name) S(call) S(use) S(create) S(alter) S(drop) S(table_to_table)
@@ -411,7 +411,8 @@ Name_ref Statement_names::classify(uint32_t token) const {
     set_owner(ddl_table(), &ref);
     return ref;
   }
-  if (sym == s.key_part_simple || sym == s.ref_list || sym == s.alter_list_item) {
+  // A key part: `a`, or `a(10)` with a prefix length.
+  if (sym == s.key_part_simple || sym == s.key_part || sym == s.ref_list || sym == s.alter_list_item) {
     ref.kind = Name_kind::column;
     const uint32_t r = ancestor(a, s.references);
     set_owner(r != npos ? m_tree.child(r, s.table_ident) : ddl_table(), &ref);

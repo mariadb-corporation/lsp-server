@@ -379,3 +379,34 @@ tables, views and routines and draws relationships; every change goes viewer →
 - Feature detection: PR 2 adds a `--help` line under `edit`, `edit ops: <op> <op> ...`,
   space-separated, exactly the ops the binary does; PR 3 extends it. A binary with `edit` in
   `--help` but no `edit ops:` line does the four renames only.
+
+**PR 2 (tables, columns, views, routines), 2026-11-06:** built as agreed above, with these
+differences from §2:
+
+- Request members the plan left open: `modify_column {table, column, new_column}`,
+  `set_table_options {table, options: {name: value | null}}`, `drop_view {view}`,
+  `drop_routine {routine, kind?}`. The structs are read strictly (unknown members refused),
+  the outline's position members ignored.
+- `Column::definition` is unchanged (hover keeps its text); the edits write columns, keys,
+  checks, periods, options and whole statements with their own helpers in
+  `src/schema_edit_text.cc`, keywords in the file's case.
+- A column's `type` must start with a known MariaDB data type: the grammar takes any name as
+  a plugin type, so `VARCHR(45)` parses.
+- Everything is computed in the expanded text and mapped back per file (`change()`), so
+  includes and slices take the same path as the renames. Statements about an object are
+  found by a light scanner of their leading words (`subject_of`), then parsed where items
+  are edited (field lists, `ALTER TABLE` items, key parts).
+- A removed statement takes the blank lines above it (what an add puts there), those below
+  only when the text or the slice ends above it: add then drop gives the files back byte for
+  byte (checked on the MRS project).
+- Blank lines before a new statement are counted in its neighbour's own file.
+- `set_table_options` edits the `CREATE TABLE` only; an option a later `ALTER TABLE` sets
+  makes the self-check refuse the edit.
+- Found on the way: references missed a key part with a prefix length (`a(10)`, the grammar's
+  `ident '(' NUM ')'` form of `key_part`); `sql_names` now takes it as a column, which fixes
+  rename and references in the server too.
+
+Tests: `schema_edit_t.cc` (every op, placement and style, CRLF, includes with slices, the
+1833 migration, removal spacing, errors), `tests/e2e/test_edit.py` (fixture project: add a
+table, columns, a view, a routine, drop a table; MRS project: add a table with a foreign key,
+a column, a view, a routine, check, then drop them all and get the outline back).

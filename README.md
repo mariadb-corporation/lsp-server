@@ -53,7 +53,8 @@ mariadb-lsp outline FILE          # the schema objects the file defines, as JSON
                                   # --no-source reads them as SQL; --source-dir DIR
                                   # takes relative paths from DIR, e.g. for stdin)
 mariadb-lsp edit --edits R.json --source-dir DIR -
-                                  # schema edits (renames) applied to an MSM script and its
+                                  # schema edits (renames; add, change, drop tables, columns,
+                                  # views, routines) applied to an MSM script and its
                                   # includes: text edits, migration DDL, new outline as JSON
                                   # (docs/edit-format.md); writes no file
 mariadb-lsp format FILE           # the file with its queries laid out, to stdout

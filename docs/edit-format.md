@@ -44,6 +44,15 @@ error or an unreadable script or request.
 Names compare without regard to case, as in the outline. A new name is at most 64
 characters, does not end in a space and holds no NUL.
 
+The ops that add or change an object carry it in the outline's shape
+([outline-format.md](outline-format.md)): a `Column`, `Table`, `View` or `Routine` object
+with the members the outline gives it. A member left out takes the outline's default
+(`nullable` true, `default` null, `comment` null, ...), so `modify_column` with only `name`
+and `type` drops the column's comment. An unknown member is `bad-request`, naming it; the
+positions an outline object carries (`range`, `selection_range`, `source`) are ignored, so an
+object read from an outline can be sent back. The ops of the renames do not check for
+unknown members.
+
 ### Ops
 
 | op | Members | Status | What changes |
@@ -52,10 +61,21 @@ characters, does not end in a space and holds no NUL.
 | `rename_column` | `table`, `column`, `new_name` | done | the definition, also when an `ALTER TABLE` adds the column, and every reference |
 | `rename_view` | `view`, `new_name` | done | the definition and every reference |
 | `rename_routine` | `routine`, `new_name`, `kind` (`procedure` or `function`; needed when both kinds have the name) | done | the definition and every reference |
-| `add_table`, `drop_table`, `add_column`, `modify_column`, `drop_column`, `set_table_options` | | not yet | |
-| `add_index`, `drop_index`, `add_foreign_key`, `drop_foreign_key` | | not yet | |
+| `add_table` | `table` (Table) | done | a `CREATE TABLE` after the schema's last one |
+| `drop_table` | `table` | done | its `CREATE TABLE`, every `ALTER TABLE`, `CREATE INDEX` and `DROP INDEX` on it, its triggers, and `DROP TABLE` statements of it alone |
+| `add_column` | `table`, `column` (Column), `after` or `first` | done | an element of the `CREATE TABLE`, or an `ALTER TABLE ... ADD COLUMN ... AFTER` (below) |
+| `modify_column` | `table`, `column` (its name now), `new_column` (Column) | done | the column's definition; a different `new_column.name` is also a rename, references included |
+| `drop_column` | `table`, `column` | done | its definition, its key parts in every index (an index left with none goes) and the `ALTER TABLE` changes of it |
+| `set_table_options` | `table`, `options` (`{name: value or null}`) | done | the `CREATE TABLE`'s options: a value replaces or adds one, null removes it |
+| `add_view` | `view` (View) | done | a `CREATE VIEW` after the schema's last view, else its last table |
+| `drop_view` | `view` | done | its `CREATE VIEW`, `ALTER VIEW` and `DROP VIEW` statements of it alone |
+| `add_routine` | `routine` (Routine) | done | a `CREATE PROCEDURE` or `FUNCTION` after the schema's last routine (below) |
+| `drop_routine` | `routine`, `kind` (as for `rename_routine`) | done | its `CREATE`, `ALTER` and `DROP` statements of it alone |
+| `add_index`, `drop_index`, `add_foreign_key`, `drop_foreign_key`, `set_primary_key` | | not yet | |
 
-An op that is not done yet is refused with `unsupported`.
+An op that is not done yet is refused with `unsupported`. `mariadb-lsp --help` lists the
+ops the binary does on the line `edit ops: rename_table rename_column ...` under `edit`; a
+binary with `edit` but without that line does the four renames.
 
 A rename finds its references as the language server's rename does: every statement of the
 expanded script that spells the name is parsed and each name in it resolved in the
@@ -66,6 +86,53 @@ covers DDL (foreign keys, indexes, `ALTER TABLE`, `CREATE INDEX`, `RENAME TABLE`
 comments, in the script and in every included file (a file included twice is edited once).
 Each reference is written as it was: in backticks or double quotes when it was, else with
 quotes only when the new name needs them.
+
+### Adding and removing
+
+New text is written in the style of the statement it goes next to: names in backticks
+when that statement's own name is, else quoted only when needed; keywords in the case of
+its first keyword; the file's line breaks. A new statement is laid out by the formatter
+(`--indent`, `--line-width`), ends with the delimiter in force where it goes (`$$` in a
+`DELIMITER $$` block), and has as many blank lines before it as the statement it follows
+has above it (a banner's comment lines not counted); no banner is written.
+
+- **A table** goes after the `CREATE TABLE` of the schema's last table (in the order of the
+  expanded script), in that statement's file; to the end of the script when the schema has
+  none. Its keys and foreign keys go into it; a foreign key's table must exist (or be the
+  table itself) and its columns too (`unknown-object`), its name must be free in the schema
+  (`name-taken`). No index is written for a foreign key: the server makes one when no index
+  serves it. Each column's `type` must be a MariaDB data type (the built-in ones, `INET4`,
+  `INET6`, `UUID`, `VECTOR`) and each definition must parse, else `bad-request` with a
+  message starting with the column (`column \`price\`: ...`).
+- **A column** goes after `after`, first with `first`, else after the table's last column:
+  as an element of the `CREATE TABLE` after its last column (before the keys), laid out as
+  its neighbours are (a line of its own, the comma moved). When that column is one an
+  `ALTER TABLE ... ADD COLUMN` adds, the column goes into a new `ALTER TABLE t ADD COLUMN c
+  ... AFTER x` after that statement, so the outline shows it where it was asked for.
+- **`modify_column`** replaces the column's definition where its last definition is (the
+  `CREATE TABLE`'s element, or an `ALTER TABLE ... MODIFY` or `CHANGE`); a column-level
+  `PRIMARY KEY` or `UNIQUE` and the column's own `CHECK` stay.
+- **`set_table_options`** changes the `CREATE TABLE`'s options; an option an `ALTER TABLE`
+  sets later wins over it, so the self-check refuses such an edit. Option names are the
+  outline's (`engine`, `charset`, `collation`, `comment`, `auto_increment`, `row_format`,
+  an engine-defined one under its own name); `comment` is the text, quoted when written.
+- **A view** goes after the schema's last view, else after its last table. Its `definition`
+  is the `SELECT` alone: `check_option` writes the `WITH ... CHECK OPTION` (the outline's
+  definition holds it, so remove it before sending a view of the outline back). A
+  definition that is empty or does not parse is `bad-request`.
+- **A routine** goes after the schema's last routine of either kind, inside its
+  `DELIMITER` block; where `;` is the delimiter and the routine holds one, in a new block
+  (`DELIMITER $$`, or the delimiter the script uses elsewhere). A function needs `returns`.
+  Its name must be free among the routines of both kinds (`name-taken`): references do not
+  tell a procedure from a function of one name.
+- **A statement removed** goes with its lines, with the comment lines right above it when
+  one of them names the object (a Workbench banner), and the blank lines above it, as
+  adding put them there (those below when nothing is above it). So adding an object and
+  dropping it again gives the files back as they were.
+- **Dropping** a table that another table's foreign key references, or a column a foreign
+  key uses (of its table or of another), is `referenced`, unless an earlier edit of the
+  request removed that key or table: undo sends the inverse ops in reverse order. The last
+  column of a table cannot be dropped (`bad-request`).
 
 ## Output
 
@@ -109,6 +176,13 @@ runs the statements inside a stored procedure. Names are in backticks.
 | `rename_table`, `rename_view` | `RENAME TABLE a TO b` (views share the tables' namespace) |
 | `rename_column` | `ALTER TABLE t RENAME COLUMN a TO b` |
 | `rename_routine` | `DROP PROCEDURE a` (or `FUNCTION`), then the routine's `CREATE` from the edited script, its included text expanded; with the note `routine-recreated` |
+| `add_table`, `add_view` | the `CREATE TABLE` or `CREATE VIEW` as written into the file |
+| `add_routine` | the `CREATE PROCEDURE` or `FUNCTION` as written; with the note `routine-created` |
+| `drop_table`, `drop_view`, `drop_routine` | `DROP TABLE t`, `DROP VIEW v`, `DROP PROCEDURE p` (or `FUNCTION`) |
+| `add_column` | `ALTER TABLE t ADD COLUMN c ...`, with `FIRST` or `AFTER x` when the request gave one |
+| `modify_column` | `ALTER TABLE t MODIFY COLUMN c ...`, or `CHANGE COLUMN old new ...` when renamed; when foreign keys (of the table or of others) use the column, `ALTER TABLE x DROP FOREIGN KEY fk` for each before it and `ALTER TABLE x ADD CONSTRAINT fk FOREIGN KEY ...` after it, as MariaDB refuses to change such a column (error 1833); an unnamed key cannot be dropped by name (note `no-migration`) |
+| `drop_column` | `ALTER TABLE t DROP COLUMN c` |
+| `set_table_options` | `ALTER TABLE t ENGINE=... COMMENT='...'` with the options given a value; a removed option has no statement (note `no-migration`) |
 
 ## Notes
 
@@ -117,6 +191,9 @@ runs the statements inside a stored procedure. Names are in backticks.
 | `name-in-string` | a string literal holds the old name as a word (for a column: and its table's name), outside a `COMMENT`; it was not changed. Dynamic SQL in `PREPARE` or `EXECUTE IMMEDIATE`, or data such as an audit log's table name |
 | `rest-reference` | a REST object (`CREATE REST VIEW ... AS t`, `CREATE REST PROCEDURE ... AS p`) names the renamed table, view or routine; its REST SQL was not changed |
 | `routine-recreated` | no statement renames a routine: the migration drops it and creates it again, and a `CREATE PROCEDURE` or `FUNCTION` cannot run inside a stored procedure, so msm or a person must place it |
+| `routine-created` | the same for a routine `add_routine` creates: its `CREATE` in the migration cannot run inside a stored procedure. msm treats it as `routine-recreated` |
+| `still-referenced` | after a drop, a statement still refers to the dropped table, view, routine or column (a view's `SELECT`, a trigger or routine body, an `INSERT`); one note per statement |
+| `no-migration` | the edit has no statement for part of it: an option removed by `set_table_options`, an unnamed foreign key around a `modify_column` |
 
 A kind is never removed or renamed within format 1; a consumer that does not know a kind
 should show its `message`.
@@ -133,12 +210,13 @@ A refused request writes no edits, whatever edits before the failing one did:
 
 | Kind | When |
 | --- | --- |
-| `bad-request` | the request is not JSON of format 1, an op is unknown, a member is missing, empty or of the wrong type, a new name is too long, or a routine name is ambiguous without `kind` |
+| `bad-request` | the request is not JSON of format 1, an op is unknown, a member is missing, empty, unknown or of the wrong type, a new name is too long, a routine name is ambiguous without `kind`, a column's type is not a MariaDB data type, or a definition does not parse |
 | `unsupported` | an op this binary does not do yet, or a routine renamed while a routine of the other kind has its name (references do not tell the two apart) |
-| `unknown-object` | the table, column, view or routine is not in the outline |
-| `name-taken` | the new name is taken: by a table or view for a table or view (they share a namespace), by a column of the table, by a routine of the same kind; a change of case only is a rename |
+| `unknown-object` | the table, column, view or routine is not in the outline, nor the table or column a foreign key references, nor the column `after` names |
+| `name-taken` | the new name is taken: by a table or view for a table or view (they share a namespace), by a column of the table, by a routine of either kind, by a foreign key of the schema; a change of case only is a rename |
+| `referenced` | `drop_table` of a table another table's foreign key references; `drop_column` of a column a foreign key uses |
 | `edit-outside-slice` | an edit of an included file would cross the bound of a directive's slice, lie outside every slice of the file, or leave a slice that cannot be written to select the edited text |
-| `self-check` | the outline of the edited texts does not show the edit (the table under its new name, the old name gone from every foreign key, trigger and index), or has a statement it cannot read that the input's outline read (an unapplied note the input did not have) |
+| `self-check` | the outline of the edited texts does not show the edit (the table under its new name, the old name gone from every foreign key, trigger and index; an added object where it was asked for; a dropped one gone), or has a statement it cannot read that the input's outline read (an unapplied note the input did not have) |
 
 The self-check is the safety net, as the formatter's re-parse is: it rebuilds the outline
 after every edit and refuses the request rather than return edits that would lose an object.
