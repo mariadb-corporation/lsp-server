@@ -170,8 +170,9 @@ has above it (a banner's comment lines not counted); no banner is written.
   routine. A trigger's `events` is the outline's string (`INSERT`, `UPDATE OR DELETE`), not an
   array; `update_columns` needs `UPDATE` among them. Its table must exist and be a table
   (`unknown-object`), as must the columns of its `update_columns` and the trigger its `order`
-  names, on the same table. Trigger names
-  and event names must be free in the schema (`name-taken`). A trigger that another trigger
+  names: on the same table, with the same timing, firing on every event of the new one (else
+  MariaDB refuses it, error 4031). Trigger names and event names must be free in the schema
+  (`name-taken`). A trigger that another trigger
   follows or precedes cannot be dropped (`referenced`): that one's `CREATE` fails without it.
   A trigger or event rename changes the statements about it by name (no reference search: SQL
   names neither elsewhere), with `name-in-string` notes as the other renames.
@@ -274,7 +275,7 @@ Each statement says what it does, so a program need not read its SQL:
 | `drop_foreign_key` | `ALTER TABLE t DROP FOREIGN KEY name`; an unnamed key has no statement (note `no-migration`) | `drop` `foreign_key` |
 | `add_trigger`, `add_event` | the `CREATE TRIGGER` or `CREATE EVENT` as written; with the note `trigger-created` or `event-created` | `create` `trigger` or `event` |
 | `drop_trigger`, `drop_event` | `DROP TRIGGER t`, `DROP EVENT e` | `drop` `trigger` or `event` |
-| `rename_trigger` | `DROP TRIGGER a`, then the trigger's `CREATE` from the edited script, its included text expanded; with the note `trigger-recreated` | `drop` `trigger` (the old name), then `create` `trigger` (the new name) |
+| `rename_trigger` | `DROP TRIGGER a`, then the trigger's `CREATE` from the edited script, its included text expanded; with the note `trigger-recreated`. MariaDB fires a table's triggers of one timing and event in the order they were created, so the triggers the script creates after it on its table, at its timing, on an event it or one of them fires on, are dropped after it and created again after it, each with a `trigger-recreated` note | `drop` `trigger` (the old name, then those after it), then `create` `trigger` (the new name, then those after it) |
 | `rename_event` | `ALTER EVENT a RENAME TO b`; none for a change of case (event names do not tell case apart) | `rename` `event` |
 
 ## Notes
