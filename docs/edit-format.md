@@ -26,6 +26,16 @@ an edit writes (none of the renames writes one).
 Exit 0 with the result, 1 with an error object when the request is refused, 2 for a usage
 error or an unreadable script or request.
 
+`mariadb-lsp edit --ops` prints the ops the binary does and exits 0, for programs (the
+`edit ops:` line of `--help` lists the same, for people):
+
+```json
+{"format": 1, "ops": ["rename_table", "rename_column", ...]}
+```
+
+A binary that answers `--ops` also tags each migration statement (`action`, `object`, ...)
+and answers `unsupported` for an op it does not know; older ones (#25 to #28) exit 2 there.
+
 ## Request
 
 ```json
@@ -77,9 +87,10 @@ unknown members.
 | `add_foreign_key` | `table`, `foreign_key` (Foreign key) | done | an element of the `CREATE TABLE`, or an `ALTER TABLE ... ADD` (below) |
 | `drop_foreign_key` | `table`, and `name` or `columns` (an unnamed key) | done | its element, `ALTER TABLE` change, or a column's `REFERENCES` |
 
-An op this binary does not do is refused with `unsupported`. `mariadb-lsp --help` lists the
-ops the binary does on the line `edit ops: rename_table rename_column ...` under `edit`; a
-binary with `edit` but without that line does the four renames.
+An op this binary does not do, or does not know (one added after it was built), is refused
+with `unsupported`. `mariadb-lsp edit --ops` lists the ops the binary does as JSON (see
+above), and `mariadb-lsp --help` on the line `edit ops: rename_table rename_column ...` under
+`edit`; a binary with `edit` but without that line does the four renames.
 
 A rename finds its references as the language server's rename does: every statement of the
 expanded script that spells the name is parsed and each name in it resolved in the
@@ -155,6 +166,11 @@ has above it (a banner's comment lines not counted); no banner is written.
   key after both tables, else right after the referenced table. No index is written for a
   foreign key: the server makes one when none serves it; send `add_index` before it (a 1:1
   relationship's `UNIQUE`) when one should be written. Column types are not compared.
+- **A key without a name** (in `add_index`, `add_foreign_key`, `add_table`) is given one, so
+  that the script and the server agree on it and a later drop can name it: an index its first
+  column's name (`customer_id`, then `customer_id_2`, ... among the table's indexes, as the
+  server names one), a foreign key `fk_<table>_<referenced table>` (then `_2`, ... among the
+  schema's foreign keys); at most 64 characters. A primary key needs none (`PRIMARY`).
 - **`set_primary_key`** with the columns the key has already changes nothing. Its migration is
   one statement, `DROP PRIMARY KEY, ADD PRIMARY KEY (...)`: a `DROP PRIMARY KEY` of its own
   fails when an `AUTO_INCREMENT` column is the key. Use `drop_index` and `add_index` for key
@@ -177,7 +193,8 @@ has above it (a banner's comment lines not counted); no banner is written.
              "edits": [{"range": {"start": {"line": 18, "character": 27},
                                   "end": {"line": 18, "character": 37}},
                         "new_text": "`url_hosts`"}]}],
-  "migration": [{"edit": 0, "sql": "RENAME TABLE `url_host` TO `url_hosts`"}],
+  "migration": [{"edit": 0, "sql": "RENAME TABLE `url_host` TO `url_hosts`",
+                 "action": "rename", "object": "table", "name": "url_host", "new_name": "url_hosts"}],
   "notes": [{"edit": 0, "kind": "name-in-string", "file": "sections/150-40_audit_log_triggers.sql",
              "source": 7, "start": {"line": 840, "character": 8}, "message": "..."}],
   "outline": {"format": 1, "file": "-", "schemas": [...], ...}
@@ -189,7 +206,7 @@ has above it (a banner's comment lines not counted); no banner is written.
 | `format` | number | `1` |
 | `files` | array | `{file, edits}` for each file that changes, the script first, then the included files in the order they are first included; `file` is `-` for stdin (else the script as given), an included file's path relative to `--source-dir` with `/` separators |
 | `files[].edits` | array | `{range, new_text}`: LSP ranges (0-based line, UTF-16 character) in that file's text as it is on disk, not the sliced or expanded text; sorted and not overlapping, so they can be applied back to front |
-| `migration` | array | `{edit, sql}`: the statements that take a deployed schema of the old shape to the new one, in edit order (see [Migration](#migration)) |
+| `migration` | array | `{edit, sql, action, object, name, table?, new_name?}`: the statements that take a deployed schema of the old shape to the new one, in edit order, each with what it does (see [Migration](#migration)) |
 | `notes` | array | `{edit, kind, file, source?, start, message}`: what an edit could not do itself, for a person to check; they do not refuse the edit (see [Notes](#notes)). `file` as in `files`; `source` the index in the outline's `includes` of the file's first directive (left out for the script); `start` a position in that file's text on disk |
 | `outline` | object | the outline ([outline-format.md](outline-format.md), format 1) of the edited texts, as `mariadb-lsp outline` of the edited files gives it; `file` as in `files` |
 
@@ -205,23 +222,33 @@ an edit inside the selection.
 No schema qualifier (MSM scripts run after `USE`), no `DELIMITER` and no trailing `;`: MSM
 runs the statements inside a stored procedure. Names are in backticks.
 
-| op | Statements |
+Each statement says what it does, so a program need not read its SQL:
+
+| Member | Values |
 | --- | --- |
-| `rename_table`, `rename_view` | `RENAME TABLE a TO b` (views share the tables' namespace) |
-| `rename_column` | `ALTER TABLE t RENAME COLUMN a TO b` |
-| `rename_routine` | `DROP PROCEDURE a` (or `FUNCTION`), then the routine's `CREATE` from the edited script, its included text expanded; with the note `routine-recreated` |
-| `add_table`, `add_view` | the `CREATE TABLE` or `CREATE VIEW` as written into the file |
-| `add_routine` | the `CREATE PROCEDURE` or `FUNCTION` as written; with the note `routine-created` |
-| `drop_table`, `drop_view`, `drop_routine` | `DROP TABLE t`, `DROP VIEW v`, `DROP PROCEDURE p` (or `FUNCTION`) |
-| `add_column` | `ALTER TABLE t ADD COLUMN c ...`, with `FIRST` or `AFTER x` when the request gave one |
-| `modify_column` | `ALTER TABLE t MODIFY COLUMN c ...`, or `CHANGE COLUMN old new ...` when renamed; when foreign keys (of the table or of others) use the column, `ALTER TABLE x DROP FOREIGN KEY fk` for each before it and `ALTER TABLE x ADD CONSTRAINT fk FOREIGN KEY ...` after it, as MariaDB refuses to change such a column (error 1833); an unnamed key cannot be dropped by name (note `no-migration`) |
-| `drop_column` | `ALTER TABLE t DROP COLUMN c` |
-| `set_table_options` | `ALTER TABLE t ENGINE=... COMMENT='...'` with the options given a value; a removed option has no statement (note `no-migration`) |
-| `add_index` | `ALTER TABLE t ADD [UNIQUE\|FULLTEXT\|SPATIAL\|VECTOR] INDEX name (...)`, `ADD PRIMARY KEY (...)` |
-| `drop_index` | `ALTER TABLE t DROP INDEX name`, `DROP PRIMARY KEY`; an unnamed index has no statement (the server named it; note `no-migration`) |
-| `set_primary_key` | `ALTER TABLE t DROP PRIMARY KEY, ADD PRIMARY KEY (...)`, or `ADD PRIMARY KEY (...)` when the table had none |
-| `add_foreign_key` | `ALTER TABLE t ADD CONSTRAINT name FOREIGN KEY (...) REFERENCES ...` |
-| `drop_foreign_key` | `ALTER TABLE t DROP FOREIGN KEY name`; an unnamed key has no statement (note `no-migration`) |
+| `action` | `create`, `drop` (a table, view or routine); `add`, `drop` (a member of a table); `alter`; `rename` |
+| `object` | `table`, `view`, `procedure`, `function`; `column`, `index`, `primary_key`, `foreign_key`, `table_options` |
+| `name` | the object's name before the edit (for a `create` or `add`, the new object's); `PRIMARY` for a primary key; for `table_options`, the table's |
+| `table` | a member's table (as named when the statement runs); left out for a table, view or routine |
+| `new_name` | the name after a `rename`, or after an `alter` of a column that `CHANGE COLUMN` renames; left out otherwise |
+
+| op | Statements | Tags (`action` `object`) |
+| --- | --- | --- |
+| `rename_table`, `rename_view` | `RENAME TABLE a TO b` (views share the tables' namespace) | `rename` `table` or `view` |
+| `rename_column` | `ALTER TABLE t RENAME COLUMN a TO b` | `rename` `column` |
+| `rename_routine` | `DROP PROCEDURE a` (or `FUNCTION`), then the routine's `CREATE` from the edited script, its included text expanded; with the note `routine-recreated` | `drop` `procedure` or `function` (the old name), then `create` of the same kind (the new name) |
+| `add_table`, `add_view` | the `CREATE TABLE` or `CREATE VIEW` as written into the file | `create` `table` or `view` |
+| `add_routine` | the `CREATE PROCEDURE` or `FUNCTION` as written; with the note `routine-created` | `create` `procedure` or `function` |
+| `drop_table`, `drop_view`, `drop_routine` | `DROP TABLE t`, `DROP VIEW v`, `DROP PROCEDURE p` (or `FUNCTION`) | `drop` `table`, `view`, `procedure` or `function` |
+| `add_column` | `ALTER TABLE t ADD COLUMN c ...`, with `FIRST` or `AFTER x` when the request gave one | `add` `column` |
+| `modify_column` | `ALTER TABLE t MODIFY COLUMN c ...`, or `CHANGE COLUMN old new ...` when renamed; when foreign keys (of the table or of others) use the column, `ALTER TABLE x DROP FOREIGN KEY fk` for each before it and `ALTER TABLE x ADD CONSTRAINT fk FOREIGN KEY ...` after it, as MariaDB refuses to change such a column (error 1833); an unnamed key cannot be dropped by name (note `no-migration`) | `drop` `foreign_key` for each key dropped first, `alter` `column`, then `add` `foreign_key` for each added back |
+| `drop_column` | `ALTER TABLE t DROP COLUMN c` | `drop` `column` |
+| `set_table_options` | `ALTER TABLE t ENGINE=... COMMENT='...'` with the options given a value; a removed option has no statement (note `no-migration`) | `alter` `table_options` |
+| `add_index` | `ALTER TABLE t ADD [UNIQUE\|FULLTEXT\|SPATIAL\|VECTOR] INDEX name (...)`, `ADD PRIMARY KEY (...)` | `add` `index` or `primary_key` |
+| `drop_index` | `ALTER TABLE t DROP INDEX name`, `DROP PRIMARY KEY`; an unnamed index has no statement (the server named it; note `no-migration`) | `drop` `index` or `primary_key` |
+| `set_primary_key` | `ALTER TABLE t DROP PRIMARY KEY, ADD PRIMARY KEY (...)`, or `ADD PRIMARY KEY (...)` when the table had none | `alter` `primary_key`, or `add` when the table had none |
+| `add_foreign_key` | `ALTER TABLE t ADD CONSTRAINT name FOREIGN KEY (...) REFERENCES ...` | `add` `foreign_key` |
+| `drop_foreign_key` | `ALTER TABLE t DROP FOREIGN KEY name`; an unnamed key has no statement (note `no-migration`) | `drop` `foreign_key` |
 
 ## Notes
 
@@ -249,8 +276,8 @@ A refused request writes no edits, whatever edits before the failing one did:
 
 | Kind | When |
 | --- | --- |
-| `bad-request` | the request is not JSON of format 1, an op is unknown, a member is missing, empty, unknown or of the wrong type, a new name is too long, a routine name is ambiguous without `kind`, a column's type is not a MariaDB data type, or a definition does not parse |
-| `unsupported` | an op this binary does not do, or a column added to a table whose columns the script does not list (`CREATE TABLE ... AS SELECT`, `LIKE`) |
+| `bad-request` | the request is not JSON of format 1, a member is missing, empty, unknown or of the wrong type, a new name is too long, a routine name is ambiguous without `kind`, a column's type is not a MariaDB data type, or a definition does not parse |
+| `unsupported` | an op this binary does not do or does not know (a newer binary may), or a column added to a table whose columns the script does not list (`CREATE TABLE ... AS SELECT`, `LIKE`) |
 | `unknown-object` | the table, column, view or routine is not in the outline, nor the table or column a foreign key references, nor the column `after` names |
 | `name-taken` | the new name is taken: by a table or view for a table or view (they share a namespace), by a column of the table, by a routine of the same kind, by an index of the table, by a foreign key of the schema; a second primary key (use `set_primary_key`); a change of case only is a rename |
 | `referenced` | `drop_table` of a table another table's foreign key references; `drop_column` of a column a foreign key uses; `drop_index` or `set_primary_key` taking away the index a foreign key or an `AUTO_INCREMENT` column needs |

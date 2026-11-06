@@ -127,6 +127,8 @@ const char *const k_usage =
     "  --text             split: include each statement's text in the output\n"
     "  --at LINE:COL      complete: the position, 1-based (COL in characters)\n"
     "  --edits FILE       edit: the schema edits, JSON (docs/edit-format.md)\n"
+    "  --ops              edit: print the ops this binary does, as JSON\n"
+    "                     ({\"format\": 1, \"ops\": [...]}), and exit\n"
     "  --line-width N     format, edit: the width lines are kept within (default 80,\n"
     "                     0 = no limit)\n"
     "  --keyword-case upper|lower\n"
@@ -198,6 +200,7 @@ struct Options {
   bool add_tables = true;  // complete: --no-add-tables
   std::string source_dir;  // --source-dir, absolute; "": the file's folder
   std::string edits;       // edit: --edits FILE
+  bool list_ops = false;   // edit: --ops
 };
 
 // The usage text, with the `edit ops:` line: the ops this binary does,
@@ -793,6 +796,8 @@ std::optional<Options> parse_args(int argc, char **argv) {
     } else if (arg == "--version") {
       std::cout << "mariadb-lsp " MDBLS_VERSION "\n";
       std::exit(k_exit_ok);
+    } else if (arg == "--ops") {
+      o.list_ops = true;
     } else if (arg == "--sql-mode") {
       const auto v = value();
       if (!v) return std::nullopt;
@@ -942,6 +947,14 @@ std::optional<Options> parse_args(int argc, char **argv) {
                                     : "mariadb-lsp: unknown command " + o.command + "\n")
               << usage();
     return std::nullopt;
+  }
+  if (o.list_ops) {
+    // The ops alone: no file, no --edits.
+    if (o.command != "edit" || !o.files.empty() || !o.edits.empty()) {
+      std::cerr << "mariadb-lsp: --ops goes with edit alone\n";
+      return std::nullopt;
+    }
+    return o;
   }
   if (!o.source_dir.empty()) {
     if (o.command != "check" && o.command != "outline" && o.command != "format" &&
@@ -1207,6 +1220,10 @@ bool read_connection(Options &o) {
 int main(int argc, char **argv) {
   auto o = parse_args(argc, argv);
   if (!o) return k_exit_usage;
+  if (o->list_ops) {
+    std::cout << mdbls::edit_ops_json() << "\n";
+    return k_exit_ok;
+  }
   if (o->command == "lsp") return run_lsp(*o);
   if (o->command == "connections") return run_connections(*o);
   if (!o->connection.empty() && !read_connection(*o)) return k_exit_usage;

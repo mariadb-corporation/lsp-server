@@ -67,6 +67,9 @@ const char *to_string(Edit_op op);
 // Every op this binary does, space-separated, in the order of Edit_op:
 // the `edit ops:` line of `mariadb-lsp --help`.
 std::string supported_edit_ops();
+// The same, for programs: {"format": 1, "ops": [...]}, what
+// `mariadb-lsp edit --ops` prints.
+std::string edit_ops_json();
 
 // One edit of a request.  Which members it uses depends on the op.
 struct Schema_edit {
@@ -134,9 +137,25 @@ struct Edit_note {
   std::string message;
 };
 
+// What a migration statement does (docs/edit-format.md, Migration):
+// create and drop a table, view or routine; add and drop a table's member.
+enum class Migration_action : uint8_t { create, drop, add, alter, rename };
+enum class Migration_object : uint8_t {
+  table, view, procedure, function,                             // objects
+  column, index, primary_key, foreign_key, table_options,       // a table's members
+};
+const char *to_string(Migration_action a);
+const char *to_string(Migration_object o);
+
+// One statement of the migration, with what it does to which object.
 struct Migration_statement {
   size_t edit = 0;
   std::string sql;  // no schema qualifier, no delimiter
+  Migration_action action = Migration_action::alter;
+  Migration_object object = Migration_object::table;
+  std::string name;      // the object's name before the edit (create, add: the new one's); PRIMARY for a primary key
+  std::string table;     // a member's table; "" for an object
+  std::string new_name;  // rename, and a column's alter that renames it; "" otherwise
 };
 
 struct Edit_result {

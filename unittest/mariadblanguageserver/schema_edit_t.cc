@@ -131,6 +131,19 @@ std::vector<std::string> note_kinds(const Edit_result &r) {
   return out;
 }
 
+// Each migration statement's tag: "action object name [(table)] [-> new]".
+using Tags = std::vector<std::string>;
+Tags tags(const Edit_result &r) {
+  Tags out;
+  for (const auto &m : r.migration) {
+    std::string t = std::string(to_string(m.action)) + " " + to_string(m.object) + " " + m.name;
+    if (!m.table.empty()) t += " (" + m.table + ")";
+    if (!m.new_name.empty()) t += " -> " + m.new_name;
+    out.push_back(t);
+  }
+  return out;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -246,7 +259,10 @@ TEST(Schema_edit, request_errors) {
   EXPECT_EQ("bad-request", kind("[]"));
   EXPECT_EQ("bad-request", kind(R"({"format": 2, "edits": []})"));
   EXPECT_EQ("bad-request", kind(R"({"format": 1})"));
-  EXPECT_EQ("bad-request", kind(request("s", R"({"op": "rename"})")));
+  // An op this binary does not know: perhaps a newer one does.
+  EXPECT_EQ("unsupported", kind(request("s", R"({"op": "rename"})")));
+  EXPECT_NE(std::string::npos,
+            std::get<Edit_error>(parse_edit_request(request("s", R"({"op": "add_trigger"})"))).message.find("newer"));
   EXPECT_EQ("bad-request", kind(request("s", R"({"op": "rename_table", "table": "t"})")));
   EXPECT_EQ("bad-request", kind(request("s", R"({"op": "rename_table", "table": "t", "new_name": ""})")));
   EXPECT_EQ("bad-request", kind(request("s", rename_table("t", std::string(65, 'x')))));
@@ -1412,6 +1428,139 @@ TEST(Schema_edit, outside_msm_new_objects_follow_their_neighbours_form) {
       text(r, ""));
   const auto plain = ok(edit("CREATE VIEW v AS SELECT 1;\n", {}, request("", R"j({"op": "add_view", "view": {"name": "w", "definition": "SELECT 2"}})j")));
   EXPECT_EQ("CREATE VIEW v AS SELECT 1;\nCREATE VIEW w AS SELECT 2;\n", text(plain, ""));
+}
+
+}  // namespace mdbls
+
+// ---------------------------------------------------------------------------
+// Migration tags and key names (msm reads the tags instead of the SQL)
+
+namespace mdbls {
+namespace {
+
+Tags shop_tags(const std::string &edit_json) { return tags(ok(edit(k_shop, {}, request("shop", edit_json)))); }
+
+}  // namespace
+
+TEST(Schema_edit, migration_tags_of_objects) {
+  EXPECT_EQ(Tags{"rename table customer -> client"}, shop_tags(rename_table("customer", "client")));
+  EXPECT_EQ(Tags{"rename view v_orders -> v2"},
+            shop_tags(R"j({"op": "rename_view", "view": "v_orders", "new_name": "v2"})j"));
+  // No statement renames a routine: its DROP and its CREATE.
+  EXPECT_EQ((Tags{"drop procedure p1", "create procedure p2"}),
+            shop_tags(R"j({"op": "rename_routine", "routine": "p1", "new_name": "p2"})j"));
+  EXPECT_EQ(Tags{"create table t2"},
+            shop_tags(R"j({"op": "add_table", "table": {"name": "t2", "columns": [{"name": "a", "type": "INT"}]}})j"));
+  EXPECT_EQ(Tags{"drop table orders"}, shop_tags(R"j({"op": "drop_table", "table": "orders"})j"));
+  EXPECT_EQ(Tags{"create view v2"},
+            shop_tags(R"j({"op": "add_view", "view": {"name": "v2", "definition": "SELECT 1"}})j"));
+  EXPECT_EQ(Tags{"drop view v_orders"}, shop_tags(R"j({"op": "drop_view", "view": "v_orders"})j"));
+  EXPECT_EQ(Tags{"create function f1"},
+            shop_tags(R"j({"op": "add_routine", "routine": {"name": "f1", "kind": "function", "returns": "INT", "body": "RETURN 1"}})j"));
+  EXPECT_EQ(Tags{"drop procedure p1"}, shop_tags(R"j({"op": "drop_routine", "routine": "p1"})j"));
+}
+
+TEST(Schema_edit, migration_tags_of_members) {
+  EXPECT_EQ(Tags{"rename column note (orders) -> remark"},
+            shop_tags(R"j({"op": "rename_column", "table": "orders", "column": "note", "new_name": "remark"})j"));
+  EXPECT_EQ(Tags{"add column x (orders)"},
+            shop_tags(R"j({"op": "add_column", "table": "orders", "column": {"name": "x", "type": "INT"}})j"));
+  EXPECT_EQ(Tags{"drop column name (customer)"},
+            shop_tags(R"j({"op": "drop_column", "table": "customer", "column": "name"})j"));
+  // CHANGE COLUMN: renamed as it is altered.
+  EXPECT_EQ(Tags{"alter column note (orders) -> remark"},
+            shop_tags(R"j({"op": "modify_column", "table": "orders", "column": "note",
+                "new_column": {"name": "remark", "type": "TEXT"}})j"));
+  // The 1833 sequence: the foreign keys using the column go before it and
+  // come back after.
+  EXPECT_EQ((Tags{"drop foreign_key fk_orders_customer (orders)", "alter column id (customer)",
+                  "add foreign_key fk_orders_customer (orders)"}),
+            shop_tags(R"j({"op": "modify_column", "table": "customer", "column": "id",
+                "new_column": {"name": "id", "type": "BIGINT", "nullable": false, "auto_increment": true}})j"));
+  EXPECT_EQ(Tags{"alter table_options orders (orders)"},
+            shop_tags(R"j({"op": "set_table_options", "table": "orders", "options": {"comment": "x"}})j"));
+  EXPECT_EQ(Tags{"add index ix_x (orders)"},
+            shop_tags(R"j({"op": "add_index", "table": "orders", "index": {"name": "ix_x", "kind": "index", "columns": ["note"]}})j"));
+  EXPECT_EQ(Tags{"drop index ix_note (orders)"},
+            shop_tags(R"j({"op": "drop_index", "table": "orders", "name": "ix_note"})j"));
+  EXPECT_EQ(Tags{"drop primary_key PRIMARY (orders)"},
+            shop_tags(R"j({"op": "drop_index", "table": "orders", "kind": "primary"})j"));
+  EXPECT_EQ(Tags{"alter primary_key PRIMARY (orders)"},
+            shop_tags(R"j({"op": "set_primary_key", "table": "orders", "columns": ["id", "customer_id"]})j"));
+  EXPECT_EQ(Tags{"add primary_key PRIMARY (t)"},
+            tags(ok(edit("CREATE TABLE t (a INT);\n", {}, request("", R"j({"op": "set_primary_key", "table": "t", "columns": ["a"]})j")))));
+  EXPECT_EQ(Tags{"add foreign_key fk_x (orders)"},
+            shop_tags(R"j({"op": "add_foreign_key", "table": "orders",
+                "foreign_key": {"name": "fk_x", "columns": ["id"], "references": {"table": "customer", "columns": ["id"]}}})j"));
+  EXPECT_EQ(Tags{"drop foreign_key fk_orders_customer (orders)"},
+            shop_tags(R"j({"op": "drop_foreign_key", "table": "orders", "name": "fk_orders_customer"})j"));
+}
+
+TEST(Schema_edit, migration_tags_in_the_json) {
+  const auto r = ok(edit(k_shop, {}, request("shop", R"j({"op": "rename_column", "table": "orders", "column": "note", "new_name": "remark"},
+      {"op": "drop_view", "view": "v_orders"})j")));
+  rapidjson::Document d;
+  d.Parse(edit_result_json(r, "-", k_dir).c_str());
+  ASSERT_TRUE(d.IsObject());
+  const auto &m = d["migration"];
+  ASSERT_EQ(2u, m.Size());
+  EXPECT_STREQ("rename", m[0]["action"].GetString());
+  EXPECT_STREQ("column", m[0]["object"].GetString());
+  EXPECT_STREQ("note", m[0]["name"].GetString());
+  EXPECT_STREQ("orders", m[0]["table"].GetString());
+  EXPECT_STREQ("remark", m[0]["new_name"].GetString());
+  // An object: no table, no new name.
+  EXPECT_STREQ("drop", m[1]["action"].GetString());
+  EXPECT_STREQ("view", m[1]["object"].GetString());
+  EXPECT_FALSE(m[1].HasMember("table"));
+  EXPECT_FALSE(m[1].HasMember("new_name"));
+}
+
+// Every key gets a name when it is created, so a later drop can name it.
+TEST(Schema_edit, new_keys_are_named) {
+  // An index: its first column's name, as the server would give it.
+  const auto ix = ok(edit(k_shop, {}, request("shop", R"j({"op": "add_index", "table": "orders", "index": {"kind": "index", "columns": ["customer_id"]}},
+      {"op": "add_index", "table": "orders", "index": {"kind": "unique", "columns": ["customer_id", "id"]}})j")));
+  EXPECT_EQ((Tags{"add index customer_id (orders)", "add index customer_id_2 (orders)"}), tags(ix));
+  EXPECT_NE(std::string::npos, text(ix, "").find("INDEX `customer_id` (`customer_id`)")) << text(ix, "");
+  // An unnamed index already there has the server's name: a column's UNIQUE.
+  EXPECT_EQ(Tags{"add index b_2 (t)"},
+            tags(ok(edit("CREATE TABLE t (a INT, b INT UNIQUE);\n", {},
+                         request("", R"j({"op": "add_index", "table": "t", "index": {"kind": "index", "columns": ["b"]}})j")))));
+  // A foreign key: fk_<table>_<referenced table>, unique in the schema.
+  const auto fk = ok(edit(k_shop, {}, request("shop", R"j({"op": "add_foreign_key", "table": "orders",
+      "foreign_key": {"columns": ["id"], "references": {"table": "customer", "columns": ["id"]}}})j")));
+  EXPECT_EQ(Tags{"add foreign_key fk_orders_customer_2 (orders)"}, tags(fk));
+  // A new table's keys.
+  const auto t = ok(edit(k_shop, {}, request("shop", R"j({"op": "add_table", "table": {"name": "item",
+      "columns": [{"name": "id", "type": "INT"}, {"name": "order_id", "type": "INT"}],
+      "indexes": [{"kind": "primary", "columns": ["id"]}, {"kind": "index", "columns": ["order_id"]}],
+      "foreign_keys": [{"columns": ["order_id"], "references": {"table": "orders", "columns": ["id"]}}]}})j")));
+  const auto *item = table(t, "shop", "item");
+  ASSERT_NE(nullptr, item);
+  ASSERT_EQ(2u, item->indexes.size());
+  EXPECT_EQ("order_id", item->indexes[1].name);
+  ASSERT_EQ(1u, item->foreign_keys.size());
+  EXPECT_EQ("fk_item_orders", item->foreign_keys[0].name);
+  // A name past 64 characters is cut to leave room for the suffix.
+  const std::string long_table(60, 't');
+  const std::string first = ("fk_" + long_table + "_u").substr(0, 64);  // taken
+  const auto cut = ok(edit("CREATE TABLE u (id INT PRIMARY KEY);\nCREATE TABLE " + long_table + " (u_id INT, CONSTRAINT `" +
+                               first + "` FOREIGN KEY (u_id) REFERENCES u (id));\n",
+                           {}, request("", R"j({"op": "add_foreign_key", "table": ")j" + long_table + R"j(",
+      "foreign_key": {"columns": ["u_id"], "references": {"table": "u", "columns": ["id"]}}})j")));
+  ASSERT_EQ(1u, cut.migration.size());
+  EXPECT_EQ("fk_" + long_table.substr(0, 59) + "_2", cut.migration[0].name);
+}
+
+TEST(Schema_edit, ops_json) {
+  rapidjson::Document d;
+  d.Parse(edit_ops_json().c_str());
+  ASSERT_TRUE(d.IsObject());
+  EXPECT_EQ(1, d["format"].GetInt());
+  std::string ops;
+  for (const auto &o : d["ops"].GetArray()) ops += (ops.empty() ? "" : " ") + std::string(o.GetString());
+  EXPECT_EQ(supported_edit_ops(), ops);
 }
 
 }  // namespace mdbls
