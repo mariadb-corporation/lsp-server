@@ -74,6 +74,8 @@ std::string create_table_sql(const Table &t, const Style &st);
 // `or_replace`: CREATE OR REPLACE.
 std::string create_view_sql(const View &v, const Style &st, bool or_replace = false);
 std::string create_routine_sql(const Routine &r, const Style &st, bool or_replace = false);
+std::string create_trigger_sql(const Trigger &t, const Style &st, bool or_replace = false);
+std::string create_event_sql(const Event &e, const Style &st, bool or_replace = false);
 
 }  // namespace mdbls::edit_text
 

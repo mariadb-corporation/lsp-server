@@ -262,7 +262,7 @@ TEST(Schema_edit, request_errors) {
   // An op this binary does not know: perhaps a newer one does.
   EXPECT_EQ("unsupported", kind(request("s", R"({"op": "rename"})")));
   EXPECT_NE(std::string::npos,
-            std::get<Edit_error>(parse_edit_request(request("s", R"({"op": "add_trigger"})"))).message.find("newer"));
+            std::get<Edit_error>(parse_edit_request(request("s", R"({"op": "add_widget"})"))).message.find("newer"));
   EXPECT_EQ("bad-request", kind(request("s", R"({"op": "rename_table", "table": "t"})")));
   EXPECT_EQ("bad-request", kind(request("s", R"({"op": "rename_table", "table": "t", "new_name": ""})")));
   EXPECT_EQ("bad-request", kind(request("s", rename_table("t", std::string(65, 'x')))));
@@ -298,7 +298,7 @@ TEST(Schema_edit, supported_ops) {
   EXPECT_EQ(
       "rename_table rename_column rename_view rename_routine add_table drop_table add_column modify_column "
       "drop_column add_index drop_index add_foreign_key drop_foreign_key set_table_options add_view drop_view "
-      "add_routine drop_routine set_primary_key",
+      "add_routine drop_routine set_primary_key add_trigger drop_trigger rename_trigger add_event drop_event rename_event",
       supported_edit_ops());
 }
 
@@ -1561,6 +1561,228 @@ TEST(Schema_edit, ops_json) {
   std::string ops;
   for (const auto &o : d["ops"].GetArray()) ops += (ops.empty() ? "" : " ") + std::string(o.GetString());
   EXPECT_EQ(supported_edit_ops(), ops);
+}
+
+}  // namespace mdbls
+
+// ---------------------------------------------------------------------------
+// Triggers and events
+
+namespace mdbls {
+namespace {
+
+const char *const k_add_trigger =
+    R"j({"op": "add_trigger", "trigger": {"name": "orders_bi", "timing": "BEFORE", "events": "INSERT", "table": "orders", "body": "BEGIN\n  SET NEW.note = 'new';\nEND"}})j";
+const char *const k_add_event =
+    R"j({"op": "add_event", "event": {"name": "purge", "schedule": "EVERY 1 DAY", "body": "DELETE FROM `orders`"}})j";
+
+}  // namespace
+
+TEST(Schema_edit, trigger_and_event_request_errors) {
+  auto kind = [](const std::string &edit_json) {
+    const auto r = parse_edit_request(request("s", edit_json));
+    if (const auto *e = std::get_if<Edit_error>(&r)) return e->kind + ": " + e->message;
+    return std::string("ok");
+  };
+  EXPECT_EQ("ok", kind(k_add_trigger));
+  // The outline's shape: events is a string.
+  EXPECT_NE("ok", kind(R"j({"op": "add_trigger", "trigger": {"name": "t", "timing": "BEFORE", "events": ["INSERT"], "table": "x", "body": "SET @a = 1"}})j"));
+  EXPECT_EQ("ok", kind(R"j({"op": "add_trigger", "trigger": {"name": "t", "timing": "after", "events": "update  or delete", "table": "x", "body": "SET @a = 1", "update_columns": ["a"], "order": null, "definer": null}})j"));
+  EXPECT_NE("ok", kind(R"j({"op": "add_trigger", "trigger": {"name": "t", "timing": "BEFORE", "events": "INSERT OR INSERT", "table": "x", "body": "SET @a = 1"}})j"));
+  EXPECT_NE("ok", kind(R"j({"op": "add_trigger", "trigger": {"name": "t", "timing": "BEFORE", "events": "TRUNCATE", "table": "x", "body": "SET @a = 1"}})j"));
+  EXPECT_NE("ok", kind(R"j({"op": "add_trigger", "trigger": {"name": "t", "timing": "DURING", "events": "INSERT", "table": "x", "body": "SET @a = 1"}})j"));
+  EXPECT_NE("ok", kind(R"j({"op": "add_trigger", "trigger": {"name": "t", "timing": "BEFORE", "events": "INSERT", "table": "x", "body": "SET @a = 1", "update_columns": ["a"]}})j"));
+  EXPECT_NE("ok", kind(R"j({"op": "add_trigger", "trigger": {"name": "t", "timing": "BEFORE", "events": "INSERT", "table": "x", "body": " "}})j"));
+  EXPECT_NE("ok", kind(R"j({"op": "add_trigger", "trigger": {"name": "t", "timing": "BEFORE", "events": "INSERT", "table": "x", "body": "SET @a = 1", "order": {"kind": "AFTER", "trigger": "u"}}})j"));
+  EXPECT_NE("ok", kind(R"j({"op": "add_trigger", "trigger": {"name": "t", "timing": "BEFORE", "events": "INSERT", "body": "SET @a = 1"}})j"));
+  EXPECT_NE("ok", kind(R"j({"op": "drop_trigger", "trigger": "t", "kind": "x"})j"));
+  EXPECT_EQ("ok", kind(k_add_event));
+  EXPECT_EQ("ok", kind(R"j({"op": "add_event", "event": {"name": "e", "schedule": "AT CURRENT_TIMESTAMP", "body": "SELECT 1", "status": "disable on slave", "comment": "c", "on_completion_preserve": false, "definer": null}})j"));
+  EXPECT_NE("ok", kind(R"j({"op": "add_event", "event": {"name": "e", "body": "SELECT 1"}})j"));
+  EXPECT_NE("ok", kind(R"j({"op": "add_event", "event": {"name": "e", "schedule": "EVERY 1 DAY", "body": "SELECT 1", "status": "ON"}})j"));
+  EXPECT_NE("ok", kind(R"j({"op": "rename_event", "event": "e"})j"));
+  EXPECT_EQ("bad-request: the name `" + std::string(65, 'x') + "` is longer than 64 characters",
+            kind(R"j({"op": "rename_trigger", "trigger": "t", "new_name": ")j" + std::string(65, 'x') + "\"}"));
+}
+
+TEST(Schema_edit, add_trigger) {
+  const auto r = ok(edit(k_shop, {}, request("shop", k_add_trigger)));
+  // After the last routine, in its DELIMITER block.
+  EXPECT_EQ(shop_with("END$$\n", "END$$\n"
+                                 "CREATE TRIGGER `orders_bi` BEFORE INSERT ON `orders` FOR EACH ROW\n"
+                                 "BEGIN\n"
+                                 "  SET NEW.note = 'new';\n"
+                                 "END$$\n"),
+            text(r, ""));
+  EXPECT_EQ(Tags{"create trigger orders_bi"}, tags(r));
+  EXPECT_EQ(std::vector<std::string>{"CREATE TRIGGER `orders_bi` BEFORE INSERT ON `orders` FOR EACH ROW\nBEGIN\n  SET NEW.note = 'new';\nEND"},
+            migration(r));
+  EXPECT_EQ(std::vector<std::string>{"trigger-created"}, note_kinds(r));
+  const Schema *s = r.outline.catalog.find("shop");
+  ASSERT_NE(nullptr, s);
+  ASSERT_EQ(1u, s->triggers.size());
+  EXPECT_EQ("INSERT", s->triggers[0].events);
+  // Dropped again, the script is as it was.
+  EXPECT_EQ(k_shop, twice(k_shop, k_add_trigger, R"j({"op": "drop_trigger", "trigger": "orders_bi", "table": "orders"})j"));
+
+  auto refused = [](const std::string &edit_json) { return failed(edit(k_shop, {}, request("shop", edit_json))).kind; };
+  EXPECT_EQ("unknown-object", refused(R"j({"op": "add_trigger", "trigger": {"name": "x", "timing": "BEFORE", "events": "INSERT", "table": "v_orders", "body": "SET @a = 1"}})j"));
+  EXPECT_EQ("unknown-object", refused(R"j({"op": "add_trigger", "trigger": {"name": "x", "timing": "BEFORE", "events": "INSERT", "table": "nope", "body": "SET @a = 1"}})j"));
+  EXPECT_EQ("unknown-object", refused(R"j({"op": "add_trigger", "trigger": {"name": "x", "timing": "BEFORE", "events": "INSERT", "table": "orders", "body": "SET @a = 1", "order": {"kind": "FOLLOWS", "trigger": "nope"}}})j"));
+  EXPECT_EQ("bad-request", refused(R"j({"op": "add_trigger", "trigger": {"name": "x", "timing": "BEFORE", "events": "INSERT", "table": "orders", "body": "BEGIN SET FROM; END"}})j"));
+  EXPECT_EQ("name-taken", failed(edit(k_shop, {}, request("shop", std::string(k_add_trigger) + ", " + k_add_trigger))).kind);
+}
+
+TEST(Schema_edit, add_trigger_with_all_its_members) {
+  const std::string script = "CREATE TABLE t (a INT, b INT);\nCREATE TRIGGER t1 BEFORE UPDATE ON t FOR EACH ROW SET NEW.a = 1;\n";
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "add_trigger", "trigger": {"name": "t2", "timing": "before", "events": "update or insert", "table": "T", "update_columns": ["b"], "order": {"kind": "follows", "trigger": "T1"}, "definer": "`root`@`localhost`", "body": "SET NEW.b = 2"}})j")));
+  // After the last trigger; names as the request's objects spell them.
+  EXPECT_EQ(script +
+                "CREATE DEFINER=`root`@`localhost` TRIGGER t2 BEFORE UPDATE OR INSERT OF b ON t FOR EACH ROW FOLLOWS t1\n"
+                "  SET NEW.b = 2;\n",
+            text(r, ""));
+  const Schema *s = r.outline.catalog.find("");
+  ASSERT_NE(nullptr, s);
+  ASSERT_EQ(2u, s->triggers.size());
+  const Trigger &t = s->triggers[1];
+  EXPECT_EQ("UPDATE OR INSERT", t.events);
+  EXPECT_EQ(std::vector<std::string>{"b"}, t.update_columns);
+  EXPECT_EQ("FOLLOWS", t.order_kind);
+  EXPECT_EQ("t1", t.order_trigger);
+  EXPECT_EQ("t", t.table);
+}
+
+TEST(Schema_edit, a_trigger_goes_after_its_table) {
+  // Routines first, tables after them: the trigger goes after its table.
+  const std::string script = "CREATE PROCEDURE p() SELECT 1;\nCREATE TABLE t (a INT);\n";
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "add_trigger", "trigger": {"name": "x", "timing": "BEFORE", "events": "INSERT", "table": "t", "body": "SET NEW.a = 1"}})j")));
+  EXPECT_EQ(script + "CREATE TRIGGER x BEFORE INSERT ON t FOR EACH ROW SET NEW.a = 1;\n", text(r, ""));
+}
+
+TEST(Schema_edit, drop_trigger) {
+  const std::string script =
+      "CREATE TABLE t (a INT);\n"
+      "\n"
+      "DROP TRIGGER IF EXISTS t1;\n"
+      "CREATE TRIGGER t1 BEFORE INSERT ON t FOR EACH ROW SET NEW.a = 1;\n"
+      "CREATE TRIGGER t2 BEFORE INSERT ON t FOR EACH ROW FOLLOWS t1 SET NEW.a = 2;\n";
+  // t2 follows t1: its CREATE fails without t1.
+  EXPECT_EQ("referenced", failed(edit(script, {}, request("", R"j({"op": "drop_trigger", "trigger": "t1"})j"))).kind);
+  EXPECT_EQ("unknown-object", failed(edit(script, {}, request("", R"j({"op": "drop_trigger", "trigger": "t2", "table": "u"})j"))).kind);
+  EXPECT_EQ("unknown-object", failed(edit(script, {}, request("", R"j({"op": "drop_trigger", "trigger": "t3"})j"))).kind);
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "drop_trigger", "trigger": "t2"}, {"op": "drop_trigger", "trigger": "T1", "table": "T"})j")));
+  EXPECT_EQ("CREATE TABLE t (a INT);\n", text(r, ""));
+  EXPECT_EQ((Tags{"drop trigger t2", "drop trigger t1"}), tags(r));
+  EXPECT_EQ((std::vector<std::string>{"DROP TRIGGER `t2`", "DROP TRIGGER `t1`"}), migration(r));
+}
+
+TEST(Schema_edit, rename_trigger) {
+  const std::string script =
+      "CREATE TABLE t (a INT);\n"
+      "DELIMITER ;;\n"
+      "DROP TRIGGER IF EXISTS `t1`;;\n"
+      "/*!50003 CREATE*/ /*!50017 DEFINER=`root`@`localhost`*/ /*!50003 TRIGGER `t1` BEFORE INSERT ON `t` FOR EACH ROW BEGIN\n"
+      "  SET @msg = 't1';\n"
+      "END */;;\n"
+      "CREATE TRIGGER t2 BEFORE INSERT ON t FOR EACH ROW PRECEDES `t1` SET NEW.a = 2;;\n"
+      "DELIMITER ;\n";
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "rename_trigger", "trigger": "t1", "new_name": "t one"})j")));
+  EXPECT_EQ(
+      "CREATE TABLE t (a INT);\n"
+      "DELIMITER ;;\n"
+      "DROP TRIGGER IF EXISTS `t one`;;\n"
+      "/*!50003 CREATE*/ /*!50017 DEFINER=`root`@`localhost`*/ /*!50003 TRIGGER `t one` BEFORE INSERT ON `t` FOR EACH ROW BEGIN\n"
+      "  SET @msg = 't1';\n"
+      "END */;;\n"
+      "CREATE TRIGGER t2 BEFORE INSERT ON t FOR EACH ROW PRECEDES `t one` SET NEW.a = 2;;\n"
+      "DELIMITER ;\n",
+      text(r, ""));
+  EXPECT_EQ((Tags{"drop trigger t1", "create trigger t one"}), tags(r));
+  ASSERT_EQ(2u, migration(r).size());
+  EXPECT_EQ("DROP TRIGGER `t1`", migration(r)[0]);
+  EXPECT_EQ(0u, migration(r)[1].find("/*!50003 CREATE*/"));
+  EXPECT_EQ((std::vector<std::string>{"name-in-string", "trigger-recreated"}), note_kinds(r));
+  EXPECT_EQ("name-taken", failed(edit(script, {}, request("", R"j({"op": "rename_trigger", "trigger": "t1", "new_name": "T2"})j"))).kind);
+  // The same name again changes nothing to migrate.
+  EXPECT_EQ(Tags{}, tags(ok(edit(script, {}, request("", R"j({"op": "rename_trigger", "trigger": "t1", "new_name": "t1"})j")))));
+}
+
+TEST(Schema_edit, add_drop_and_rename_event) {
+  const auto r = ok(edit(k_shop, {}, request("shop", k_add_event)));
+  EXPECT_EQ(shop_with("END$$\n", "END$$\nCREATE EVENT `purge` ON SCHEDULE EVERY 1 DAY DO DELETE FROM `orders`$$\n"), text(r, ""));
+  EXPECT_EQ(Tags{"create event purge"}, tags(r));
+  EXPECT_EQ(std::vector<std::string>{"event-created"}, note_kinds(r));
+  EXPECT_EQ(k_shop, twice(k_shop, k_add_event, R"j({"op": "drop_event", "event": "purge"})j"));
+  EXPECT_EQ("name-taken", failed(edit(k_shop, {}, request("shop", std::string(k_add_event) + ", " + k_add_event))).kind);
+  EXPECT_EQ("bad-request", failed(edit(k_shop, {}, request("shop", R"j({"op": "add_event", "event": {"name": "e", "schedule": "EVERY DAY", "body": "SELECT 1"}})j"))).kind);
+
+  const std::string script =
+      "CREATE TABLE t (a INT);\n"
+      "DROP EVENT IF EXISTS e1;\n"
+      "CREATE EVENT e1 ON SCHEDULE EVERY 1 DAY DO DELETE FROM t;\n"
+      "ALTER EVENT e1 DISABLE;\n";
+  const auto rn = ok(edit(script, {}, request("", R"j({"op": "rename_event", "event": "E1", "new_name": "e2"})j")));
+  EXPECT_EQ(
+      "CREATE TABLE t (a INT);\n"
+      "DROP EVENT IF EXISTS e2;\n"
+      "CREATE EVENT e2 ON SCHEDULE EVERY 1 DAY DO DELETE FROM t;\n"
+      "ALTER EVENT e2 DISABLE;\n",
+      text(rn, ""));
+  EXPECT_EQ(Tags{"rename event e1 -> e2"}, tags(rn));
+  EXPECT_EQ(std::vector<std::string>{"ALTER EVENT `e1` RENAME TO `e2`"}, migration(rn));
+  // A change of case is no rename on the server.
+  EXPECT_EQ(Tags{}, tags(ok(edit(script, {}, request("", R"j({"op": "rename_event", "event": "e1", "new_name": "E1"})j")))));
+  const auto d = ok(edit(script, {}, request("", R"j({"op": "drop_event", "event": "e1"})j")));
+  EXPECT_EQ("CREATE TABLE t (a INT);\n", text(d, ""));
+  EXPECT_EQ(Tags{"drop event e1"}, tags(d));
+  EXPECT_EQ("unknown-object", failed(edit(script, {}, request("", R"j({"op": "drop_event", "event": "e9"})j"))).kind);
+}
+
+TEST(Schema_edit, msm_triggers_and_events_are_dropped_before_they_are_created) {
+  const auto r = ok(edit(msm_script(k_section_150), {}, request("shop", std::string(k_add_trigger) + ", " + k_add_event)));
+  // After the last routine, the event after the trigger, each with the
+  // blank line above the DROP it follows.
+  EXPECT_EQ(msm_script(shop_with_in(k_section_150, "END%%\n",
+                                    "END%%\n"
+                                    "\n"
+                                    "DROP TRIGGER IF EXISTS `orders_bi`%%\n"
+                                    "CREATE TRIGGER `orders_bi` BEFORE INSERT ON `orders` FOR EACH ROW\n"
+                                    "BEGIN\n"
+                                    "  SET NEW.note = 'new';\n"
+                                    "END%%\n"
+                                    "\n"
+                                    "DROP EVENT IF EXISTS `purge`%%\n"
+                                    "CREATE EVENT `purge` ON SCHEDULE EVERY 1 DAY DO DELETE FROM `orders`%%\n")),
+            text(r, ""));
+  EXPECT_EQ((Tags{"create trigger orders_bi", "create event purge"}), tags(r));
+  EXPECT_EQ(msm_script(k_section_150),
+            twice(msm_script(k_section_150), k_add_trigger, R"j({"op": "drop_trigger", "trigger": "orders_bi"})j"));
+  EXPECT_EQ(msm_script(k_section_150),
+            twice(msm_script(k_section_150), k_add_event, R"j({"op": "drop_event", "event": "purge"})j"));
+  // An empty Section 150.
+  const auto e = ok(edit(msm_script(""), {}, request("shop", k_add_trigger)));
+  EXPECT_EQ(msm_script("\n"
+                       "DELIMITER $$\n"
+                       "DROP TRIGGER IF EXISTS `orders_bi`$$\n"
+                       "CREATE TRIGGER `orders_bi` BEFORE INSERT ON `orders` FOR EACH ROW\n"
+                       "BEGIN\n"
+                       "  SET NEW.note = 'new';\n"
+                       "END$$\n"
+                       "DELIMITER ;\n"),
+            text(e, ""));
+}
+
+TEST(Schema_edit, rename_table_keeps_its_triggers) {
+  const std::string script =
+      "CREATE TABLE t (a INT);\n"
+      "CREATE TRIGGER t1 BEFORE INSERT ON t FOR EACH ROW SET NEW.a = 1;\n"
+      "CREATE EVENT e1 ON SCHEDULE EVERY 1 DAY DO DELETE FROM t;\n";
+  const auto r = ok(edit(script, {}, request("", rename_table("t", "u"))));
+  EXPECT_EQ(
+      "CREATE TABLE u (a INT);\n"
+      "CREATE TRIGGER t1 BEFORE INSERT ON u FOR EACH ROW SET NEW.a = 1;\n"
+      "CREATE EVENT e1 ON SCHEDULE EVERY 1 DAY DO DELETE FROM u;\n",
+      text(r, ""));
 }
 
 }  // namespace mdbls

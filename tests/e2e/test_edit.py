@@ -132,6 +132,8 @@ class Edit_fixture(unittest.TestCase):
         self.assertIn("add_table", ops)
         self.assertIn("drop_routine", ops)
         self.assertIn("set_primary_key", ops)
+        for op in ("add_trigger", "drop_trigger", "rename_trigger", "add_event", "drop_event", "rename_event"):
+            self.assertIn(op, ops)
 
     def test_ops_as_json(self):
         # What msm reads: a binary that answers `edit --ops` also tags its
@@ -377,6 +379,11 @@ SELECT 1;
 ADD_VIEW = {"op": "add_view", "view": {"name": "order_ids", "definition": "SELECT `id` FROM `orders`"}}
 ADD_ROUTINE = {"op": "add_routine", "routine": {
     "name": "count_orders", "kind": "procedure", "body": "BEGIN\n  SELECT COUNT(*) FROM `orders`;\nEND"}}
+# What the schema diagrams' tool palette sends.
+ADD_TRIGGER = {"op": "add_trigger", "trigger": {
+    "name": "orders_bi", "timing": "BEFORE", "events": "INSERT", "table": "orders", "body": "BEGIN\nEND"}}
+ADD_EVENT = {"op": "add_event", "event": {"name": "purge", "schedule": "EVERY 1 DAY",
+                                          "body": "DELETE FROM `orders`"}}
 
 
 class Edit_msm_sections(unittest.TestCase):
@@ -417,6 +424,20 @@ class Edit_msm_sections(unittest.TestCase):
         self.assertEqual([m["sql"].split("\n")[0] for m in result["migration"]],
                          ["CREATE PROCEDURE `count_orders`()"])
         self.apply([{"op": "drop_routine", "routine": "count_orders"}])
+        self.assertEqual(self.p.script, MSM_SCRIPT)
+
+    def test_a_trigger_and_an_event_are_dropped_before_their_create(self):
+        result = self.apply([ADD_TRIGGER, ADD_EVENT])
+        section = self.section(150)
+        self.assertIn("DROP TRIGGER IF EXISTS `orders_bi`%%\nCREATE TRIGGER `orders_bi` BEFORE INSERT ON `orders`",
+                      section)
+        self.assertIn("DROP EVENT IF EXISTS `purge`%%\nCREATE EVENT `purge` ON SCHEDULE EVERY 1 DAY", section)
+        self.assertEqual([(m["action"], m["object"], m["name"]) for m in result["migration"]],
+                         [("create", "trigger", "orders_bi"), ("create", "event", "purge")])
+        self.assertEqual([n["kind"] for n in result["notes"]], ["trigger-created", "event-created"])
+        # The palette's undo.
+        self.apply([{"op": "drop_event", "event": "purge"},
+                    {"op": "drop_trigger", "trigger": "orders_bi", "table": "orders"}])
         self.assertEqual(self.p.script, MSM_SCRIPT)
 
     def test_a_first_view_goes_into_section_150(self):
@@ -466,6 +487,61 @@ class Edit_mrs_project(unittest.TestCase):
         routines = (self.p.dev / "sections" / "150-20_procedures_functions.sql").read_text()
         self.assertIn("DROP PROCEDURE IF EXISTS `dump_the_audit_log`%%", routines)
         self.assertNotIn("dump_audit_log`", routines)
+
+    def test_rename_a_trigger_and_an_event_and_back(self):
+        files = {f: f.read_bytes() for f in self.p.dev.rglob("*.sql")}
+        code, result = self.p.edit([
+            {"op": "rename_trigger", "trigger": "config_AFTER_INSERT_AUDIT_LOG", "new_name": "config_ai"},
+            {"op": "rename_event", "event": "audit_log_dump_event", "new_name": "audit_log_dump"},
+        ], "mariadb_rest_service")
+        self.assertEqual(code, 0, result)
+        self.assertEqual([(m["action"], m["object"], m["name"]) for m in result["migration"]],
+                         [("drop", "trigger", "config_AFTER_INSERT_AUDIT_LOG"), ("create", "trigger", "config_ai"),
+                          ("rename", "event", "audit_log_dump_event")])
+        self.p.apply(result)
+        self.assertEqual(self.p.outline(), result["outline"])
+        triggers = (self.p.dev / "sections" / "150-40_audit_log_triggers.sql").read_text()
+        self.assertNotIn("`config_AFTER_INSERT_AUDIT_LOG`", triggers)
+        events = (self.p.dev / "sections" / "150-50_events.sql").read_text()
+        self.assertIn("DROP EVENT IF EXISTS `audit_log_dump`%%\nCREATE EVENT `audit_log_dump`", events)
+        check = self.p.run("check", "--source-dir", str(self.p.dev), "-")
+        self.assertEqual(check.returncode, 0, check.stdout.decode())
+        code, result = self.p.edit([
+            {"op": "rename_event", "event": "audit_log_dump", "new_name": "audit_log_dump_event"},
+            {"op": "rename_trigger", "trigger": "config_ai", "new_name": "config_AFTER_INSERT_AUDIT_LOG"},
+        ], "mariadb_rest_service")
+        self.assertEqual(code, 0, result)
+        self.p.apply(result)
+        self.assertEqual({f: f.read_bytes() for f in self.p.dev.rglob("*.sql")}, files)
+
+    def test_add_and_drop_a_trigger_and_an_event(self):
+        before = self.p.outline()
+        files = {f: f.read_bytes() for f in self.p.dev.rglob("*.sql")}
+        code, result = self.p.edit([
+            {"op": "add_trigger", "trigger": {"name": "url_host_bi", "timing": "BEFORE", "events": "INSERT",
+                                              "table": "url_host", "body": "BEGIN\nEND"}},
+            {"op": "add_event", "event": {"name": "event1", "schedule": "EVERY 1 DAY",
+                                          "body": "BEGIN\n  DELETE FROM `audit_log` WHERE FALSE;\nEND"}},
+        ], "mariadb_rest_service")
+        self.assertEqual(code, 0, result)
+        self.p.apply(result)
+        after = self.p.outline()
+        self.assertEqual(after, result["outline"])
+        self.assertEqual(len(after["notes"]), len(before["notes"]))
+        # After the last trigger and the last event, in their sections' files.
+        self.assertIn("DROP TRIGGER IF EXISTS `url_host_bi`%%",
+                      (self.p.dev / "sections" / "150-40_audit_log_triggers.sql").read_text())
+        self.assertIn("DROP EVENT IF EXISTS `event1`%%", (self.p.dev / "sections" / "150-50_events.sql").read_text())
+        check = self.p.run("check", "--source-dir", str(self.p.dev), "-")
+        self.assertEqual(check.returncode, 0, check.stdout.decode())
+        code, result = self.p.edit([
+            {"op": "drop_event", "event": "event1"},
+            {"op": "drop_trigger", "trigger": "url_host_bi", "table": "url_host"},
+        ], "mariadb_rest_service")
+        self.assertEqual(code, 0, result)
+        self.p.apply(result)
+        self.assertEqual(self.p.outline(), before)
+        self.assertEqual({f: f.read_bytes() for f in self.p.dev.rglob("*.sql")}, files)
 
     def test_keys_and_their_undo(self):
         before = self.p.outline()

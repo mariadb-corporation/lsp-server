@@ -59,6 +59,12 @@ enum class Edit_op {
   add_routine,
   drop_routine,
   set_primary_key,
+  add_trigger,
+  drop_trigger,
+  rename_trigger,
+  add_event,
+  drop_event,
+  rename_event,
 };
 
 // The request's `op` spelling; nullopt for an unknown one.
@@ -79,6 +85,8 @@ struct Schema_edit {
   std::string view;
   std::string routine;
   std::string routine_kind;  // procedure, function, or "" when not given
+  std::string trigger;       // drop_trigger, rename_trigger
+  std::string event;         // drop_event, rename_event
   std::string new_name;
   // add_table: the table; its columns, keys, checks, options.
   std::optional<Table> new_table;
@@ -88,6 +96,8 @@ struct Schema_edit {
   bool first = false;  // add_column: first
   std::optional<View> new_view;        // add_view
   std::optional<Routine> new_routine;  // add_routine
+  std::optional<Trigger> new_trigger;  // add_trigger
+  std::optional<Event> new_event;      // add_event
   // set_table_options: outline option name and value; nullopt removes it.
   std::vector<std::pair<std::string, std::optional<std::string>>> options;
   std::optional<Index> new_index;              // add_index
@@ -127,7 +137,8 @@ struct Edited_file {
 
 // Something an edit could not do itself, for a person to check.  `kind` is
 // stable: name-in-string, rest-reference, routine-recreated,
-// routine-created, still-referenced, no-migration.
+// routine-created, still-referenced, no-migration, trigger-created,
+// trigger-recreated, event-created.
 struct Edit_note {
   size_t edit = 0;
   std::string kind;
@@ -138,10 +149,11 @@ struct Edit_note {
 };
 
 // What a migration statement does (docs/edit-format.md, Migration):
-// create and drop a table, view or routine; add and drop a table's member.
+// create and drop a table, view, routine, trigger or event; add and drop a
+// table's member.
 enum class Migration_action : uint8_t { create, drop, add, alter, rename };
 enum class Migration_object : uint8_t {
-  table, view, procedure, function,                             // objects
+  table, view, procedure, function, trigger, event,             // objects
   column, index, primary_key, foreign_key, table_options,       // a table's members
 };
 const char *to_string(Migration_action a);

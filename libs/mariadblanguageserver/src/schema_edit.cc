@@ -71,6 +71,12 @@ constexpr Op_name k_ops[] = {
     {Edit_op::add_routine, "add_routine"},
     {Edit_op::drop_routine, "drop_routine"},
     {Edit_op::set_primary_key, "set_primary_key"},
+    {Edit_op::add_trigger, "add_trigger"},
+    {Edit_op::drop_trigger, "drop_trigger"},
+    {Edit_op::rename_trigger, "rename_trigger"},
+    {Edit_op::add_event, "add_event"},
+    {Edit_op::drop_event, "drop_event"},
+    {Edit_op::rename_event, "rename_event"},
 };
 
 // The longest name the server takes for a table, column or routine.
@@ -191,6 +197,8 @@ const char *to_string(Migration_object o) {
     case Migration_object::view: return "view";
     case Migration_object::procedure: return "procedure";
     case Migration_object::function: return "function";
+    case Migration_object::trigger: return "trigger";
+    case Migration_object::event: return "event";
     case Migration_object::column: return "column";
     case Migration_object::index: return "index";
     case Migration_object::primary_key: return "primary_key";
@@ -646,6 +654,97 @@ std::optional<Routine> read_routine(Json_reader &r, const Json &v) {
   return rt;
 }
 
+// The events of a trigger, `INSERT`, `UPDATE OR DELETE`: upper-cased, one
+// OR between two, each at most once; "" when they are not.
+std::string trigger_events(std::string_view events) {
+  std::vector<std::string> words;
+  std::string w;
+  for (const char c : events) {
+    if (std::isspace(static_cast<unsigned char>(c))) {
+      if (!w.empty()) words.push_back(upper(w));
+      w.clear();
+    } else {
+      w += c;
+    }
+  }
+  if (!w.empty()) words.push_back(upper(w));
+  if (words.size() % 2 == 0) return "";
+  std::set<std::string> seen;
+  std::string out;
+  for (size_t k = 0; k < words.size(); ++k) {
+    if (k % 2 == 1) {
+      if (words[k] != "OR") return "";
+      out += " OR ";
+      continue;
+    }
+    if (words[k] != "INSERT" && words[k] != "UPDATE" && words[k] != "DELETE") return "";
+    if (!seen.insert(words[k]).second) return "";
+    out += words[k];
+  }
+  return out;
+}
+
+std::optional<Trigger> read_trigger(Json_reader &r, const Json &v) {
+  const std::string what = "\"trigger\"";
+  if (!r.object(v, what, {"name", "timing", "events", "table", "body", "order", "definer", "update_columns"})) {
+    return std::nullopt;
+  }
+  Trigger t;
+  r.str(v, "name", &t.name, true, what);
+  const std::string w = "trigger `" + t.name + "`";
+  r.choice(v, "timing", &t.timing, {"BEFORE", "AFTER"}, w);
+  if (r.ok() && t.timing.empty()) r.fail(w + " has no \"timing\"");
+  std::string events;
+  r.str(v, "events", &events, true, w);
+  if (r.ok()) {
+    t.events = trigger_events(events);
+    if (t.events.empty()) {
+      r.fail("\"events\" of " + w + " is not INSERT, UPDATE or DELETE, or several of them joined by OR: " + events);
+    }
+  }
+  r.str(v, "table", &t.table, true, w);
+  std::string body;
+  r.str(v, "body", &body, true, w);
+  if (r.ok() && trim(body).empty()) r.fail(w + " has an empty \"body\"");
+  t.body = body;
+  if (r.ok() && Json_reader::given(v, "order")) {
+    const Json &o = v["order"];
+    const std::string ow = "\"order\" of " + w;
+    if (r.object(o, ow, {"kind", "trigger"})) {
+      r.choice(o, "kind", &t.order_kind, {"FOLLOWS", "PRECEDES"}, ow);
+      if (r.ok() && t.order_kind.empty()) r.fail(ow + " has no \"kind\"");
+      r.str(o, "trigger", &t.order_trigger, true, ow);
+    }
+  }
+  r.str(v, "definer", &t.definer, false, w);
+  r.strings(v, "update_columns", &t.update_columns, false, w);
+  if (r.ok() && !t.update_columns.empty() && t.events.find("UPDATE") == std::string::npos) {
+    r.fail(w + ": \"update_columns\" needs the UPDATE event");
+  }
+  if (!r.ok()) return std::nullopt;
+  return t;
+}
+
+std::optional<Event> read_event(Json_reader &r, const Json &v) {
+  const std::string what = "\"event\"";
+  if (!r.object(v, what, {"name", "schedule", "on_completion_preserve", "status", "comment", "body", "definer"})) {
+    return std::nullopt;
+  }
+  Event e;
+  r.str(v, "name", &e.name, true, what);
+  const std::string w = "event `" + e.name + "`";
+  r.str(v, "schedule", &e.schedule, true, w);
+  if (r.ok() && trim(e.schedule).empty()) r.fail(w + " has an empty \"schedule\"");
+  r.opt_bool(v, "on_completion_preserve", &e.on_completion_preserve, w);
+  r.choice(v, "status", &e.status, {"ENABLE", "DISABLE", "DISABLE ON SLAVE"}, w);
+  r.opt_str(v, "comment", &e.comment, w);
+  r.str(v, "body", &e.body, true, w);
+  if (r.ok() && trim(e.body).empty()) r.fail(w + " has an empty \"body\"");
+  r.str(v, "definer", &e.definer, false, w);
+  if (!r.ok()) return std::nullopt;
+  return e;
+}
+
 // A name the server takes for a table, column, view or routine.
 std::optional<std::string> bad_name(const std::string &name) {
   if (char_count(name) > k_max_name_characters) return "the name `" + name + "` is longer than 64 characters";
@@ -828,6 +927,35 @@ std::variant<Edit_request, Edit_error> parse_edit_request(std::string_view json)
         members({"op", "table", "columns"});
         name("table", &se.table);
         r.strings(e, "columns", &se.columns, true, what);
+        break;
+      case Edit_op::add_trigger:
+        members({"op", "trigger"});
+        if (const Json *t = object("trigger")) se.new_trigger = read_trigger(r, *t);
+        if (se.new_trigger) names_to_check.push_back(se.new_trigger->name);
+        break;
+      case Edit_op::drop_trigger:
+        members({"op", "trigger", "table"});
+        name("trigger", &se.trigger);
+        name("table", &se.table, false);
+        break;
+      case Edit_op::rename_trigger:
+        members({"op", "trigger", "new_name"});
+        name("trigger", &se.trigger);
+        name("new_name", &se.new_name);
+        break;
+      case Edit_op::add_event:
+        members({"op", "event"});
+        if (const Json *v = object("event")) se.new_event = read_event(r, *v);
+        if (se.new_event) names_to_check.push_back(se.new_event->name);
+        break;
+      case Edit_op::drop_event:
+        members({"op", "event"});
+        name("event", &se.event);
+        break;
+      case Edit_op::rename_event:
+        members({"op", "event", "new_name"});
+        name("event", &se.event);
+        name("new_name", &se.new_name);
         break;
       default:
         break;
@@ -1065,6 +1193,22 @@ class Lookup {
     }
     return {nullptr, nullptr};
   }
+  std::pair<const Schema *, const Trigger *> trigger(std::string_view name) const {
+    for (const Schema *s : m_schemas) {
+      for (const auto &t : s->triggers) {
+        if (iequals(t.name, name)) return {s, &t};
+      }
+    }
+    return {nullptr, nullptr};
+  }
+  std::pair<const Schema *, const Event *> event(std::string_view name) const {
+    for (const Schema *s : m_schemas) {
+      for (const auto &e : s->events) {
+        if (iequals(e.name, name)) return {s, &e};
+      }
+    }
+    return {nullptr, nullptr};
+  }
   // The routines of that name, of `kind` when it is not "".
   std::vector<std::pair<const Schema *, const Routine *>> routines(std::string_view name,
                                                                    std::string_view kind) const {
@@ -1286,6 +1430,12 @@ class Editor {
       case Edit_op::set_primary_key: err = set_primary_key(i, e, changes); break;
       case Edit_op::add_foreign_key: err = add_foreign_key(i, e, changes); break;
       case Edit_op::drop_foreign_key: err = drop_foreign_key(i, e, changes); break;
+      case Edit_op::add_trigger: err = add_trigger(i, e, changes); break;
+      case Edit_op::drop_trigger: err = drop_trigger(i, e, changes); break;
+      case Edit_op::rename_trigger: err = rename_trigger(i, e, changes); break;
+      case Edit_op::add_event: err = add_event(i, e, changes); break;
+      case Edit_op::drop_event: err = drop_event(i, e, changes); break;
+      case Edit_op::rename_event: err = rename_event(i, e, changes); break;
       default:
         return error(i, "unsupported", std::string("this binary does not do ") + to_string(e.op) + " yet");
     }
@@ -1975,23 +2125,47 @@ class Editor {
     std::optional<size_t> k;
     const Origin *origin = nullptr;
     std::string name;
-    Target_kind kind = Target_kind::none;  // table, view or routine
+    Target_kind kind = Target_kind::none;  // table, view or routine; none for the others
+    std::string_view type;                 // table, view, routine, trigger, event
   };
-  // The object of `objects` (a schema's tables, views or routines) placed
-  // last in the searched text, within searched range `within` when given.
+  // The object of `objects` (a schema's tables, views, routines, triggers or
+  // events) placed last in the searched text, within searched range
+  // `within` when given.
   template <typename T>
   Anchor last_of(const std::vector<T> &objects, std::optional<Range> within = std::nullopt) const {
-    static_assert(std::is_same_v<T, Table> || std::is_same_v<T, View> || std::is_same_v<T, Routine>);
-    constexpr Target_kind kind = std::is_same_v<T, Table>  ? Target_kind::table
-                                 : std::is_same_v<T, View> ? Target_kind::view
-                                                           : Target_kind::routine;
+    static_assert(std::is_same_v<T, Table> || std::is_same_v<T, View> || std::is_same_v<T, Routine> ||
+                  std::is_same_v<T, Trigger> || std::is_same_v<T, Event>);
+    constexpr Target_kind kind = std::is_same_v<T, Table>     ? Target_kind::table
+                                 : std::is_same_v<T, View>    ? Target_kind::view
+                                 : std::is_same_v<T, Routine> ? Target_kind::routine
+                                                              : Target_kind::none;
+    constexpr std::string_view type = std::is_same_v<T, Table>     ? "table"
+                                      : std::is_same_v<T, View>    ? "view"
+                                      : std::is_same_v<T, Routine> ? "routine"
+                                      : std::is_same_v<T, Trigger> ? "trigger"
+                                                                   : "event";
     Anchor best;
     for (const auto &o : objects) {
       const auto k = statement_of(o.origin);
       if (!k || (within && (statement(*k).begin < within->begin || statement(*k).begin >= within->end))) continue;
-      if (!best.k || *k > *best.k) best = {k, &o.origin, o.name, kind};
+      if (!best.k || *k > *best.k) best = {k, &o.origin, o.name, kind, type};
     }
     return best;
+  }
+  // The last object of schema `h` of the first type of `types` (table,
+  // view, routine, trigger, event) that has one, within `within` when given.
+  Anchor last_in(const Schema &h, std::initializer_list<std::string_view> types,
+                 std::optional<Range> within = std::nullopt) const {
+    for (const std::string_view t : types) {
+      Anchor a;
+      if (t == "table") a = last_of(h.tables, within);
+      else if (t == "view") a = last_of(h.views, within);
+      else if (t == "routine") a = last_of(h.routines, within);
+      else if (t == "trigger") a = last_of(h.triggers, within);
+      else if (t == "event") a = last_of(h.events, within);
+      if (a.k) return a;
+    }
+    return {};
   }
 
   // The start of an MSM section's marker line: `-- MSM Section 150: ...`.
@@ -2871,6 +3045,257 @@ class Editor {
     return drop_statements(i, gone, id, name, kind + " `" + name + "`", kind, routine_object(kind), changes);
   }
 
+
+  // ---------------------------------------------------------------------
+  // Triggers and events
+
+  // The searched range of the name a CREATE, ALTER or DROP statement `k` of
+  // keyword `kind` (TRIGGER, EVENT) is about: the last part of a qualified
+  // name.
+  std::optional<Range> subject_name_range(size_t k, std::string_view kind) const {
+    const std::string_view sql = index().text_of(text(), statement(k));
+    const auto w = words_of(sql, 48);
+    size_t j = 1;
+    while (j < w.size() && j < 24 && (w[j].quoted || w[j].punct || !iequals(w[j].text, kind))) ++j;
+    if (j >= w.size() || j >= 24) return std::nullopt;
+    ++j;
+    auto is = [&](size_t x, const char *word) { return x < w.size() && !w[x].quoted && iequals(w[x].text, word); };
+    if (is(j, "IF")) {
+      ++j;
+      if (is(j, "NOT")) ++j;
+      if (is(j, "EXISTS")) ++j;
+    }
+    if (j >= w.size() || w[j].punct) return std::nullopt;
+    if (j + 2 < w.size() && w[j + 1].punct && w[j + 1].text == "." && !w[j + 2].punct) j += 2;
+    const auto at = static_cast<uint32_t>(w[j].text.data() - text().data());
+    return Range{at, at + static_cast<uint32_t>(w[j].text.size())};
+  }
+
+  // The searched range of the trigger a CREATE TRIGGER statement `k` names
+  // in its FOLLOWS or PRECEDES.
+  std::optional<Range> order_name_range(size_t k) const {
+    const std::string_view sql = index().text_of(text(), statement(k));
+    const auto w = words_of(sql, 400);
+    auto is = [&](size_t x, const char *word) { return x < w.size() && !w[x].quoted && iequals(w[x].text, word); };
+    for (size_t j = 2; j + 1 < w.size(); ++j) {
+      if (!is(j - 2, "FOR") || !is(j - 1, "EACH") || !is(j, "ROW")) continue;
+      if (!is(j + 1, "FOLLOWS") && !is(j + 1, "PRECEDES")) return std::nullopt;
+      if (j + 2 >= w.size() || w[j + 2].punct) return std::nullopt;
+      const auto at = static_cast<uint32_t>(w[j + 2].text.data() - text().data());
+      return Range{at, at + static_cast<uint32_t>(w[j + 2].text.size())};
+    }
+    return std::nullopt;
+  }
+
+  // Rewrites the subject name of every statement about `name` (its CREATE,
+  // ALTER, DROP [IF EXISTS]) of keyword `kind` to `new_name`.
+  std::optional<Edit_error> rename_subjects(size_t i, const std::string &kind, const std::string &name,
+                                            const std::string &schema, const std::string &new_name,
+                                            Changes &changes) {
+    const auto ks = statements_about(kind, name, schema);
+    if (ks.empty()) return error(i, "self-check", "the CREATE " + kind + " of `" + name + "` is not found");
+    for (const size_t k : ks) {
+      const auto r = subject_name_range(k, kind);
+      if (!r) return error(i, "self-check", "the name of a statement on `" + name + "` is not found");
+      const std::string token(text().substr(r->begin, r->end - r->begin));
+      if (!change(changes, r->begin, r->end, spell_like(token, new_name))) {
+        return error(i, "edit-outside-slice", "the name of a statement on `" + name + "` cannot be changed");
+      }
+    }
+    return std::nullopt;
+  }
+
+  // Where a new trigger or event goes: after the last object of the home
+  // schema of the first of `types` that has one; in an MSM script within
+  // Section 150 (which every deployment runs again), else at its end.
+  // `msm`: the script has MSM sections.
+  Place place_after(std::initializer_list<std::string_view> types, bool *msm) const {
+    const Schema *h = home();
+    const auto r = msm_section(150);
+    *msm = r.has_value();
+    Place p;
+    if (h != nullptr) {
+      if (r) {
+        std::vector<std::string_view> in150;
+        for (const auto t : types) {
+          if (t != "table") in150.push_back(t);
+        }
+        for (const auto t : in150) {
+          p.anchor = last_in(*h, {t}, r);
+          if (p.anchor.k) break;
+        }
+      } else {
+        p.anchor = last_in(*h, types);
+      }
+    }
+    if (r && !p.anchor.k) p.spot = end_of_section(*r, style_at(std::nullopt, std::nullopt).eol);
+    return p;
+  }
+
+  // Inserts the CREATE `sql` (of a trigger or event, `keyword` TRIGGER or
+  // EVENT) at `place`, as the object it follows of its own type is written:
+  // dropped first or CREATE OR REPLACE, and in an MSM script always one of
+  // the two.  `make` writes the CREATE, given whether it is OR REPLACE.  The
+  // file and offset it went to, and the statement as laid out.
+  template <typename Make>
+  std::optional<Edit_error> insert_create(size_t i, const Place &place, bool msm, std::string_view type,
+                                          const std::string &keyword, const std::string &name, Make make,
+                                          std::pair<size_t, uint32_t> *at, std::string *laid, Changes &changes) {
+    // The blank lines above the object it follows count from that one's
+    // DROP ... IF EXISTS, whatever its type; its form only from its own type.
+    const Form after = place.anchor.k ? form_at(*place.anchor.k, place.anchor.name) : Form{};
+    const Form form = place.anchor.type == type ? after : Form{};
+    const edit_text::Style st = style_of(place.anchor);
+    const std::string sql = make(st, form.or_replace);
+    const bool drop_first = form.drop || (msm && !form.or_replace);
+    const std::string drop = drop_first ? st.kw("DROP " + keyword + " IF EXISTS") + " " + st.id(name) : "";
+    const std::string noun = lower(keyword) + " `" + name + "`";
+    if (const auto p = parse_problem(sql)) return error(i, "bad-request", noun + " does not parse (" + *p + ")");
+    *laid = laid_out(sql, st, true);
+    const auto where = insert_at(changes, spot_of(place, st, after.drop), *laid, st,
+                                 laid->find(';') != std::string::npos, drop);
+    if (!where) return error(i, "self-check", "no place for the CREATE of " + noun + " was found");
+    *at = *where;
+    return std::nullopt;
+  }
+
+  std::optional<Edit_error> add_trigger(size_t i, const Schema_edit &e, Changes &changes) {
+    Trigger t = *e.new_trigger;
+    const auto l = lookup();
+    const Table *table = l.table(t.table).second;
+    if (table == nullptr) {
+      if (l.view(t.table).second != nullptr) {
+        return error(i, "unknown-object", "`" + t.table + "` is a view: a trigger goes on a table");
+      }
+      return error(i, "unknown-object", "there is no table `" + t.table + "`");
+    }
+    t.table = table->name;
+    if (const Trigger *x = l.trigger(t.name).second) {
+      return error(i, "name-taken", "a trigger `" + t.name + "` exists on table `" + x->table + "`");
+    }
+    if (!t.order_kind.empty()) {
+      const Trigger *o = l.trigger(t.order_trigger).second;
+      if (o == nullptr || !iequals(o->table, table->name)) {
+        return error(i, "unknown-object",
+                     "there is no trigger `" + t.order_trigger + "` on table `" + table->name + "` to " +
+                         lower(t.order_kind));
+      }
+      t.order_trigger = o->name;
+    }
+    bool msm = false;
+    Place place = place_after({"trigger", "routine", "view", "table"}, &msm);
+    // Not before its table: a script that creates its routines first.
+    if (const auto kt = statement_of(table->origin); kt && (!place.anchor.k || *place.anchor.k < *kt) && !place.spot) {
+      place.anchor = Anchor{kt, &table->origin, table->name, Target_kind::table, "table"};
+    }
+    std::pair<size_t, uint32_t> at;
+    std::string laid;
+    if (auto err = insert_create(
+            i, place, msm, "trigger", "TRIGGER", t.name,
+            [&](const edit_text::Style &st, bool or_replace) { return edit_text::create_trigger_sql(t, st, or_replace); },
+            &at, &laid, changes)) {
+      return err;
+    }
+    migrate(i, laid, Act::create, Obj::trigger, t.name);
+    note_at(i, "trigger-created", at.first, m_s.files()[at.first].log.to_original(at.second),
+            "the migration creates the trigger `" + t.name +
+                "`, which cannot run inside a stored procedure: msm or a person must place it");
+    return std::nullopt;
+  }
+
+  std::optional<Edit_error> drop_trigger(size_t i, const Schema_edit &e, Changes &changes) {
+    const auto [schema, trigger] = lookup().trigger(e.trigger);
+    if (trigger == nullptr) return error(i, "unknown-object", "there is no trigger `" + e.trigger + "`");
+    if (!e.table.empty() && !iequals(trigger->table, e.table)) {
+      return error(i, "unknown-object", "trigger `" + trigger->name + "` is on `" + trigger->table + "`, not `" +
+                                            e.table + "`");
+    }
+    const std::string name = trigger->name;
+    // A trigger another one follows or precedes stays: that one's CREATE
+    // fails without it.
+    for (const auto &x : schema->triggers) {
+      if (iequals(x.order_trigger, name) && !iequals(x.name, name)) {
+        return error(i, "referenced", "trigger `" + x.name + "` " + lower(x.order_kind) + " `" + name + "`");
+      }
+    }
+    std::vector<std::pair<size_t, std::string>> gone;
+    for (const size_t k : statements_about("TRIGGER", name, schema->name)) gone.push_back({k, name});
+    return drop_statements(i, gone, std::nullopt, name, "trigger `" + name + "`", "trigger", Obj::trigger, changes);
+  }
+
+  std::optional<Edit_error> rename_trigger(size_t i, const Schema_edit &e, Changes &changes) {
+    const auto l = lookup();
+    const auto [schema, trigger] = l.trigger(e.trigger);
+    if (trigger == nullptr) return error(i, "unknown-object", "there is no trigger `" + e.trigger + "`");
+    if (!iequals(trigger->name, e.new_name) && l.trigger(e.new_name).second != nullptr) {
+      return error(i, "name-taken", "a trigger `" + e.new_name + "` exists");
+    }
+    const std::string old_name = trigger->name;
+    string_notes(i, {old_name}, "trigger `" + old_name + "`");
+    if (auto err = rename_subjects(i, "TRIGGER", old_name, schema->name, e.new_name, changes)) return err;
+    for (const auto &x : schema->triggers) {
+      if (!iequals(x.order_trigger, old_name) || iequals(x.name, old_name)) continue;
+      const auto k = statement_of(x.origin);
+      const auto r = k ? order_name_range(*k) : std::nullopt;
+      if (!r) return error(i, "self-check", "the FOLLOWS or PRECEDES of trigger `" + x.name + "` is not found");
+      const std::string token(text().substr(r->begin, r->end - r->begin));
+      if (!change(changes, r->begin, r->end, spell_like(token, e.new_name))) {
+        return error(i, "edit-outside-slice", "the FOLLOWS or PRECEDES of trigger `" + x.name + "` cannot be changed");
+      }
+    }
+    m_old_name = old_name;
+    return std::nullopt;
+  }
+
+  std::optional<Edit_error> add_event(size_t i, const Schema_edit &e, Changes &changes) {
+    const Event &ev = *e.new_event;
+    if (lookup().event(ev.name).second != nullptr) return error(i, "name-taken", "an event `" + ev.name + "` exists");
+    bool msm = false;
+    const Place place = place_after({"event", "trigger", "routine", "view", "table"}, &msm);
+    std::pair<size_t, uint32_t> at;
+    std::string laid;
+    if (auto err = insert_create(
+            i, place, msm, "event", "EVENT", ev.name,
+            [&](const edit_text::Style &st, bool or_replace) { return edit_text::create_event_sql(ev, st, or_replace); },
+            &at, &laid, changes)) {
+      return err;
+    }
+    migrate(i, laid, Act::create, Obj::event, ev.name);
+    note_at(i, "event-created", at.first, m_s.files()[at.first].log.to_original(at.second),
+            "the migration creates the event `" + ev.name +
+                "`, which cannot run inside a stored procedure: msm or a person must place it");
+    return std::nullopt;
+  }
+
+  std::optional<Edit_error> drop_event(size_t i, const Schema_edit &e, Changes &changes) {
+    const auto [schema, event] = lookup().event(e.event);
+    if (event == nullptr) return error(i, "unknown-object", "there is no event `" + e.event + "`");
+    const std::string name = event->name;
+    std::vector<std::pair<size_t, std::string>> gone;
+    for (const size_t k : statements_about("EVENT", name, schema->name)) gone.push_back({k, name});
+    return drop_statements(i, gone, std::nullopt, name, "event `" + name + "`", "event", Obj::event, changes);
+  }
+
+  std::optional<Edit_error> rename_event(size_t i, const Schema_edit &e, Changes &changes) {
+    const auto l = lookup();
+    const auto [schema, event] = l.event(e.event);
+    if (event == nullptr) return error(i, "unknown-object", "there is no event `" + e.event + "`");
+    if (!iequals(event->name, e.new_name) && l.event(e.new_name).second != nullptr) {
+      return error(i, "name-taken", "an event `" + e.new_name + "` exists");
+    }
+    const std::string old_name = event->name;
+    string_notes(i, {old_name}, "event `" + old_name + "`");
+    if (auto err = rename_subjects(i, "EVENT", old_name, schema->name, e.new_name, changes)) return err;
+    // Event names do not tell case apart: a change of case has nothing to
+    // migrate.
+    if (!iequals(old_name, e.new_name)) {
+      migrate(i, "ALTER EVENT " + backtick_quote(old_name) + " RENAME TO " + backtick_quote(e.new_name), Act::rename,
+              Obj::event, old_name, e.new_name);
+    }
+    m_old_name = old_name;
+    return std::nullopt;
+  }
+
   // ---------------------------------------------------------------------
   // Indexes and foreign keys (PR 3)
 
@@ -3504,6 +3929,65 @@ class Editor {
           return fail("the edited script still has the " + m_routine_kind + " `" + old_name + "`");
         }
         break;
+      case Edit_op::add_trigger: {
+        const Trigger &want = *e.new_trigger;
+        const Trigger *t = l.trigger(want.name).second;
+        if (t == nullptr || t->name != want.name || !iequals(t->table, want.table)) {
+          return fail("the edited script has no trigger `" + want.name + "` on `" + want.table + "`");
+        }
+        break;
+      }
+      case Edit_op::drop_trigger:
+        if (l.trigger(old_name).second != nullptr) return fail("the edited script still has trigger `" + old_name + "`");
+        break;
+      case Edit_op::rename_trigger: {
+        const auto [sc, t] = l.trigger(e.new_name);
+        if (t == nullptr || t->name != e.new_name) return fail("the edited script has no trigger `" + e.new_name + "`");
+        if (!case_only) {
+          if (l.trigger(old_name).second != nullptr) {
+            return fail("the edited script still has trigger `" + old_name + "`");
+          }
+          for (const Schema *s : l.schemas()) {
+            for (const auto &x : s->triggers) {
+              if (iequals(x.order_trigger, old_name)) {
+                return fail("trigger `" + x.name + "` still follows or precedes `" + old_name + "`");
+              }
+            }
+          }
+        }
+        if (old_name == e.new_name) break;  // the same name again: nothing to migrate
+        // No statement renames a trigger: drop it, create it again, from
+        // the expanded text.
+        const auto at = m_s.to_searched(t->origin.source, t->origin.statement.begin);
+        const auto &index = m_s.searched_index();
+        const size_t k = at ? index.find(*at) : index.statements().size();
+        if (k >= index.statements().size()) return fail("the CREATE of `" + e.new_name + "` is not found");
+        migrate_drop(i, Obj::trigger, old_name);
+        migrate(i, std::string(trim(index.text_of(m_s.searched(), index.statements()[k]))), Act::create,
+                Obj::trigger, e.new_name);
+        note(i, "trigger-recreated", t->origin.source, t->origin.statement.begin,
+             "no statement renames a trigger: the migration drops `" + old_name + "` and creates `" + e.new_name +
+                 "`, which cannot run inside a stored procedure");
+        break;
+      }
+      case Edit_op::add_event: {
+        const Event *ev = l.event(e.new_event->name).second;
+        if (ev == nullptr || ev->name != e.new_event->name) {
+          return fail("the edited script has no event `" + e.new_event->name + "`");
+        }
+        break;
+      }
+      case Edit_op::drop_event:
+        if (l.event(old_name).second != nullptr) return fail("the edited script still has event `" + old_name + "`");
+        break;
+      case Edit_op::rename_event: {
+        const Event *ev = l.event(e.new_name).second;
+        if (ev == nullptr || ev->name != e.new_name) return fail("the edited script has no event `" + e.new_name + "`");
+        if (!case_only && l.event(old_name).second != nullptr) {
+          return fail("the edited script still has event `" + old_name + "`");
+        }
+        break;
+      }
       default:
         break;
     }
