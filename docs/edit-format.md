@@ -170,7 +170,7 @@ has above it (a banner's comment lines not counted); no banner is written.
   that the script and the server agree on it and a later drop can name it: an index its first
   column's name (`customer_id`, then `customer_id_2`, ... among the table's indexes, as the
   server names one), a foreign key `fk_<table>_<referenced table>` (then `_2`, ... among the
-  schema's foreign keys); at most 64 bytes. A primary key needs none (`PRIMARY`).
+  schema's foreign keys); at most 64 characters. A primary key needs none (`PRIMARY`).
 - **`set_primary_key`** with the columns the key has already changes nothing. Its migration is
   one statement, `DROP PRIMARY KEY, ADD PRIMARY KEY (...)`: a `DROP PRIMARY KEY` of its own
   fails when an `AUTO_INCREMENT` column is the key. Use `drop_index` and `add_index` for key
@@ -228,7 +228,7 @@ Each statement says what it does, so a program need not read its SQL:
 | --- | --- |
 | `action` | `create`, `drop` (a table, view or routine); `add`, `drop` (a member of a table); `alter`; `rename` |
 | `object` | `table`, `view`, `procedure`, `function`; `column`, `index`, `primary_key`, `foreign_key`, `table_options` |
-| `name` | the object's name before the edit; `PRIMARY` for a primary key; for `table_options`, the table's |
+| `name` | the object's name before the edit (for a `create` or `add`, the new object's); `PRIMARY` for a primary key; for `table_options`, the table's |
 | `table` | a member's table (as named when the statement runs); left out for a table, view or routine |
 | `new_name` | the name after a `rename`, or after an `alter` of a column that `CHANGE COLUMN` renames; left out otherwise |
 

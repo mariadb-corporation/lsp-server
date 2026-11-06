@@ -108,6 +108,12 @@ class Edit_project:
         return json.loads(answer.stdout)
 
 
+def help_ops():
+    """The ops on the `edit ops:` line of --help."""
+    answer = subprocess.run([BINARY, "--help"], capture_output=True, text=True)
+    return re.search(r"(?m)^ +edit ops: (.*)$", answer.stdout).group(1).split()
+
+
 def table_names(outline):
     return [t["name"] for s in outline["schemas"] for t in s["tables"]]
 
@@ -121,7 +127,7 @@ class Edit_fixture(unittest.TestCase):
         answer = subprocess.run([BINARY, "--help"], capture_output=True, text=True)
         self.assertRegex(answer.stdout, r"(?m)^  edit ")
         # And the ops it does by this one.
-        ops = re.search(r"(?m)^ +edit ops: (.*)$", answer.stdout).group(1).split()
+        ops = help_ops()
         self.assertIn("rename_table", ops)
         self.assertIn("add_table", ops)
         self.assertIn("drop_routine", ops)
@@ -134,8 +140,10 @@ class Edit_fixture(unittest.TestCase):
         self.assertEqual(answer.returncode, 0, answer.stderr)
         listed = json.loads(answer.stdout)
         self.assertEqual(listed["format"], 1)
-        help_text = subprocess.run([BINARY, "--help"], capture_output=True, text=True).stdout
-        self.assertEqual(listed["ops"], re.search(r"(?m)^ +edit ops: (.*)$", help_text).group(1).split())
+        self.assertEqual(listed["ops"], help_ops())
+        # In any order of the arguments.
+        self.assertEqual(subprocess.run([BINARY, "--ops", "edit"], capture_output=True, text=True).stdout,
+                         answer.stdout)
 
     def test_rename_across_includes(self):
         code, result = self.p.edit([

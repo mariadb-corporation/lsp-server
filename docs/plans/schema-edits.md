@@ -488,7 +488,7 @@ migration into the update script's sections by reading its SQL with regexes. Eac
 statement now says what it does: `action` (`create`/`drop` for tables, views and routines,
 `add`/`drop` for a table's members, `alter`, `rename`), `object` (`table`, `view`,
 `procedure`, `function`, `column`, `index`, `primary_key`, `foreign_key`, `table_options`),
-`name` (before the edit; `PRIMARY` for a primary key), `table` for a member and `new_name`
+`name` (before the edit, the new one's for a create or add; `PRIMARY` for a primary key), `table` for a member and `new_name`
 for a rename. The 1833 sequence of `modify_column` is tagged statement by statement (`drop`
 `foreign_key`, `alter` `column`, `add` `foreign_key`), `rename_routine` as its `drop` and its
 `create`. No section numbers: placing them stays msm's. An op the binary does not know is

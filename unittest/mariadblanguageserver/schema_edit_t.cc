@@ -131,6 +131,19 @@ std::vector<std::string> note_kinds(const Edit_result &r) {
   return out;
 }
 
+// Each migration statement's tag: "action object name [(table)] [-> new]".
+using Tags = std::vector<std::string>;
+Tags tags(const Edit_result &r) {
+  Tags out;
+  for (const auto &m : r.migration) {
+    std::string t = std::string(to_string(m.action)) + " " + to_string(m.object) + " " + m.name;
+    if (!m.table.empty()) t += " (" + m.table + ")";
+    if (!m.new_name.empty()) t += " -> " + m.new_name;
+    out.push_back(t);
+  }
+  return out;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -248,6 +261,8 @@ TEST(Schema_edit, request_errors) {
   EXPECT_EQ("bad-request", kind(R"({"format": 1})"));
   // An op this binary does not know: perhaps a newer one does.
   EXPECT_EQ("unsupported", kind(request("s", R"({"op": "rename"})")));
+  EXPECT_NE(std::string::npos,
+            std::get<Edit_error>(parse_edit_request(request("s", R"({"op": "add_trigger"})"))).message.find("newer"));
   EXPECT_EQ("bad-request", kind(request("s", R"({"op": "rename_table", "table": "t"})")));
   EXPECT_EQ("bad-request", kind(request("s", R"({"op": "rename_table", "table": "t", "new_name": ""})")));
   EXPECT_EQ("bad-request", kind(request("s", rename_table("t", std::string(65, 'x')))));
@@ -1423,23 +1438,7 @@ TEST(Schema_edit, outside_msm_new_objects_follow_their_neighbours_form) {
 namespace mdbls {
 namespace {
 
-// Each migration statement's tag: "action object name [(table)] [-> new]".
-std::vector<std::string> tags(const Edit_result &r) {
-  std::vector<std::string> out;
-  for (const auto &m : r.migration) {
-    std::string t = m.action + " " + m.object + " " + m.name;
-    if (!m.table.empty()) t += " (" + m.table + ")";
-    if (!m.new_name.empty()) t += " -> " + m.new_name;
-    out.push_back(t);
-  }
-  return out;
-}
-
-std::vector<std::string> shop_tags(const std::string &edit_json) {
-  return tags(ok(edit(k_shop, {}, request("shop", edit_json))));
-}
-
-using Tags = std::vector<std::string>;
+Tags shop_tags(const std::string &edit_json) { return tags(ok(edit(k_shop, {}, request("shop", edit_json)))); }
 
 }  // namespace
 
@@ -1524,6 +1523,10 @@ TEST(Schema_edit, new_keys_are_named) {
       {"op": "add_index", "table": "orders", "index": {"kind": "unique", "columns": ["customer_id", "id"]}})j")));
   EXPECT_EQ((Tags{"add index customer_id (orders)", "add index customer_id_2 (orders)"}), tags(ix));
   EXPECT_NE(std::string::npos, text(ix, "").find("INDEX `customer_id` (`customer_id`)")) << text(ix, "");
+  // An unnamed index already there has the server's name: a column's UNIQUE.
+  EXPECT_EQ(Tags{"add index b_2 (t)"},
+            tags(ok(edit("CREATE TABLE t (a INT, b INT UNIQUE);\n", {},
+                         request("", R"j({"op": "add_index", "table": "t", "index": {"kind": "index", "columns": ["b"]}})j")))));
   // A foreign key: fk_<table>_<referenced table>, unique in the schema.
   const auto fk = ok(edit(k_shop, {}, request("shop", R"j({"op": "add_foreign_key", "table": "orders",
       "foreign_key": {"columns": ["id"], "references": {"table": "customer", "columns": ["id"]}}})j")));
@@ -1533,13 +1536,13 @@ TEST(Schema_edit, new_keys_are_named) {
       "columns": [{"name": "id", "type": "INT"}, {"name": "order_id", "type": "INT"}],
       "indexes": [{"kind": "primary", "columns": ["id"]}, {"kind": "index", "columns": ["order_id"]}],
       "foreign_keys": [{"columns": ["order_id"], "references": {"table": "orders", "columns": ["id"]}}]}})j")));
-  const auto *item = t.outline.catalog.find("shop")->table("item");
+  const auto *item = table(t, "shop", "item");
   ASSERT_NE(nullptr, item);
   ASSERT_EQ(2u, item->indexes.size());
   EXPECT_EQ("order_id", item->indexes[1].name);
   ASSERT_EQ(1u, item->foreign_keys.size());
   EXPECT_EQ("fk_item_orders", item->foreign_keys[0].name);
-  // A name past 64 bytes is cut to leave room for the suffix.
+  // A name past 64 characters is cut to leave room for the suffix.
   const std::string long_table(60, 't');
   const std::string first = ("fk_" + long_table + "_u").substr(0, 64);  // taken
   const auto cut = ok(edit("CREATE TABLE u (id INT PRIMARY KEY);\nCREATE TABLE " + long_table + " (u_id INT, CONSTRAINT `" +
@@ -1548,12 +1551,6 @@ TEST(Schema_edit, new_keys_are_named) {
       "foreign_key": {"columns": ["u_id"], "references": {"table": "u", "columns": ["id"]}}})j")));
   ASSERT_EQ(1u, cut.migration.size());
   EXPECT_EQ("fk_" + long_table.substr(0, 59) + "_2", cut.migration[0].name);
-}
-
-TEST(Schema_edit, unknown_ops_are_unsupported) {
-  const auto e = failed(edit(k_shop, {}, request("shop", R"j({"op": "add_trigger", "trigger": {}})j")));
-  EXPECT_EQ("unsupported", e.kind);
-  EXPECT_NE(std::string::npos, e.message.find("newer")) << e.message;
 }
 
 TEST(Schema_edit, ops_json) {
