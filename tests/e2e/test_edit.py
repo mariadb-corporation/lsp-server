@@ -125,7 +125,7 @@ class Edit_fixture(unittest.TestCase):
         self.assertIn("rename_table", ops)
         self.assertIn("add_table", ops)
         self.assertIn("drop_routine", ops)
-        self.assertNotIn("add_index", ops)
+        self.assertIn("set_primary_key", ops)
 
     def test_rename_across_includes(self):
         code, result = self.p.edit([
@@ -163,8 +163,9 @@ class Edit_fixture(unittest.TestCase):
             ([{"op": "rename_table", "table": "customer", "new_name": "customer_orders"}], "name-taken"),
             ([{"op": "rename_column", "table": "customer", "column": "id", "new_name": "NAME"}],
              "name-taken"),
-            ([{"op": "add_index", "table": "customer", "index": {"kind": "index", "columns": ["name"]}}],
-             "unsupported"),
+            ([{"op": "add_index", "table": "customer", "index": {"kind": "primary", "columns": ["name"]}}],
+             "name-taken"),
+            ([{"op": "drop_index", "table": "customer", "kind": "primary"}], "referenced"),
             ([{"op": "drop_table", "table": "customer"}], "referenced"),
             ([{"op": "add_table", "table": {"name": "x", "columns": [{"name": "a", "type": "INTT"}]}}],
              "bad-request"),
@@ -249,6 +250,50 @@ class Edit_fixture(unittest.TestCase):
         self.assertIn("CREATE VIEW view1 AS SELECT 1;", routines)
         self.checks()
 
+    def files(self):
+        return {f: f.read_bytes() for f in sorted(self.p.dev.rglob("*.sql"))}
+
+    def test_a_relationship_and_its_undo(self):
+        """The diagram viewer's identifying 1:n relationship, then its undo."""
+        files, script = self.files(), self.p.script
+        code, result = self.p.edit([
+            {"op": "add_column", "table": "orders",
+             "column": {"name": "customer_id1", "type": "INT", "nullable": False}},
+            {"op": "set_primary_key", "table": "orders", "columns": ["id", "customer_id1"]},
+            {"op": "add_foreign_key", "table": "orders", "foreign_key": {
+                "name": "fk_orders_customer1", "columns": ["customer_id1"],
+                "references": {"table": "customer", "columns": ["id"]}}},
+            {"op": "add_index", "table": "customer",
+             "index": {"name": "ix_name", "kind": "index", "columns": ["name"]}},
+        ], "shop")
+        self.assertEqual(code, 0, result)
+        self.assertEqual([m["sql"] for m in result["migration"]][1:3], [
+            "ALTER TABLE `orders` DROP PRIMARY KEY, ADD PRIMARY KEY (`id`, `customer_id1`)",
+            "ALTER TABLE `orders` ADD CONSTRAINT `fk_orders_customer1` FOREIGN KEY (`customer_id1`) "
+            "REFERENCES `customer` (`id`)"])
+        self.p.apply(result)
+        self.assertEqual(self.p.outline(), result["outline"])
+        tables = (self.p.dev / "sections" / "140_tables.sql").read_text()
+        self.assertIn("  customer_id1 INT NOT NULL,\n  PRIMARY KEY (id, customer_id1),\n", tables)
+        self.checks()
+        code, result = self.p.edit([
+            {"op": "drop_index", "table": "customer", "name": "ix_name"},
+            {"op": "drop_foreign_key", "table": "orders", "name": "fk_orders_customer1"},
+            {"op": "set_primary_key", "table": "orders", "columns": ["id"]},
+            {"op": "drop_column", "table": "orders", "column": "customer_id1"},
+        ], "shop")
+        self.assertEqual(code, 0, result)
+        self.p.apply(result)
+        self.assertEqual(self.p.outline(), result["outline"])
+        # The column-level PRIMARY KEY came back as an element: the outline
+        # is the one before, the text not quite.
+        orders = [t for s in result["outline"]["schemas"] for t in s["tables"] if t["name"] == "orders"][0]
+        self.assertEqual([ix["columns"] for ix in orders["indexes"] if ix["kind"] == "primary"], [["id"]])
+        self.assertEqual(len(orders["foreign_keys"]), 1)
+        self.assertEqual(self.p.script, script)
+        self.assertEqual(self.files()[self.p.dev / "sections" / "150_routines.sql"],
+                         files[self.p.dev / "sections" / "150_routines.sql"])
+
     def test_drop_table(self):
         code, result = self.p.edit([{"op": "drop_table", "table": "orders"}], "shop")
         self.assertEqual(code, 0, result)
@@ -301,6 +346,33 @@ class Edit_mrs_project(unittest.TestCase):
         routines = (self.p.dev / "sections" / "150-20_procedures_functions.sql").read_text()
         self.assertIn("DROP PROCEDURE IF EXISTS `dump_the_audit_log`%%", routines)
         self.assertNotIn("dump_audit_log`", routines)
+
+    def test_keys_and_their_undo(self):
+        before = self.p.outline()
+        files = {f: f.read_bytes() for f in self.p.dev.rglob("*.sql")}
+        code, result = self.p.edit([
+            {"op": "add_column", "table": "url_host",
+             "column": {"name": "alias_id", "type": "BINARY(16)"}},
+            {"op": "add_index", "table": "url_host",
+             "index": {"name": "fk_url_host_alias_UNIQUE", "kind": "unique", "columns": ["alias_id"]}},
+            {"op": "add_foreign_key", "table": "url_host", "foreign_key": {
+                "name": "fk_url_host_alias", "columns": ["alias_id"],
+                "references": {"table": "url_host_alias", "columns": ["id"]}}},
+        ], "mariadb_rest_service")
+        self.assertEqual(code, 0, result)
+        self.p.apply(result)
+        self.assertEqual(self.p.outline(), result["outline"])
+        check = self.p.run("check", "--source-dir", str(self.p.dev), "-")
+        self.assertEqual(check.returncode, 0, check.stdout.decode())
+        code, result = self.p.edit([
+            {"op": "drop_foreign_key", "table": "url_host", "name": "fk_url_host_alias"},
+            {"op": "drop_index", "table": "url_host", "name": "fk_url_host_alias_UNIQUE"},
+            {"op": "drop_column", "table": "url_host", "column": "alias_id"},
+        ], "mariadb_rest_service")
+        self.assertEqual(code, 0, result)
+        self.p.apply(result)
+        self.assertEqual(self.p.outline(), before)
+        self.assertEqual({f: f.read_bytes() for f in self.p.dev.rglob("*.sql")}, files)
 
     def test_add_and_drop(self):
         before = self.p.outline()

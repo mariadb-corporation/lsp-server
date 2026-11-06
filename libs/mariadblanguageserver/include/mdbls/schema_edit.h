@@ -89,6 +89,13 @@ struct Schema_edit {
   std::optional<Routine> new_routine;  // add_routine
   // set_table_options: outline option name and value; nullopt removes it.
   std::vector<std::pair<std::string, std::optional<std::string>>> options;
+  std::optional<Index> new_index;              // add_index
+  std::optional<Foreign_key> new_foreign_key;  // add_foreign_key
+  // drop_index, drop_foreign_key: the key by `name`, by `kind` ("primary",
+  // drop_index), or by `columns` (an unnamed key); set_primary_key: its columns.
+  std::string name;
+  std::string kind;
+  std::vector<std::string> columns;
 };
 
 struct Edit_request {

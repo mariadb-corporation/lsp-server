@@ -278,17 +278,11 @@ TEST(Schema_edit, request_errors) {
             kind(request("s", R"j({"op": "add_column", "table": "t", "column": {"name": "c", "type": "INT", "range": {}, "selection_range": {}}})j")));
 }
 
-TEST(Schema_edit, unsupported_ops) {
-  const auto e = failed(edit("CREATE TABLE t (a INT);", {},
-                             request("", R"({"op": "set_primary_key", "table": "t", "columns": ["a"]})")));
-  EXPECT_EQ("unsupported", e.kind);
-  EXPECT_EQ(0u, e.edit.value());
-}
-
 TEST(Schema_edit, supported_ops) {
   EXPECT_EQ(
       "rename_table rename_column rename_view rename_routine add_table drop_table add_column modify_column "
-      "drop_column set_table_options add_view drop_view add_routine drop_routine",
+      "drop_column add_index drop_index add_foreign_key drop_foreign_key set_table_options add_view drop_view "
+      "add_routine drop_routine set_primary_key",
       supported_edit_ops());
 }
 
@@ -1037,6 +1031,185 @@ TEST(Schema_edit, an_undo_request) {
   const std::string script = text(added, "");
   const auto r = ok(edit(script, {}, request("shop", R"j({"op": "drop_column", "table": "orders", "column": "customer_id2"})j")));
   EXPECT_EQ(k_shop, text(r, ""));
+}
+
+}  // namespace mdbls
+
+// ---------------------------------------------------------------------------
+// Indexes and foreign keys (PR 3)
+
+namespace mdbls {
+
+TEST(Schema_edit, add_index) {
+  const auto r = ok(edit(k_shop, {}, request("shop", R"j({"op": "add_index", "table": "orders",
+      "index": {"name": "fk_x_UNIQUE", "kind": "unique", "columns": ["customer_id"]}})j")));
+  // After the last index.
+  EXPECT_EQ(shop_with("  INDEX `ix_note` (`note`(10), `customer_id`),\n",
+                      "  INDEX `ix_note` (`note`(10), `customer_id`),\n  UNIQUE INDEX `fk_x_UNIQUE` (`customer_id`),\n"),
+            text(r, ""));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `orders` ADD UNIQUE INDEX `fk_x_UNIQUE` (`customer_id`)"}, migration(r));
+  // A primary key after the columns; key parts with lengths and order.
+  const auto r2 = ok(edit("CREATE TABLE t (a TEXT, b INT);\n", {}, request("", R"j({"op": "add_index", "table": "t",
+      "index": {"kind": "primary", "columns": ["b"]}}, {"op": "add_index", "table": "t",
+      "index": {"name": "ix_a", "kind": "index", "key_parts": [{"column": "a", "length": 10, "order": "desc"}]}})j")));
+  EXPECT_EQ("CREATE TABLE t (a TEXT, b INT, PRIMARY KEY (b), INDEX ix_a (a(10) DESC));\n", text(r2, ""));
+
+  auto kind = [](const std::string &edit_json) {
+    const auto x = edit(k_shop, {}, request("shop", edit_json));
+    return std::holds_alternative<Edit_error>(x) ? std::get<Edit_error>(x).kind : "ok";
+  };
+  EXPECT_EQ("name-taken", kind(R"j({"op": "add_index", "table": "orders", "index": {"name": "IX_NOTE", "kind": "index", "columns": ["id"]}})j"));
+  EXPECT_EQ("name-taken", kind(R"j({"op": "add_index", "table": "orders", "index": {"kind": "primary", "columns": ["note"]}})j"));
+  EXPECT_EQ("unknown-object", kind(R"j({"op": "add_index", "table": "orders", "index": {"kind": "index", "columns": ["nope"]}})j"));
+  EXPECT_EQ("bad-request", kind(R"j({"op": "add_index", "table": "orders", "index": {"kind": "index"}})j"));
+}
+
+TEST(Schema_edit, drop_index_wherever_it_is_defined) {
+  const std::string script =
+      "CREATE TABLE t (a INT, b INT UNIQUE, c INT, KEY ix_a (a), KEY (c));\n"
+      "ALTER TABLE t ADD INDEX ix_ab (a, b);\n"
+      "ALTER TABLE t ADD COLUMN d INT, ADD INDEX ix_d (d);\n"
+      "CREATE INDEX ix_c ON t (c);\n";
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "drop_index", "table": "t", "name": "ix_a"},
+      {"op": "drop_index", "table": "t", "name": "ix_ab"}, {"op": "drop_index", "table": "t", "name": "ix_d"},
+      {"op": "drop_index", "table": "t", "name": "ix_c"}, {"op": "drop_index", "table": "t", "columns": ["b"]},
+      {"op": "drop_index", "table": "t", "columns": ["c"]})j")));
+  EXPECT_EQ(
+      "CREATE TABLE t (a INT, b INT, c INT);\n"
+      "ALTER TABLE t ADD COLUMN d INT;\n",
+      text(r, ""));
+  EXPECT_EQ((std::vector<std::string>{"ALTER TABLE `t` DROP INDEX `ix_a`", "ALTER TABLE `t` DROP INDEX `ix_ab`",
+                                      "ALTER TABLE `t` DROP INDEX `ix_d`", "ALTER TABLE `t` DROP INDEX `ix_c`"}),
+            migration(r));
+  // The unnamed ones have a name only the server knows.
+  EXPECT_EQ((std::vector<std::string>{"no-migration", "no-migration"}), note_kinds(r));
+  const Table *t = table(r, "", "t");
+  ASSERT_NE(nullptr, t);
+  EXPECT_TRUE(t->indexes.empty());
+}
+
+TEST(Schema_edit, drop_index_errors) {
+  auto kind = [](const std::string &script, const std::string &edit_json) {
+    const auto x = edit(script, {}, request("", edit_json));
+    return std::holds_alternative<Edit_error>(x) ? std::get<Edit_error>(x).kind : "ok";
+  };
+  const std::string fk = "CREATE TABLE p (id INT PRIMARY KEY);\nCREATE TABLE c (pid INT, KEY ix (pid), FOREIGN KEY (pid) REFERENCES p (id));\n";
+  // The foreign key needs the index, and the parent's key.
+  EXPECT_EQ("referenced", kind(fk, R"j({"op": "drop_index", "table": "c", "name": "ix"})j"));
+  EXPECT_EQ("referenced", kind(fk, R"j({"op": "drop_index", "table": "p", "kind": "primary"})j"));
+  // Not when the key went first.
+  EXPECT_EQ("ok", kind(fk, R"j({"op": "drop_foreign_key", "table": "c", "columns": ["pid"]}, {"op": "drop_index", "table": "c", "name": "ix"})j"));
+  // An AUTO_INCREMENT column must lead an index.
+  EXPECT_EQ("referenced", kind("CREATE TABLE t (id INT AUTO_INCREMENT PRIMARY KEY);\n",
+                               R"j({"op": "drop_index", "table": "t", "kind": "primary"})j"));
+  EXPECT_EQ("unknown-object", kind(fk, R"j({"op": "drop_index", "table": "c", "name": "nope"})j"));
+  EXPECT_EQ("bad-request", kind(fk, R"j({"op": "drop_index", "table": "c", "name": "ix", "kind": "primary"})j"));
+}
+
+TEST(Schema_edit, set_primary_key) {
+  // Written where the key is: its columns replaced.
+  const auto r = ok(edit(k_shop, {}, request("shop", R"j({"op": "set_primary_key", "table": "orders", "columns": ["id", "customer_id"]})j")));
+  EXPECT_EQ(shop_with("  PRIMARY KEY (`id`),\n  INDEX", "  PRIMARY KEY (`id`, `customer_id`),\n  INDEX"), text(r, ""));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `orders` DROP PRIMARY KEY, ADD PRIMARY KEY (`id`, `customer_id`)"},
+            migration(r));
+  // A column's PRIMARY KEY becomes an element; a table without one gets one.
+  const auto r2 = ok(edit("CREATE TABLE t (a INT PRIMARY KEY, b INT);\nCREATE TABLE u (a INT, b INT);\n", {},
+                          request("", R"j({"op": "set_primary_key", "table": "t", "columns": ["a", "b"]},
+      {"op": "set_primary_key", "table": "u", "columns": ["b"]})j")));
+  EXPECT_EQ("CREATE TABLE t (a INT, b INT, PRIMARY KEY (a, b));\nCREATE TABLE u (a INT, b INT, PRIMARY KEY (b));\n",
+            text(r2, ""));
+  EXPECT_EQ((std::vector<std::string>{"ALTER TABLE `t` DROP PRIMARY KEY, ADD PRIMARY KEY (`a`, `b`)",
+                                      "ALTER TABLE `u` ADD PRIMARY KEY (`b`)"}),
+            migration(r2));
+  // A key an ALTER TABLE adds is changed there.
+  const auto r3 = ok(edit("CREATE TABLE t (a INT, b INT);\nALTER TABLE t ADD PRIMARY KEY (a);\n", {},
+                          request("", R"j({"op": "set_primary_key", "table": "t", "columns": ["b", "a"]})j")));
+  EXPECT_EQ("CREATE TABLE t (a INT, b INT);\nALTER TABLE t ADD PRIMARY KEY (b, a);\n", text(r3, ""));
+  // The same columns again change nothing.
+  const auto r4 = ok(edit(k_shop, {}, request("shop", R"j({"op": "set_primary_key", "table": "orders", "columns": ["ID"]})j")));
+  EXPECT_EQ(k_shop, text(r4, ""));
+  EXPECT_TRUE(migration(r4).empty());
+  EXPECT_EQ("unknown-object",
+            failed(edit(k_shop, {}, request("shop", R"j({"op": "set_primary_key", "table": "orders", "columns": ["nope"]})j"))).kind);
+  // customer.id is AUTO_INCREMENT: it must lead an index.
+  EXPECT_EQ("referenced",
+            failed(edit(k_shop, {}, request("shop", R"j({"op": "set_primary_key", "table": "customer", "columns": ["name"]})j"))).kind);
+}
+
+TEST(Schema_edit, add_foreign_key) {
+  const auto r = ok(edit(k_shop, {}, request("shop", R"j({"op": "add_foreign_key", "table": "orders",
+      "foreign_key": {"name": "fk_2", "columns": ["id"], "references": {"table": "customer", "columns": ["id"]}, "on_delete": "NO ACTION"}})j")));
+  EXPECT_EQ(shop_with("REFERENCES `customer` (`id`)\n)",
+                      "REFERENCES `customer` (`id`),\n"
+                      "  CONSTRAINT `fk_2` FOREIGN KEY (`id`) REFERENCES `customer` (`id`) ON DELETE NO ACTION\n)"),
+            text(r, ""));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `orders` ADD CONSTRAINT `fk_2` FOREIGN KEY (`id`) REFERENCES `customer` (`id`) ON DELETE NO ACTION"},
+            migration(r));
+  // To a table the script creates later: an ALTER TABLE after both.
+  const std::string script = "CREATE TABLE a (id INT PRIMARY KEY, b_id INT);\nCREATE TABLE b (id INT PRIMARY KEY);\nSELECT 1;\n";
+  const auto r2 = ok(edit(script, {}, request("", R"j({"op": "add_foreign_key", "table": "a",
+      "foreign_key": {"name": "fk_a_b", "columns": ["b_id"], "references": {"table": "b", "columns": ["id"]}}})j")));
+  EXPECT_EQ("CREATE TABLE a (id INT PRIMARY KEY, b_id INT);\nCREATE TABLE b (id INT PRIMARY KEY);\n"
+            "ALTER TABLE a ADD CONSTRAINT fk_a_b FOREIGN KEY (b_id) REFERENCES b (id);\nSELECT 1;\n",
+            text(r2, ""));
+  // After the ALTER TABLEs that add foreign keys already (a Workbench import).
+  const auto r3 = ok(edit(script + "ALTER TABLE a ADD FOREIGN KEY (id) REFERENCES b (id);\nSELECT 2;\n", {},
+                          request("", R"j({"op": "add_foreign_key", "table": "a",
+      "foreign_key": {"name": "fk_a_b", "columns": ["b_id"], "references": {"table": "b", "columns": ["id"]}}})j")));
+  EXPECT_NE(std::string::npos, text(r3, "").find("REFERENCES b (id);\nALTER TABLE a ADD CONSTRAINT fk_a_b"));
+  EXPECT_EQ("unknown-object",
+            failed(edit(k_shop, {}, request("shop", R"j({"op": "add_foreign_key", "table": "orders",
+      "foreign_key": {"columns": ["id"], "references": {"table": "nope", "columns": ["id"]}}})j"))).kind);
+  EXPECT_EQ("name-taken",
+            failed(edit(k_shop, {}, request("shop", R"j({"op": "add_foreign_key", "table": "orders",
+      "foreign_key": {"name": "fk_orders_customer", "columns": ["id"], "references": {"table": "customer", "columns": ["id"]}}})j"))).kind);
+}
+
+TEST(Schema_edit, drop_foreign_key_wherever_it_is_defined) {
+  const std::string script =
+      "CREATE TABLE p (id INT PRIMARY KEY);\n"
+      "CREATE TABLE c (a INT REFERENCES p (id), b INT, c INT,\n"
+      "  CONSTRAINT fk_b FOREIGN KEY (b) REFERENCES p (id));\n"
+      "ALTER TABLE c ADD CONSTRAINT fk_c FOREIGN KEY (c) REFERENCES p (id);\n";
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "drop_foreign_key", "table": "c", "columns": ["a"]},
+      {"op": "drop_foreign_key", "table": "c", "name": "fk_b"}, {"op": "drop_foreign_key", "table": "c", "name": "FK_C"})j")));
+  EXPECT_EQ("CREATE TABLE p (id INT PRIMARY KEY);\nCREATE TABLE c (a INT, b INT, c INT);\n", text(r, ""));
+  EXPECT_EQ((std::vector<std::string>{"ALTER TABLE `c` DROP FOREIGN KEY `fk_b`", "ALTER TABLE `c` DROP FOREIGN KEY `fk_c`"}),
+            migration(r));
+  EXPECT_EQ(std::vector<std::string>{"no-migration"}, note_kinds(r));
+  EXPECT_EQ("unknown-object", failed(edit(script, {}, request("", R"j({"op": "drop_foreign_key", "table": "c", "name": "nope"})j"))).kind);
+}
+
+TEST(Schema_edit, a_relationship_and_its_undo) {
+  // The viewer's identifying 1:n relationship, one request, and its undo:
+  // the inverse ops in reverse order give the script back.
+  const auto r = ok(edit(k_shop, {}, request("shop", R"j(
+      {"op": "add_column", "table": "orders", "column": {"name": "customer_id1", "type": "INT", "nullable": false}},
+      {"op": "set_primary_key", "table": "orders", "columns": ["id", "customer_id1"]},
+      {"op": "add_foreign_key", "table": "orders", "foreign_key": {"name": "fk_orders_customer1",
+       "columns": ["customer_id1"], "references": {"table": "customer", "columns": ["id"]}}})j")));
+  const Table *t = table(r, "shop", "orders");
+  ASSERT_NE(nullptr, t);
+  EXPECT_EQ(2u, t->foreign_keys.size());
+  const auto undo = ok(edit(text(r, ""), {}, request("shop", R"j(
+      {"op": "drop_foreign_key", "table": "orders", "name": "fk_orders_customer1"},
+      {"op": "set_primary_key", "table": "orders", "columns": ["id"]},
+      {"op": "drop_column", "table": "orders", "column": "customer_id1"})j")));
+  EXPECT_EQ(k_shop, text(undo, ""));
+  // A 1:1 relationship: a new column, its unique index, the key; undone in
+  // reverse (the key first: the index serves it).
+  const auto one = ok(edit(k_shop, {}, request("shop", R"j(
+      {"op": "add_column", "table": "orders", "column": {"name": "customer_id1", "type": "INT", "nullable": false}},
+      {"op": "add_index", "table": "orders", "index": {"name": "fk_1_UNIQUE", "kind": "unique", "columns": ["customer_id1"]}},
+      {"op": "add_foreign_key", "table": "orders", "foreign_key": {"name": "fk_1",
+       "columns": ["customer_id1"], "references": {"table": "customer", "columns": ["id"]}}})j")));
+  EXPECT_EQ("referenced", failed(edit(text(one, ""), {}, request("shop", R"j(
+      {"op": "drop_index", "table": "orders", "name": "fk_1_UNIQUE"})j"))).kind);
+  const auto back = ok(edit(text(one, ""), {}, request("shop", R"j(
+      {"op": "drop_foreign_key", "table": "orders", "name": "fk_1"},
+      {"op": "drop_index", "table": "orders", "name": "fk_1_UNIQUE"},
+      {"op": "drop_column", "table": "orders", "column": "customer_id1"})j")));
+  EXPECT_EQ(k_shop, text(back, ""));
 }
 
 }  // namespace mdbls
