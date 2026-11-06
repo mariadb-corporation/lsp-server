@@ -414,7 +414,7 @@ class Source_dir_cli(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         r = self.run_cli("split", "--source-dir", str(self.DEV), "-", stdin="")
         self.assertEqual(r.returncode, 2)
-        self.assertIn("goes with check, outline and format", r.stderr)
+        self.assertIn("goes with check, outline, format and edit", r.stderr)
 
 
 if __name__ == "__main__":

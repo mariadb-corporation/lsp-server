@@ -65,6 +65,14 @@ struct Source_slice {
 };
 Source_slice slice_source(std::string_view text, std::string_view start, std::string_view end);
 
+// The bound in the form `written` has (empty, a character offset, or lnN;
+// its sign kept) that stands for byte `offset` of `text` as a slice's start
+// (or, with `is_end`, its end); nullopt when no bound of that form selects
+// it.  An end that a negative form cannot reach, the end of the text, is
+// "".  slice_source() of the result gives `offset` back.
+std::optional<std::string> slice_bound_for(std::string_view text, std::string_view written,
+                                           bool is_end, uint32_t offset);
+
 // The state of the including script where an included text begins: what
 // a file opened on its own is read with when an open script includes it.
 // Inside a statement (a routine body) the delimiter is ";".
@@ -163,6 +171,12 @@ Source_expansion::Location map_source(const std::vector<Source_expansion::Segmen
 Source_expansion::Located_range map_source(
     const std::vector<Source_expansion::Segment> &segments,
     const std::vector<Source_include> &includes, Range range);
+// The inverse of map_source(): where byte `offset` of source `source`
+// stands in the expanded text of `text_size` bytes.  A file included twice
+// gives the first place; nullopt for a byte no segment holds (outside the
+// slices).
+std::optional<uint32_t> unmap_source(const std::vector<Source_expansion::Segment> &segments,
+                                     uint32_t text_size, uint32_t source, uint32_t offset);
 
 // Something wrong with a directive, in the including text: a file that
 // cannot be read (on the path), a malformed slice (on the slice), nothing

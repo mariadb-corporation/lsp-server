@@ -20,6 +20,7 @@
 //   mariadb-lsp lsp              the language server, on stdin and stdout
 //   mariadb-lsp check   FILE...  syntax errors, or success
 //   mariadb-lsp outline FILE     the schema objects a file defines, as JSON
+//   mariadb-lsp edit --edits R - schema edits applied to an MSM script, as JSON
 //   mariadb-lsp split   FILE     the statement index of a SQL file
 //   mariadb-lsp tokens  FILE     the tokens of every statement
 //   mariadb-lsp tree    FILE     the parse tree of every statement
@@ -42,6 +43,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include "mdbls/catalog_view.h"
@@ -57,6 +59,7 @@
 #include "mdbls/lsp/server.h"
 #include "mdbls/lsp/transport.h"
 #include "mdbls/outline.h"
+#include "mdbls/schema_edit.h"
 #include "mdbls/parser_pool.h"
 #include "mdbls/source_include.h"
 #include "mdbls/sql_mode.h"
@@ -93,6 +96,10 @@ const char *const k_usage =
     "           (with --format json, a summary); exit 0 when there are none,\n"
     "           1 when there are\n"
     "  outline  the schema objects a SQL file defines, as JSON\n"
+    "  edit     apply schema edits (--edits FILE) to a SQL file and the files its\n"
+    "           SOURCE directives include: prints the text edits, the migration\n"
+    "           DDL and the edited outline as JSON; writes no file; exit 1 when\n"
+    "           the edits are refused\n"
     "  format   print a SQL file with its statements laid out (queries, DML,\n"
     "           views, tables, routines, compound statements, GRANT, REVOKE,\n"
     "           users, REST SQL, when they parse; the rest, and the rows of a\n"
@@ -118,11 +125,12 @@ const char *const k_usage =
     "  --format tsv|json  output format (default tsv)\n"
     "  --text             split: include each statement's text in the output\n"
     "  --at LINE:COL      complete: the position, 1-based (COL in characters)\n"
-    "  --line-width N     format: the width lines are kept within (default 80,\n"
+    "  --edits FILE       edit: the schema edits, JSON (docs/edit-format.md)\n"
+    "  --line-width N     format, edit: the width lines are kept within (default 80,\n"
     "                     0 = no limit)\n"
     "  --keyword-case upper|lower\n"
     "                     format: the case of keywords (default upper)\n"
-    "  --indent tab|2|4   format, complete: one level of indentation, a tab or 2\n"
+    "  --indent tab|2|4   format, complete, edit: one level of indentation, a tab or 2\n"
     "                     or 4 spaces (format: default 2; complete: default a tab\n"
     "                     when the line has tabs, else 2)\n"
     "  --no-indent-clauses\n"
@@ -148,7 +156,7 @@ const char *const k_usage =
     "  --no-source        check, outline: take MSM SOURCE directives for SQL: do\n"
     "                     not read the files they include (check: report them as\n"
     "                     errors)\n"
-    "  --source-dir DIR   check, outline, format: the folder relative SOURCE paths\n"
+    "  --source-dir DIR   check, outline, format, edit: the folder relative SOURCE paths\n"
     "                     are taken from (default: the FILE's; none for stdin)\n"
     "  --log FILE         lsp: write a log to FILE\n"
     "  --stdio            lsp: talk on stdin and stdout (the only transport)\n"
@@ -188,6 +196,7 @@ struct Options {
   bool source = true;  // expand MSM SOURCE directives (--no-source: not)
   bool add_tables = true;  // complete: --no-add-tables
   std::string source_dir;  // --source-dir, absolute; "": the file's folder
+  std::string edits;       // edit: --edits FILE
 };
 
 // The --connection server's catalog, read once.
@@ -843,6 +852,10 @@ std::optional<Options> parse_args(int argc, char **argv) {
         return std::nullopt;
       }
       o.source_dir = *v;
+    } else if (arg == "--edits") {
+      const auto v = value();
+      if (!v) return std::nullopt;
+      o.edits = *v;
     } else if (arg == "--max-errors") {
       const auto n = number();
       if (!n) return std::nullopt;
@@ -910,15 +923,17 @@ std::optional<Options> parse_args(int argc, char **argv) {
   }
   if (o.command != "split" && o.command != "tokens" && o.command != "check" &&
       o.command != "tree" && o.command != "outline" && o.command != "lsp" &&
-      o.command != "complete" && o.command != "connections" && o.command != "format") {
+      o.command != "complete" && o.command != "connections" && o.command != "format" &&
+      o.command != "edit") {
     std::cerr << (o.command.empty() ? std::string("mariadb-lsp: no command given\n")
                                     : "mariadb-lsp: unknown command " + o.command + "\n")
               << k_usage;
     return std::nullopt;
   }
   if (!o.source_dir.empty()) {
-    if (o.command != "check" && o.command != "outline" && o.command != "format") {
-      std::cerr << "mariadb-lsp: --source-dir goes with check, outline and format\n";
+    if (o.command != "check" && o.command != "outline" && o.command != "format" &&
+        o.command != "edit") {
+      std::cerr << "mariadb-lsp: --source-dir goes with check, outline, format and edit\n";
       return std::nullopt;
     }
     std::error_code ec;
@@ -948,6 +963,11 @@ std::optional<Options> parse_args(int argc, char **argv) {
     std::cerr << "mariadb-lsp: no input file (use - for stdin)\n";
     return std::nullopt;
   }
+  if ((o.command == "edit") != !o.edits.empty()) {
+    std::cerr << (o.edits.empty() ? "mariadb-lsp: edit needs --edits FILE\n"
+                                  : "mariadb-lsp: --edits goes with edit\n");
+    return std::nullopt;
+  }
   if (o.command == "complete" && !o.at) {
     std::cerr << "mariadb-lsp: complete needs --at LINE:COL\n";
     return std::nullopt;
@@ -957,6 +977,35 @@ std::optional<Options> parse_args(int argc, char **argv) {
     return std::nullopt;
   }
   return o;
+}
+
+// edit: the request applied to `text`; the result or the error as JSON.
+int run_edit(const Options &o, const std::string &file, const std::string &text,
+             mdbls::Parser_pool &pool) {
+  std::string request;
+  if (!read_input(o.edits, &request)) {
+    std::cerr << "mariadb-lsp: cannot read " << o.edits << "\n";
+    return k_exit_usage;
+  }
+  auto parsed = mdbls::parse_edit_request(request);
+  if (auto *err = std::get_if<mdbls::Edit_error>(&parsed)) {
+    std::cout << mdbls::edit_error_json(*err) << '\n';
+    return k_exit_errors;
+  }
+  mdbls::Edit_options eo;
+  eo.index = o.index;
+  eo.format = o.format;
+  eo.format.version_id = o.index.version_id;
+  if (!o.indent.empty()) eo.format.indent = o.indent;
+  eo.source_dir = source_dir(o, file);
+  auto result = mdbls::apply_schema_edits(text, std::get<mdbls::Edit_request>(parsed), pool, eo);
+  if (auto *err = std::get_if<mdbls::Edit_error>(&result)) {
+    std::cout << mdbls::edit_error_json(*err) << '\n';
+    return k_exit_errors;
+  }
+  std::cout << mdbls::edit_result_json(std::get<mdbls::Edit_result>(result), file, eo.source_dir)
+            << '\n';
+  return k_exit_ok;
 }
 
 int run_lsp(const Options &o) {
@@ -1150,7 +1199,8 @@ int main(int argc, char **argv) {
   if (!o->connection.empty() && !read_connection(*o)) return k_exit_usage;
 
   std::unique_ptr<mdbls::Parser_pool> pool;
-  if (o->command == "check" || o->command == "outline" || o->command == "complete") {
+  if (o->command == "check" || o->command == "outline" || o->command == "complete" ||
+      o->command == "edit") {
     pool = std::make_unique<mdbls::Parser_pool>(o->threads);
   }
 
@@ -1180,6 +1230,8 @@ int main(int argc, char **argv) {
     for (const auto &n : charset_notes) {
       std::cerr << (n.rfind(file + ":", 0) == 0 ? n : file + ": note: " + n) << "\n";
     }
+    // edit indexes the script itself, with its includes expanded.
+    if (o->command == "edit") return run_edit(*o, file, text, *pool);
     const double read_ms = ms_since(t0);
 
     t0 = Clock::now();
