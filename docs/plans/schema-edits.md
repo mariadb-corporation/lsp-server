@@ -434,3 +434,38 @@ routine leaves a trigger or event of its name alone. Left for later: a routine k
 `Object_id` (it would replace `rename_routine`'s DROP filter and the "both kinds" refusal),
 and `ALTER TABLE ... DROP INDEX|CONSTRAINT|FOREIGN KEY name`, whose name `sql_names` still
 takes for a column.
+
+**PR 3 (indexes, primary and foreign keys), 2026-11-06:** `add_index`, `drop_index`,
+`set_primary_key`, `add_foreign_key`, `drop_foreign_key`, as agreed with the viewer, with:
+
+- Placement as §2.5; a primary key goes after the last column (before the other keys). A
+  foreign key to a later table goes into an `ALTER TABLE ... ADD CONSTRAINT` after the last
+  `ALTER TABLE` adding a foreign key after both tables, else after the referenced table.
+- Removal where the key is defined: an element or `ALTER TABLE` change (the statement when it
+  was the only one), a `CREATE INDEX`, a column's `PRIMARY KEY`/`UNIQUE` attribute, a
+  column's `REFERENCES` (from the end of its `field_spec`).
+- `set_primary_key` rewrites the key's column list where it is written, so its other
+  attributes stay; a column-level key becomes an element.
+- New `referenced` case: dropping or replacing an index a foreign key relies on (its columns
+  lead it, for the table's own keys and for other tables' referenced columns) with no other
+  index serving, or the index an `AUTO_INCREMENT` column leads (1553, 1075). Adding a unique
+  index to a foreign key's columns makes the server drop the key's automatic index, so such
+  an index cannot be dropped again while the key exists: undo drops the key first.
+- An unnamed index or foreign key has no migration when dropped (`no-migration`).
+
+Tests: `schema_edit_t.cc` (each op, each place a key is defined, the errors, the viewer's
+1:n and 1:1 relationships and their undo giving the script back), `test_edit.py` (fixture:
+a relationship and its undo; MRS: a 1:1 relationship added, checked, undone byte for byte).
+
+**Section 150 on PR 3, 2026-11-06 (found by msm's deployment tests against #26):** Section
+150 runs on every deployment, so what an edit writes there must run again: `add_view` wrote a
+plain `CREATE VIEW` and `add_routine` a `CREATE` without the `DROP ... IF EXISTS` its
+neighbour had, and a first view (or routine) went after the last table, into Section 140,
+which an upgrade does not run. The engine now reads MSM's section markers (`-- MSM Section
+NNN:`; no request member needed): views and routines go into Section 150 (after the last of
+their kind there, a routine else after the last view, else at the section's end), tables
+into Section 140. New views and routines take their neighbour's form (`OR REPLACE`, or a
+`DROP ... IF EXISTS` pair); in Section 150 always an idempotent one. A routine's gap counts
+from its `DROP`, and a section's banner no longer counts as a statement's. Before this, a
+first routine in an MSM project without routines went after its last view (Section 150 when
+it had views) or its last table (Section 140), or to the end of the script; now Section 150.

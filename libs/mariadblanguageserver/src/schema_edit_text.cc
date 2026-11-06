@@ -52,8 +52,6 @@ std::string sql_string(std::string_view value, bool backslash_escapes) {
   return out + "'";
 }
 
-namespace {
-
 std::string ids(const std::vector<std::string> &names, const Style &st) {
   std::string out;
   for (const auto &n : names) {
@@ -62,6 +60,8 @@ std::string ids(const std::vector<std::string> &names, const Style &st) {
   }
   return out;
 }
+
+namespace {
 
 // NAME=value for engine-defined and other options given by name.
 std::string option_sql(std::string_view name, std::string_view value, const Style &st) {
@@ -191,8 +191,8 @@ std::string create_table_sql(const Table &t, const Style &st) {
   return out;
 }
 
-std::string create_view_sql(const View &v, const Style &st) {
-  std::string out = st.kw("CREATE");
+std::string create_view_sql(const View &v, const Style &st, bool or_replace) {
+  std::string out = st.kw(or_replace ? "CREATE OR REPLACE" : "CREATE");
   if (!v.algorithm.empty()) out += " " + st.kw("ALGORITHM") + "=" + st.kw(upper(v.algorithm));
   if (!v.definer.empty()) out += " " + st.kw("DEFINER") + "=" + v.definer;
   if (!v.security.empty()) out += " " + st.kw("SQL SECURITY") + " " + st.kw(upper(v.security));
@@ -205,8 +205,8 @@ std::string create_view_sql(const View &v, const Style &st) {
   return out;
 }
 
-std::string create_routine_sql(const Routine &r, const Style &st) {
-  std::string out = st.kw("CREATE");
+std::string create_routine_sql(const Routine &r, const Style &st, bool or_replace) {
+  std::string out = st.kw(or_replace ? "CREATE OR REPLACE" : "CREATE");
   if (!r.definer.empty()) out += " " + st.kw("DEFINER") + "=" + r.definer;
   const bool function = r.kind == "function";
   if (function && r.aggregate) out += " " + st.kw("AGGREGATE");

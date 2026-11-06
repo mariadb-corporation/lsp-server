@@ -369,7 +369,7 @@ context: a section without a `USE` gets the script's schema.
 
 `mariadb-lsp edit --edits REQUEST.json [--source-dir DIR] FILE|-` applies structured schema
 edits (renames, and adding, changing and dropping tables, columns, table options, views and
-routines; indexes and foreign keys to come) to a script and the files its
+routines, indexes, primary and foreign keys) to a script and the files its
 `SOURCE` directives include, and prints the text edits per file, the migration DDL and the
 outline of the edited texts as JSON. It writes no file; MSM's `msm.edit_schema` applies the
 edits. The request and output formats, the ops and the error and note kinds are in

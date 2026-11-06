@@ -64,10 +64,8 @@ enum class Edit_op {
 // The request's `op` spelling; nullopt for an unknown one.
 std::optional<Edit_op> edit_op_from_string(std::string_view op);
 const char *to_string(Edit_op op);
-// Whether this binary does `op`; the others answer `unsupported`.
-bool edit_op_supported(Edit_op op);
-// The ops edit_op_supported() takes, space-separated, in the order of
-// Edit_op: the `edit ops:` line of `mariadb-lsp --help`.
+// Every op this binary does, space-separated, in the order of Edit_op:
+// the `edit ops:` line of `mariadb-lsp --help`.
 std::string supported_edit_ops();
 
 // One edit of a request.  Which members it uses depends on the op.
@@ -89,6 +87,13 @@ struct Schema_edit {
   std::optional<Routine> new_routine;  // add_routine
   // set_table_options: outline option name and value; nullopt removes it.
   std::vector<std::pair<std::string, std::optional<std::string>>> options;
+  std::optional<Index> new_index;              // add_index
+  std::optional<Foreign_key> new_foreign_key;  // add_foreign_key
+  // drop_index, drop_foreign_key: the key by `name`, by `kind` ("primary",
+  // drop_index), or by `columns` (an unnamed key); set_primary_key: its columns.
+  std::string name;
+  std::string kind;
+  std::vector<std::string> columns;
 };
 
 struct Edit_request {

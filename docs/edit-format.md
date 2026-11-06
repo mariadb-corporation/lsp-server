@@ -71,9 +71,13 @@ unknown members.
 | `drop_view` | `view` | done | its `CREATE VIEW`, `ALTER VIEW` and `DROP VIEW` statements of it alone |
 | `add_routine` | `routine` (Routine) | done | a `CREATE PROCEDURE` or `FUNCTION` after the schema's last routine (below) |
 | `drop_routine` | `routine`, `kind` (as for `rename_routine`) | done | its `CREATE`, `ALTER` and `DROP` statements of it alone |
-| `add_index`, `drop_index`, `add_foreign_key`, `drop_foreign_key`, `set_primary_key` | | not yet | |
+| `add_index` | `table`, `index` (Index: `columns`, or `key_parts` for lengths and order) | done | an element of the `CREATE TABLE` (below) |
+| `drop_index` | `table`, and `name`, `kind: "primary"`, or `columns` (an unnamed index) | done | its element, `ALTER TABLE` change or `CREATE INDEX`, or a column's `PRIMARY KEY` / `UNIQUE` |
+| `set_primary_key` | `table`, `columns` | done | the primary key's columns where it is written; a column's `PRIMARY KEY` becomes an element; added when there is none |
+| `add_foreign_key` | `table`, `foreign_key` (Foreign key) | done | an element of the `CREATE TABLE`, or an `ALTER TABLE ... ADD` (below) |
+| `drop_foreign_key` | `table`, and `name` or `columns` (an unnamed key) | done | its element, `ALTER TABLE` change, or a column's `REFERENCES` |
 
-An op that is not done yet is refused with `unsupported`. `mariadb-lsp --help` lists the
+An op this binary does not do is refused with `unsupported`. `mariadb-lsp --help` lists the
 ops the binary does on the line `edit ops: rename_table rename_column ...` under `edit`; a
 binary with `edit` but without that line does the four renames.
 
@@ -96,6 +100,10 @@ its first keyword; the file's line breaks. A new statement is laid out by the fo
 `DELIMITER $$` block), and has as many blank lines before it as the statement it follows
 has above it (a banner's comment lines not counted); no banner is written.
 
+- **An MSM script** (one with `-- MSM Section NNN: ...` marker lines) keeps its sections: a
+  table goes into Section 140 (after its last table there, else at the end of the section),
+  a view or routine into Section 150, which every deployment runs again (below). Other
+  scripts follow the rules below without sections.
 - **A table** goes after the `CREATE TABLE` of the schema's last table (in the order of the
   expanded script), in that statement's file; to the end of the script when the schema has
   none. Its keys and foreign keys go into it; a foreign key's table must exist (or be the
@@ -116,19 +124,45 @@ has above it (a banner's comment lines not counted); no banner is written.
   sets later wins over it, so the self-check refuses such an edit. Option names are the
   outline's (`engine`, `charset`, `collation`, `comment`, `auto_increment`, `row_format`,
   an engine-defined one under its own name); `comment` is the text, quoted when written.
-- **A view** goes after the schema's last view, else after its last table. Its `definition`
+- **A view** goes after the schema's last view, else after its last table; in an MSM script
+  after its last view in Section 150, else at the end of Section 150 (after its last
+  statement, or after its banner when it has none). It is written as its neighbouring view
+  is: `CREATE OR REPLACE VIEW`, or with a `DROP VIEW IF EXISTS` before it. In Section 150 it is
+  always one of the two, `CREATE OR REPLACE` unless the neighbour drops first. Its `definition`
   is the `SELECT` alone: `check_option` writes the `WITH ... CHECK OPTION` (the outline's
   definition holds it, so remove it before sending a view of the outline back). A
   definition that is empty or does not parse is `bad-request`.
 - **A routine** goes after the schema's last routine of either kind, inside its
   `DELIMITER` block; where `;` is the delimiter and the routine holds one, in a new block
-  (`DELIMITER $$`, or the delimiter the script uses elsewhere). A function needs `returns`.
+  (`DELIMITER $$`, or the delimiter the script uses elsewhere). In an MSM script: after its
+  last routine in Section 150, else its last view there, else at the end of Section 150. It is
+  written as the routine it follows is: with `DROP PROCEDURE|FUNCTION IF EXISTS` before it, or
+  `CREATE OR REPLACE`; in Section 150 always one of the two, the `DROP` unless the neighbour
+  uses `OR REPLACE`. Blank lines before it are counted above the neighbour's `DROP`. The
+  migration holds the `CREATE` alone. A function needs `returns`.
   Its name must be free among the routines of both kinds (`name-taken`): references do not
   tell a procedure from a function of one name.
-- **A statement removed** goes with its lines, with the comment lines right above it when
+- **A statement removed** (with the `DROP ... IF EXISTS` of the object before it, which is
+  also removed) goes with its lines, with the comment lines right above it when
   one of them names the object (a Workbench banner), and the blank lines above it, as
   adding put them there (those below when nothing is above it). So adding an object and
   dropping it again gives the files back as they were.
+- **A key** goes into the `CREATE TABLE`: a primary key after the last column, another index
+  after the last index (else the last column), a foreign key after the last foreign key (else
+  the last index, else the last column). A table whose `CREATE TABLE` has no column list gets
+  an `ALTER TABLE t ADD ...` after it. A foreign key to a table the script creates later goes
+  into an `ALTER TABLE t ADD CONSTRAINT ...` after the last `ALTER TABLE` that adds a foreign
+  key after both tables, else right after the referenced table. No index is written for a
+  foreign key: the server makes one when none serves it; send `add_index` before it (a 1:1
+  relationship's `UNIQUE`) when one should be written. Column types are not compared.
+- **`set_primary_key`** with the columns the key has already changes nothing. Its migration is
+  one statement, `DROP PRIMARY KEY, ADD PRIMARY KEY (...)`: a `DROP PRIMARY KEY` of its own
+  fails when an `AUTO_INCREMENT` column is the key. Use `drop_index` and `add_index` for key
+  parts with a length or an order.
+- **An index still needed** cannot be dropped or replaced (`referenced`): one a foreign key of
+  the table relies on (its columns lead the index) or the referenced columns of another
+  table's foreign key, when no other index serves; the one an `AUTO_INCREMENT` column leads
+  (MariaDB errors 1553 and 1075). Undo drops the foreign key first.
 - **Dropping** a table that another table's foreign key references, or a column a foreign
   key uses (of its table or of another), is `referenced`, unless an earlier edit of the
   request removed that key or table: undo sends the inverse ops in reverse order. The last
@@ -183,6 +217,11 @@ runs the statements inside a stored procedure. Names are in backticks.
 | `modify_column` | `ALTER TABLE t MODIFY COLUMN c ...`, or `CHANGE COLUMN old new ...` when renamed; when foreign keys (of the table or of others) use the column, `ALTER TABLE x DROP FOREIGN KEY fk` for each before it and `ALTER TABLE x ADD CONSTRAINT fk FOREIGN KEY ...` after it, as MariaDB refuses to change such a column (error 1833); an unnamed key cannot be dropped by name (note `no-migration`) |
 | `drop_column` | `ALTER TABLE t DROP COLUMN c` |
 | `set_table_options` | `ALTER TABLE t ENGINE=... COMMENT='...'` with the options given a value; a removed option has no statement (note `no-migration`) |
+| `add_index` | `ALTER TABLE t ADD [UNIQUE\|FULLTEXT\|SPATIAL\|VECTOR] INDEX name (...)`, `ADD PRIMARY KEY (...)` |
+| `drop_index` | `ALTER TABLE t DROP INDEX name`, `DROP PRIMARY KEY`; an unnamed index has no statement (the server named it; note `no-migration`) |
+| `set_primary_key` | `ALTER TABLE t DROP PRIMARY KEY, ADD PRIMARY KEY (...)`, or `ADD PRIMARY KEY (...)` when the table had none |
+| `add_foreign_key` | `ALTER TABLE t ADD CONSTRAINT name FOREIGN KEY (...) REFERENCES ...` |
+| `drop_foreign_key` | `ALTER TABLE t DROP FOREIGN KEY name`; an unnamed key has no statement (note `no-migration`) |
 
 ## Notes
 
@@ -193,7 +232,7 @@ runs the statements inside a stored procedure. Names are in backticks.
 | `routine-recreated` | no statement renames a routine: the migration drops it and creates it again, and a `CREATE PROCEDURE` or `FUNCTION` cannot run inside a stored procedure, so msm or a person must place it |
 | `routine-created` | the same for a routine `add_routine` creates: its `CREATE` in the migration cannot run inside a stored procedure. msm treats it as `routine-recreated` |
 | `still-referenced` | after a drop, a statement still refers to the dropped table, view, routine or column (a view's `SELECT`, a trigger or routine body, an `INSERT`); one note per statement |
-| `no-migration` | the edit has no statement for part of it: an option removed by `set_table_options`, an unnamed foreign key around a `modify_column` |
+| `no-migration` | the edit has no statement for part of it: an option removed by `set_table_options`, an unnamed index or foreign key dropped, an unnamed foreign key around a `modify_column` |
 
 A kind is never removed or renamed within format 1; a consumer that does not know a kind
 should show its `message`.
@@ -211,10 +250,10 @@ A refused request writes no edits, whatever edits before the failing one did:
 | Kind | When |
 | --- | --- |
 | `bad-request` | the request is not JSON of format 1, an op is unknown, a member is missing, empty, unknown or of the wrong type, a new name is too long, a routine name is ambiguous without `kind`, a column's type is not a MariaDB data type, or a definition does not parse |
-| `unsupported` | an op this binary does not do yet, or a routine renamed while a routine of the other kind has its name (references do not tell the two apart) |
+| `unsupported` | an op this binary does not do, a routine renamed while a routine of the other kind has its name (references do not tell the two apart), or a column added to a table whose columns the script does not list (`CREATE TABLE ... AS SELECT`, `LIKE`) |
 | `unknown-object` | the table, column, view or routine is not in the outline, nor the table or column a foreign key references, nor the column `after` names |
-| `name-taken` | the new name is taken: by a table or view for a table or view (they share a namespace), by a column of the table, by a routine of either kind, by a foreign key of the schema; a change of case only is a rename |
-| `referenced` | `drop_table` of a table another table's foreign key references; `drop_column` of a column a foreign key uses |
+| `name-taken` | the new name is taken: by a table or view for a table or view (they share a namespace), by a column of the table, by a routine of either kind, by an index of the table, by a foreign key of the schema; a second primary key (use `set_primary_key`); a change of case only is a rename |
+| `referenced` | `drop_table` of a table another table's foreign key references; `drop_column` of a column a foreign key uses; `drop_index` or `set_primary_key` taking away the index a foreign key or an `AUTO_INCREMENT` column needs |
 | `edit-outside-slice` | an edit of an included file would cross the bound of a directive's slice, lie outside every slice of the file, or leave a slice that cannot be written to select the edited text |
 | `self-check` | the outline of the edited texts does not show the edit (the table under its new name, the old name gone from every foreign key, trigger and index; an added object where it was asked for; a dropped one gone), or has a statement it cannot read that the input's outline read (an unapplied note the input did not have) |
 
