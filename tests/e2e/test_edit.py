@@ -120,6 +120,12 @@ class Edit_fixture(unittest.TestCase):
         # msm detects support by this line.
         answer = subprocess.run([BINARY, "--help"], capture_output=True, text=True)
         self.assertRegex(answer.stdout, r"(?m)^  edit ")
+        # And the ops it does by this one.
+        ops = re.search(r"(?m)^ +edit ops: (.*)$", answer.stdout).group(1).split()
+        self.assertIn("rename_table", ops)
+        self.assertIn("add_table", ops)
+        self.assertIn("drop_routine", ops)
+        self.assertNotIn("add_index", ops)
 
     def test_rename_across_includes(self):
         code, result = self.p.edit([
@@ -157,7 +163,11 @@ class Edit_fixture(unittest.TestCase):
             ([{"op": "rename_table", "table": "customer", "new_name": "customer_orders"}], "name-taken"),
             ([{"op": "rename_column", "table": "customer", "column": "id", "new_name": "NAME"}],
              "name-taken"),
-            ([{"op": "drop_table", "table": "customer"}], "unsupported"),
+            ([{"op": "add_index", "table": "customer", "index": {"kind": "index", "columns": ["name"]}}],
+             "unsupported"),
+            ([{"op": "drop_table", "table": "customer"}], "referenced"),
+            ([{"op": "add_table", "table": {"name": "x", "columns": [{"name": "a", "type": "INTT"}]}}],
+             "bad-request"),
             ([{"op": "rename_tables", "table": "customer"}], "bad-request"),
             ([{"op": "rename_table", "table": "customer"}], "bad-request"),
         ]
@@ -168,6 +178,10 @@ class Edit_fixture(unittest.TestCase):
             self.assertEqual(result["error"]["edit"], 0, edits)
 
     def test_routine_rename(self):
+        # Section 150 as MSM writes it: dropped, then created.
+        routines = self.p.dev / "sections" / "150_routines.sql"
+        routines.write_text(routines.read_text().replace(
+            "CREATE FUNCTION order_count", "DROP FUNCTION IF EXISTS order_count%%\nCREATE FUNCTION order_count"))
         code, result = self.p.edit([{"op": "rename_routine", "routine": "order_count",
                                      "new_name": "orders_of"}], "shop")
         self.assertEqual(code, 0, result)
@@ -176,6 +190,74 @@ class Edit_fixture(unittest.TestCase):
         self.assertEqual([n["kind"] for n in result["notes"]], ["routine-recreated"])
         self.p.apply(result)
         self.assertEqual(self.p.outline(), result["outline"])
+        self.assertIn("DROP FUNCTION IF EXISTS orders_of%%\nCREATE FUNCTION orders_of(", routines.read_text())
+
+    def checks(self):
+        check = self.p.run("check", "--source-dir", str(self.p.dev), "-")
+        self.assertEqual(check.returncode, 0, check.stdout.decode())
+
+    def test_add_table_and_columns(self):
+        code, result = self.p.edit([
+            {"op": "add_table", "table": {
+                "name": "product",
+                "columns": [{"name": "id", "type": "INT", "nullable": False},
+                            {"name": "price", "type": "DECIMAL(10,2)"}],
+                "indexes": [{"kind": "primary", "columns": ["id"]}]}},
+            {"op": "add_column", "table": "orders",
+             "column": {"name": "product_id", "type": "INT", "nullable": False}},
+            # customer's last column comes from an ALTER TABLE.
+            {"op": "add_column", "table": "customer", "column": {"name": "phone", "type": "VARCHAR(20)"}},
+            {"op": "modify_column", "table": "customer", "column": "name",
+             "new_column": {"name": "name", "type": "VARCHAR(80)", "nullable": False}},
+        ], "shop")
+        self.assertEqual(code, 0, result)
+        # The new table goes after the last one, which 180_extra.sql defines.
+        self.assertEqual([f["file"] for f in result["files"]],
+                         ["sections/140_tables.sql", "sections/180_extra.sql"])
+        self.p.apply(result)
+        self.assertEqual(self.p.outline(), result["outline"])
+        tables = (self.p.dev / "sections" / "140_tables.sql").read_text()
+        self.assertIn("ALTER TABLE customer ADD COLUMN email VARCHAR(80);\n"
+                      "ALTER TABLE customer ADD COLUMN phone VARCHAR(20) AFTER email;\n", tables)
+        self.assertIn("  customer_id INT,\n  product_id INT NOT NULL,\n", tables)
+        extra = (self.p.dev / "sections" / "180_extra.sql").read_text()
+        self.assertIn("CREATE TABLE note (id INT);\nCREATE TABLE product (\n  id INT NOT NULL,\n", extra)
+        # The footer the slice leaves out is still last.
+        self.assertTrue(tables.endswith("-- footer\n"))
+        self.assertEqual([m["sql"] for m in result["migration"]][1:], [
+            "ALTER TABLE `orders` ADD COLUMN `product_id` INT NOT NULL",
+            "ALTER TABLE `customer` ADD COLUMN `phone` VARCHAR(20)",
+            "ALTER TABLE `customer` MODIFY COLUMN `name` VARCHAR(80) NOT NULL"])
+        self.checks()
+
+    def test_views_and_routines(self):
+        code, result = self.p.edit([
+            {"op": "add_view", "view": {"name": "view1", "definition": "SELECT 1"}},
+            {"op": "add_routine", "routine": {"name": "routine1", "kind": "procedure",
+                                              "body": "BEGIN\n  SELECT 1;\nEND"}},
+            {"op": "drop_view", "view": "customer_orders"},
+        ], "shop")
+        self.assertEqual(code, 0, result)
+        self.assertEqual([n["kind"] for n in result["notes"]], ["routine-created"])
+        self.p.apply(result)
+        self.assertEqual(self.p.outline(), result["outline"])
+        # After the last routine, restore_roles, in the script's DELIMITER
+        # block and with its delimiter.
+        self.assertIn("END%%\nCREATE PROCEDURE routine1()\nBEGIN\n  SELECT 1;\nEND%%\nDELIMITER ;", self.p.script)
+        routines = (self.p.dev / "sections" / "150_routines.sql").read_text()
+        self.assertNotIn("customer_orders", routines)
+        self.assertIn("CREATE VIEW view1 AS SELECT 1;", routines)
+        self.checks()
+
+    def test_drop_table(self):
+        code, result = self.p.edit([{"op": "drop_table", "table": "orders"}], "shop")
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["migration"], [{"edit": 0, "sql": "DROP TABLE `orders`"}])
+        # The function and the view still select from it.
+        self.assertEqual([n["kind"] for n in result["notes"]], ["still-referenced", "still-referenced"])
+        self.p.apply(result)
+        self.assertEqual(self.p.outline(), result["outline"])
+        self.assertNotIn("orders", table_names(result["outline"]))
 
 
 @unittest.skipUnless((MRS_PROJECT / "development").is_dir(),
@@ -207,6 +289,53 @@ class Edit_mrs_project(unittest.TestCase):
         # The edited project still checks.
         check = self.p.run("check", "--source-dir", str(self.p.dev), "-")
         self.assertEqual(check.returncode, 0, check.stdout.decode())
+
+    def test_rename_a_routine_and_its_drop(self):
+        code, result = self.p.edit([{"op": "rename_routine", "routine": "dump_audit_log",
+                                     "kind": "procedure", "new_name": "dump_the_audit_log"}],
+                                   "mariadb_rest_service")
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["migration"][0]["sql"], "DROP PROCEDURE `dump_audit_log`")
+        self.p.apply(result)
+        self.assertEqual(self.p.outline(), result["outline"])
+        routines = (self.p.dev / "sections" / "150-20_procedures_functions.sql").read_text()
+        self.assertIn("DROP PROCEDURE IF EXISTS `dump_the_audit_log`%%", routines)
+        self.assertNotIn("dump_audit_log`", routines)
+
+    def test_add_and_drop(self):
+        before = self.p.outline()
+        code, result = self.p.edit([
+            {"op": "add_table", "table": {
+                "name": "audit_note",
+                "columns": [{"name": "id", "type": "BINARY(16)", "nullable": False},
+                            {"name": "url_host_id", "type": "BINARY(16)", "nullable": False},
+                            {"name": "note", "type": "TEXT"}],
+                "indexes": [{"kind": "primary", "columns": ["id"]}],
+                "foreign_keys": [{"name": "fk_audit_note_url_host", "columns": ["url_host_id"],
+                                  "references": {"table": "url_host", "columns": ["id"]}}]}},
+            {"op": "add_column", "table": "url_host", "column": {"name": "remark", "type": "TEXT"}},
+            {"op": "add_view", "view": {"name": "view1", "definition": "SELECT 1"}},
+            {"op": "add_routine", "routine": {"name": "routine1", "kind": "procedure",
+                                              "body": "BEGIN\nEND"}},
+        ], "mariadb_rest_service")
+        self.assertEqual(code, 0, result)
+        self.p.apply(result)
+        after = self.p.outline()
+        self.assertEqual(after, result["outline"])
+        self.assertEqual(len(after["notes"]), len(before["notes"]))
+        self.assertIn("audit_note", table_names(after))
+        check = self.p.run("check", "--source-dir", str(self.p.dev), "-")
+        self.assertEqual(check.returncode, 0, check.stdout.decode())
+        # And all of it undone.
+        code, result = self.p.edit([
+            {"op": "drop_routine", "routine": "routine1"},
+            {"op": "drop_view", "view": "view1"},
+            {"op": "drop_column", "table": "url_host", "column": "remark"},
+            {"op": "drop_table", "table": "audit_note"},
+        ], "mariadb_rest_service")
+        self.assertEqual(code, 0, result)
+        self.p.apply(result)
+        self.assertEqual(self.p.outline(), before)
 
 
 if __name__ == "__main__":

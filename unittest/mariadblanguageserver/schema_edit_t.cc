@@ -255,12 +255,41 @@ TEST(Schema_edit, request_errors) {
             kind(request("s", R"({"op": "rename_routine", "routine": "r", "kind": "x", "new_name": "q"})")));
   EXPECT_EQ("ok", kind(request("", rename_table("t", std::string(64, 'x')))));
   EXPECT_EQ("ok", kind(request("s", R"({"op": "drop_table", "table": "t"})")));
+  // The ops of PR 2 on: unknown members, missing or empty structs.
+  EXPECT_EQ("bad-request", kind(request("s", R"j({"op": "drop_table", "table": "t", "cascade": true})j")));
+  EXPECT_EQ("bad-request", kind(request("s", R"j({"op": "add_table", "table": {"name": "t", "columns": []}})j")));
+  EXPECT_EQ("bad-request", kind(request("s", R"j({"op": "add_table", "table": {"name": "t"}})j")));
+  EXPECT_EQ("bad-request",
+            kind(request("s", R"j({"op": "add_column", "table": "t", "column": {"name": "c", "type": "INT", "nullabel": false}})j")));
+  EXPECT_EQ("bad-request",
+            kind(request("s", R"j({"op": "add_column", "table": "t", "column": {"name": "c", "type": "INT"}, "after": "a", "first": true})j")));
+  EXPECT_EQ("bad-request", kind(request("s", R"j({"op": "add_column", "table": "t", "column": {"name": "c"}})j")));
+  EXPECT_EQ("bad-request",
+            kind(request("s", R"j({"op": "add_table", "table": {"name": "t", "columns": [{"name": "a", "type": "INT"}], "indexes": [{"kind": "key", "columns": ["a"]}]}})j")));
+  EXPECT_EQ("bad-request",
+            kind(request("s", R"j({"op": "add_table", "table": {"name": "t", "columns": [{"name": "a", "type": "INT"}], "foreign_keys": [{"columns": ["a"], "references": {"table": "u", "columns": ["x", "y"]}}]}})j")));
+  EXPECT_EQ("bad-request", kind(request("s", R"j({"op": "add_view", "view": {"name": "v", "definition": " "}})j")));
+  EXPECT_EQ("bad-request",
+            kind(request("s", R"j({"op": "add_routine", "routine": {"name": "f", "kind": "function", "body": "RETURN 1"}})j")));
+  EXPECT_EQ("bad-request", kind(request("s", R"j({"op": "set_table_options", "table": "t", "options": {}})j")));
+  EXPECT_EQ("bad-request", kind(request("s", R"j({"op": "set_table_options", "table": "t", "options": {"engine": 1}})j")));
+  // Outline objects come back with their positions, which are ignored.
+  EXPECT_EQ("ok",
+            kind(request("s", R"j({"op": "add_column", "table": "t", "column": {"name": "c", "type": "INT", "range": {}, "selection_range": {}}})j")));
 }
 
 TEST(Schema_edit, unsupported_ops) {
-  const auto e = failed(edit("CREATE TABLE t (a INT);", {}, request("", R"({"op": "drop_table", "table": "t"})")));
+  const auto e = failed(edit("CREATE TABLE t (a INT);", {},
+                             request("", R"({"op": "set_primary_key", "table": "t", "columns": ["a"]})")));
   EXPECT_EQ("unsupported", e.kind);
   EXPECT_EQ(0u, e.edit.value());
+}
+
+TEST(Schema_edit, supported_ops) {
+  EXPECT_EQ(
+      "rename_table rename_column rename_view rename_routine add_table drop_table add_column modify_column "
+      "drop_column set_table_options add_view drop_view add_routine drop_routine",
+      supported_edit_ops());
 }
 
 // ---------------------------------------------------------------------------
@@ -569,6 +598,445 @@ TEST(Schema_edit, error_json) {
             edit_error_json({2, "name-taken", "m"}));
   EXPECT_EQ(R"({"error":{"edit":null,"kind":"bad-request","message":"m"}})",
             edit_error_json({std::nullopt, "bad-request", "m"}));
+}
+
+}  // namespace mdbls
+
+// ---------------------------------------------------------------------------
+// Tables, columns, options, views and routines (PR 2)
+
+namespace mdbls {
+namespace {
+
+// A Workbench-style script: banners, two blank lines between tables.
+const std::string k_shop =
+    "CREATE DATABASE shop;\n"
+    "USE shop;\n"
+    "\n"
+    "-- -----------------------------------------------------\n"
+    "-- Table `shop`.`customer`\n"
+    "-- -----------------------------------------------------\n"
+    "CREATE TABLE `customer` (\n"
+    "  `id` INT NOT NULL AUTO_INCREMENT,\n"
+    "  `name` VARCHAR(45) NOT NULL,\n"
+    "  PRIMARY KEY (`id`)\n"
+    ") ENGINE=InnoDB;\n"
+    "\n"
+    "\n"
+    "-- -----------------------------------------------------\n"
+    "-- Table `shop`.`orders`\n"
+    "-- -----------------------------------------------------\n"
+    "CREATE TABLE `orders` (\n"
+    "  `id` INT NOT NULL,\n"
+    "  `customer_id` INT NOT NULL,\n"
+    "  `note` TEXT,\n"
+    "  PRIMARY KEY (`id`),\n"
+    "  INDEX `ix_note` (`note`(10), `customer_id`),\n"
+    "  CONSTRAINT `fk_orders_customer` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`)\n"
+    ") ENGINE=InnoDB COMMENT='the orders';\n"
+    "\n"
+    "CREATE VIEW `v_orders` AS SELECT o.id, o.note FROM orders o;\n"
+    "\n"
+    "DELIMITER $$\n"
+    "CREATE PROCEDURE `p1`()\n"
+    "BEGIN\n"
+    "  SELECT note FROM orders;\n"
+    "END$$\n"
+    "DELIMITER ;\n";
+
+// k_shop with `from` replaced by `to` (once; it must be there).
+std::string shop_with(const std::string &from, const std::string &to) {
+  std::string s = k_shop;
+  const size_t at = s.find(from);
+  EXPECT_NE(std::string::npos, at) << from;
+  if (at != std::string::npos) s.replace(at, from.size(), to);
+  return s;
+}
+
+}  // namespace
+}  // namespace mdbls
+
+namespace mdbls {
+
+TEST(Schema_edit, add_table_after_the_last_table) {
+  const auto r = ok(edit(k_shop, {}, request("shop", R"j({"op": "add_table", "table": {"name": "product",
+      "columns": [{"name": "id", "type": "UUID", "nullable": false}, {"name": "price", "type": "DECIMAL(10,2)"}],
+      "indexes": [{"kind": "primary", "columns": ["id"]}]}})j")));
+  // As far from the table before as the tables before are from each
+  // other; no banner of its own.
+  EXPECT_EQ(shop_with(") ENGINE=InnoDB COMMENT='the orders';\n",
+                      ") ENGINE=InnoDB COMMENT='the orders';\n"
+                      "\n\n"
+                      "CREATE TABLE `product` (\n"
+                      "  `id` UUID NOT NULL,\n"
+                      "  `price` DECIMAL(10,2),\n"
+                      "  PRIMARY KEY (`id`)\n"
+                      ");\n"),
+            text(r, ""));
+  EXPECT_EQ(std::vector<std::string>{"CREATE TABLE `product` (\n  `id` UUID NOT NULL,\n  `price` DECIMAL(10,2),\n  PRIMARY KEY (`id`)\n)"},
+            migration(r));
+  const Table *t = table(r, "shop", "product");
+  ASSERT_NE(nullptr, t);
+  EXPECT_EQ(2u, t->columns.size());
+  EXPECT_FALSE(t->columns[0].nullable);
+}
+
+TEST(Schema_edit, add_table_with_foreign_keys) {
+  // An n:m table: both keys go into the CREATE TABLE.
+  const auto r = ok(edit(k_shop, {}, request("shop", R"j({"op": "add_table", "table": {"name": "customer_has_orders",
+      "columns": [{"name": "customer_id", "type": "INT", "nullable": false}, {"name": "orders_id", "type": "INT", "nullable": false}],
+      "indexes": [{"kind": "primary", "columns": ["customer_id", "orders_id"]}],
+      "foreign_keys": [
+        {"name": "fk_c", "columns": ["customer_id"], "references": {"table": "customer", "columns": ["id"]}},
+        {"name": "fk_o", "columns": ["orders_id"], "references": {"table": "orders", "columns": ["id"]}, "on_delete": "cascade"}]}})j")));
+  const Table *t = table(r, "shop", "customer_has_orders");
+  ASSERT_NE(nullptr, t);
+  ASSERT_EQ(2u, t->foreign_keys.size());
+  EXPECT_EQ("orders", t->foreign_keys[1].ref_table);
+  EXPECT_EQ("CASCADE", t->foreign_keys[1].on_delete);
+  EXPECT_NE(std::string::npos, text(r, "").find("CONSTRAINT `fk_o` FOREIGN KEY (`orders_id`) REFERENCES `orders` (`id`) ON DELETE CASCADE"));
+}
+
+TEST(Schema_edit, add_table_errors) {
+  auto kind = [](const std::string &table) {
+    const auto r = edit(k_shop, {}, request("shop", R"j({"op": "add_table", "table": )j" + table + "}"));
+    return std::holds_alternative<Edit_error>(r) ? std::get<Edit_error>(r).kind + ": " + std::get<Edit_error>(r).message : "ok";
+  };
+  EXPECT_EQ("name-taken: a table or view `Customer` exists", kind(R"j({"name": "Customer", "columns": [{"name": "a", "type": "INT"}]})j"));
+  EXPECT_EQ("name-taken: a table or view `v_orders` exists", kind(R"j({"name": "v_orders", "columns": [{"name": "a", "type": "INT"}]})j"));
+  // The viewer shows the message on the column's editor.
+  EXPECT_EQ("bad-request: column `price`: `VARCHR(45)` is not a MariaDB data type",
+            kind(R"j({"name": "x", "columns": [{"name": "id", "type": "INT"}, {"name": "price", "type": "VARCHR(45)"}]})j"));
+  EXPECT_EQ("bad-request", kind(R"j({"name": "x", "columns": [{"name": "d", "type": "INT", "default": "("}]})j").substr(0, 11));
+  EXPECT_EQ("bad-request: table `x` has two columns `A`",
+            kind(R"j({"name": "x", "columns": [{"name": "a", "type": "INT"}, {"name": "A", "type": "INT"}]})j"));
+  EXPECT_EQ("unknown-object: there is no table `nope` to reference",
+            kind(R"j({"name": "x", "columns": [{"name": "a", "type": "INT"}], "foreign_keys": [{"columns": ["a"], "references": {"table": "nope", "columns": ["id"]}}]})j"));
+  EXPECT_EQ("unknown-object: table `customer` has no column `nope` to reference",
+            kind(R"j({"name": "x", "columns": [{"name": "a", "type": "INT"}], "foreign_keys": [{"columns": ["a"], "references": {"table": "customer", "columns": ["nope"]}}]})j"));
+  EXPECT_EQ("name-taken: a foreign key `fk_orders_customer` exists on table `orders`",
+            kind(R"j({"name": "x", "columns": [{"name": "a", "type": "INT"}], "foreign_keys": [{"name": "fk_orders_customer", "columns": ["a"], "references": {"table": "customer", "columns": ["id"]}}]})j"));
+}
+
+TEST(Schema_edit, add_table_in_the_style_of_the_script) {
+  // Lower-case keywords (the formatter writes types as keywords), names
+  // unquoted, CRLF; no blank line before, as the table before has none.
+  const std::string script = "create table a (\r\n  id int\r\n);\r\n";
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "add_table", "table": {"name": "b",
+      "columns": [{"name": "id", "type": "INT", "nullable": false}, {"name": "order", "type": "INT"}]}})j")));
+  EXPECT_EQ("create table a (\r\n  id int\r\n);\r\ncreate table b (\r\n  id int not null,\r\n  `order` int\r\n);\r\n",
+            text(r, ""));
+}
+
+TEST(Schema_edit, add_table_to_an_empty_script) {
+  const auto r = ok(edit("", {}, request("", R"j({"op": "add_table", "table": {"name": "t", "columns": [{"name": "a", "type": "INT"}]}})j")));
+  EXPECT_EQ("CREATE TABLE `t` (\n  `a` INT\n);\n", text(r, ""));
+  const auto r2 = ok(edit("SET NAMES utf8mb4;", {}, request("", R"j({"op": "add_table", "table": {"name": "t", "columns": [{"name": "a", "type": "INT"}]}})j")));
+  EXPECT_EQ("SET NAMES utf8mb4;\n\nCREATE TABLE `t` (\n  `a` INT\n);\n", text(r2, ""));
+}
+
+TEST(Schema_edit, drop_table) {
+  const std::string script =
+      "CREATE TABLE a (id INT PRIMARY KEY);\n"
+      "\n"
+      "-- Table b\n"
+      "DROP TABLE IF EXISTS b;\n"
+      "CREATE TABLE b (id INT, a_id INT, FOREIGN KEY (a_id) REFERENCES a (id));\n"
+      "CREATE INDEX ix_b ON b (id);\n"
+      "ALTER TABLE b ADD COLUMN c INT;\n"
+      "CREATE TRIGGER tb BEFORE INSERT ON b FOR EACH ROW SET NEW.c = 1;\n"
+      "\n"
+      "CREATE VIEW v AS SELECT id FROM b;\n"
+      "INSERT INTO b VALUES (1, 1, 1);\n";
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "drop_table", "table": "b"})j")));
+  EXPECT_EQ(
+      "CREATE TABLE a (id INT PRIMARY KEY);\n"
+      "\n"
+      "CREATE VIEW v AS SELECT id FROM b;\n"
+      "INSERT INTO b VALUES (1, 1, 1);\n",
+      text(r, ""));
+  EXPECT_EQ(std::vector<std::string>{"DROP TABLE `b`"}, migration(r));
+  EXPECT_EQ((std::vector<std::string>{"still-referenced", "still-referenced"}), note_kinds(r));
+  EXPECT_EQ(nullptr, table(r, "", "b"));
+  // A table another one references stays.
+  const auto e = failed(edit(script, {}, request("", R"j({"op": "drop_table", "table": "a"})j")));
+  EXPECT_EQ("referenced", e.kind);
+  // Unless an earlier edit of the request dropped that one.
+  const auto r2 = ok(edit(script, {}, request("", R"j({"op": "drop_table", "table": "b"}, {"op": "drop_table", "table": "a"})j")));
+  EXPECT_EQ("CREATE VIEW v AS SELECT id FROM b;\nINSERT INTO b VALUES (1, 1, 1);\n", text(r2, ""));
+}
+
+TEST(Schema_edit, add_column) {
+  // After the last column, before the keys.
+  const auto r = ok(edit(k_shop, {}, request("shop", R"j({"op": "add_column", "table": "orders", "column": {"name": "total", "type": "DECIMAL(10,2)", "nullable": false}})j")));
+  EXPECT_EQ(shop_with("  `note` TEXT,\n", "  `note` TEXT,\n  `total` DECIMAL(10,2) NOT NULL,\n"), text(r, ""));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `orders` ADD COLUMN `total` DECIMAL(10,2) NOT NULL"}, migration(r));
+  // After a column, first.
+  const auto r2 = ok(edit(k_shop, {}, request("shop", R"j({"op": "add_column", "table": "orders", "column": {"name": "x", "type": "INT"}, "after": "id"},
+      {"op": "add_column", "table": "orders", "column": {"name": "y", "type": "INT"}, "first": true})j")));
+  EXPECT_EQ(shop_with("  `id` INT NOT NULL,\n  `customer_id`", "  `y` INT,\n  `id` INT NOT NULL,\n  `x` INT,\n  `customer_id`"), text(r2, ""));
+  EXPECT_EQ((std::vector<std::string>{"ALTER TABLE `orders` ADD COLUMN `x` INT AFTER `id`", "ALTER TABLE `orders` ADD COLUMN `y` INT FIRST"}),
+            migration(r2));
+  // A table on one line, the last element a column.
+  const auto r3 = ok(edit("CREATE TABLE t (a INT, b INT);\n", {}, request("", R"j({"op": "add_column", "table": "t", "column": {"name": "c", "type": "INT"}},
+      {"op": "add_column", "table": "t", "column": {"name": "d", "type": "INT"}, "after": "a"})j")));
+  EXPECT_EQ("CREATE TABLE t (a INT, d INT, b INT, c INT);\n", text(r3, ""));
+  // The last element followed by a comment, the parenthesis on its line.
+  const auto r4 = ok(edit("CREATE TABLE t (\n  a INT -- the a\n);\nCREATE TABLE u (\n  a INT);\n", {},
+                         request("", R"j({"op": "add_column", "table": "t", "column": {"name": "b", "type": "INT"}},
+      {"op": "add_column", "table": "u", "column": {"name": "b", "type": "INT"}})j")));
+  EXPECT_EQ("CREATE TABLE t (\n  a INT, -- the a\n  b INT\n);\nCREATE TABLE u (\n  a INT,\n  b INT);\n", text(r4, ""));
+}
+
+TEST(Schema_edit, add_column_after_one_an_alter_table_added) {
+  const std::string script =
+      "CREATE TABLE t (a INT, b INT);\n"
+      "ALTER TABLE t ADD COLUMN c INT;\n"
+      "SELECT 1;\n";
+  // No `after`: after the table's last column, which the ALTER TABLE adds.
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "add_column", "table": "t", "column": {"name": "d", "type": "INT"}})j")));
+  EXPECT_EQ("CREATE TABLE t (a INT, b INT);\nALTER TABLE t ADD COLUMN c INT;\nALTER TABLE t ADD COLUMN d INT AFTER c;\nSELECT 1;\n",
+            text(r, ""));
+  const Table *t = table(r, "", "t");
+  ASSERT_NE(nullptr, t);
+  EXPECT_EQ("d", t->columns.back().name);
+}
+
+TEST(Schema_edit, add_column_errors) {
+  auto kind = [](const std::string &edit_json) {
+    const auto r = edit(k_shop, {}, request("shop", edit_json));
+    return std::holds_alternative<Edit_error>(r) ? std::get<Edit_error>(r).kind : "ok";
+  };
+  EXPECT_EQ("unknown-object", kind(R"j({"op": "add_column", "table": "nope", "column": {"name": "x", "type": "INT"}})j"));
+  EXPECT_EQ("name-taken", kind(R"j({"op": "add_column", "table": "orders", "column": {"name": "NOTE", "type": "INT"}})j"));
+  EXPECT_EQ("unknown-object", kind(R"j({"op": "add_column", "table": "orders", "column": {"name": "x", "type": "INT"}, "after": "nope"})j"));
+  EXPECT_EQ("bad-request", kind(R"j({"op": "add_column", "table": "orders", "column": {"name": "x", "type": "INTEGRAL"}})j"));
+}
+
+TEST(Schema_edit, add_column_to_a_sliced_include) {
+  // The slice's end moves past the longer text.
+  const std::string tables = "-- tables\nCREATE TABLE t (\n  a INT\n);\n-- end\n";
+  const std::string script = "SOURCE 'tables.sql'[ln2:ln4];\n";
+  const auto r = ok(edit(script, {{"tables.sql", tables}},
+                         request("", R"j({"op": "add_column", "table": "t", "column": {"name": "b", "type": "INT"}})j")));
+  EXPECT_EQ("-- tables\nCREATE TABLE t (\n  a INT,\n  b INT\n);\n-- end\n", text(r, "tables.sql"));
+  EXPECT_EQ("SOURCE 'tables.sql'[ln2:ln5];\n", text(r, ""));
+}
+
+TEST(Schema_edit, modify_column) {
+  const auto r = ok(edit(k_shop, {}, request("shop", R"j({"op": "modify_column", "table": "orders", "column": "note",
+      "new_column": {"name": "note", "type": "VARCHAR(200)", "comment": "free text"}})j")));
+  EXPECT_EQ(shop_with("  `note` TEXT,\n", "  `note` VARCHAR(200) COMMENT 'free text',\n"), text(r, ""));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `orders` MODIFY COLUMN `note` VARCHAR(200) COMMENT 'free text'"}, migration(r));
+  // A new name: also a rename, references included.
+  const auto r2 = ok(edit(k_shop, {}, request("shop", R"j({"op": "modify_column", "table": "orders", "column": "note",
+      "new_column": {"name": "remark", "type": "TEXT"}})j")));
+  EXPECT_NE(std::string::npos, text(r2, "").find("  `remark` TEXT,\n"));
+  EXPECT_NE(std::string::npos, text(r2, "").find("INDEX `ix_note` (`remark`(10), `customer_id`)"));
+  EXPECT_NE(std::string::npos, text(r2, "").find("SELECT o.id, o.remark FROM orders o"));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `orders` CHANGE COLUMN `note` `remark` TEXT"}, migration(r2));
+}
+
+TEST(Schema_edit, modify_column_keeps_its_key_and_check) {
+  const std::string script = "CREATE TABLE t (id INT PRIMARY KEY, j TEXT CHECK (JSON_VALID(j)));\n";
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "modify_column", "table": "t", "column": "id", "new_column": {"name": "id", "type": "BIGINT"}},
+      {"op": "modify_column", "table": "t", "column": "j", "new_column": {"name": "j", "type": "LONGTEXT"}})j")));
+  EXPECT_EQ("CREATE TABLE t (id BIGINT PRIMARY KEY, j LONGTEXT CHECK (JSON_VALID(j)));\n", text(r, ""));
+}
+
+TEST(Schema_edit, modify_column_used_by_foreign_keys) {
+  // MariaDB refuses to change a column a foreign key uses (1833): the keys
+  // go before and come back after.
+  const auto r = ok(edit(k_shop, {}, request("shop", R"j({"op": "modify_column", "table": "customer", "column": "id",
+      "new_column": {"name": "id", "type": "BIGINT", "nullable": false, "auto_increment": true}})j")));
+  EXPECT_EQ((std::vector<std::string>{
+                "ALTER TABLE `orders` DROP FOREIGN KEY `fk_orders_customer`",
+                "ALTER TABLE `customer` MODIFY COLUMN `id` BIGINT NOT NULL AUTO_INCREMENT",
+                "ALTER TABLE `orders` ADD CONSTRAINT `fk_orders_customer` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`)"}),
+            migration(r));
+}
+
+TEST(Schema_edit, drop_column) {
+  const auto r = ok(edit(k_shop, {}, request("shop", R"j({"op": "drop_column", "table": "orders", "column": "note"})j")));
+  // Its key part goes; the index stays with the other one.
+  EXPECT_EQ(shop_with("  `note` TEXT,\n  PRIMARY KEY (`id`),\n  INDEX `ix_note` (`note`(10), `customer_id`),\n",
+                      "  PRIMARY KEY (`id`),\n  INDEX `ix_note` (`customer_id`),\n"),
+            text(r, ""));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `orders` DROP COLUMN `note`"}, migration(r));
+  // The view and the procedure still select it.
+  EXPECT_EQ((std::vector<std::string>{"still-referenced", "still-referenced"}), note_kinds(r));
+  EXPECT_EQ("referenced", failed(edit(k_shop, {}, request("shop", R"j({"op": "drop_column", "table": "orders", "column": "customer_id"})j"))).kind);
+  EXPECT_EQ("referenced", failed(edit(k_shop, {}, request("shop", R"j({"op": "drop_column", "table": "customer", "column": "id"})j"))).kind);
+  EXPECT_EQ("bad-request", failed(edit("CREATE TABLE t (a INT);", {}, request("", R"j({"op": "drop_column", "table": "t", "column": "a"})j"))).kind);
+}
+
+TEST(Schema_edit, drop_column_from_every_statement) {
+  const std::string script =
+      "CREATE TABLE t (a INT, b INT, KEY (b), KEY ab (a, b));\n"
+      "ALTER TABLE t ADD COLUMN c INT, ADD INDEX ix_c (c);\n"
+      "ALTER TABLE t MODIFY b BIGINT;\n"
+      "CREATE INDEX ix_bc ON t (b, c);\n"
+      "CREATE INDEX ix_b ON t (b);\n";
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "drop_column", "table": "t", "column": "b"})j")));
+  EXPECT_EQ(
+      "CREATE TABLE t (a INT, KEY ab (a));\n"
+      "ALTER TABLE t ADD COLUMN c INT, ADD INDEX ix_c (c);\n"
+      "CREATE INDEX ix_bc ON t (c);\n",
+      text(r, ""));
+  const Table *t = table(r, "", "t");
+  ASSERT_NE(nullptr, t);
+  EXPECT_EQ(2u, t->columns.size());
+}
+
+TEST(Schema_edit, set_table_options) {
+  const auto r = ok(edit(k_shop, {}, request("shop", R"j({"op": "set_table_options", "table": "orders",
+      "options": {"comment": "all the orders", "engine": null, "row_format": "DYNAMIC"}})j")));
+  EXPECT_EQ(shop_with(") ENGINE=InnoDB COMMENT='the orders';", ") COMMENT='all the orders' ROW_FORMAT=DYNAMIC;"), text(r, ""));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `orders` COMMENT='all the orders' ROW_FORMAT=DYNAMIC"}, migration(r));
+  EXPECT_EQ(std::vector<std::string>{"no-migration"}, note_kinds(r));
+  // A table without options gets them after its column list.
+  const auto r2 = ok(edit("create table t (a int);\n", {}, request("", R"j({"op": "set_table_options", "table": "t", "options": {"engine": "Aria", "charset": "utf8mb4"}})j")));
+  EXPECT_EQ("create table t (a int) engine=Aria default charset=utf8mb4;\n", text(r2, ""));
+}
+
+TEST(Schema_edit, add_and_drop_view) {
+  const auto r = ok(edit(k_shop, {}, request("shop", R"j({"op": "add_view", "view": {"name": "view1", "definition": "SELECT 1"}})j")));
+  EXPECT_EQ(shop_with("FROM orders o;\n", "FROM orders o;\n\nCREATE VIEW `view1` AS SELECT 1;\n"), text(r, ""));
+  EXPECT_EQ(std::vector<std::string>{"CREATE VIEW `view1` AS SELECT 1"}, migration(r));
+  EXPECT_EQ("bad-request", failed(edit(k_shop, {}, request("shop", R"j({"op": "add_view", "view": {"name": "view1", "definition": "SELECT FROM"}})j"))).kind);
+  EXPECT_EQ("name-taken", failed(edit(k_shop, {}, request("shop", R"j({"op": "add_view", "view": {"name": "orders", "definition": "SELECT 1"}})j"))).kind);
+
+  const auto r2 = ok(edit(k_shop, {}, request("shop", R"j({"op": "drop_view", "view": "v_orders"})j")));
+  EXPECT_EQ(shop_with("CREATE VIEW `v_orders` AS SELECT o.id, o.note FROM orders o;\n\n", ""), text(r2, ""));
+  EXPECT_EQ(std::vector<std::string>{"DROP VIEW `v_orders`"}, migration(r2));
+}
+
+TEST(Schema_edit, add_routine_in_the_delimiter_block) {
+  const auto r = ok(edit(k_shop, {}, request("shop", R"j({"op": "add_routine", "routine": {"name": "routine1", "kind": "procedure", "body": "BEGIN\nEND"}},
+      {"op": "add_routine", "routine": {"name": "f1", "kind": "function", "parameters": [{"name": "a", "type": "INT"}], "returns": "INT", "deterministic": true, "body": "RETURN a + 1"}})j")));
+  EXPECT_EQ(shop_with("END$$\n", "END$$\nCREATE PROCEDURE `routine1`()\nBEGIN\nEND$$\n"
+                                 "CREATE FUNCTION `f1`(`a` INT) RETURNS INT DETERMINISTIC RETURN a + 1$$\n"),
+            text(r, ""));
+  EXPECT_EQ((std::vector<std::string>{"CREATE PROCEDURE `routine1`()\nBEGIN\nEND",
+                                      "CREATE FUNCTION `f1`(`a` INT) RETURNS INT DETERMINISTIC RETURN a + 1"}),
+            migration(r));
+  EXPECT_EQ((std::vector<std::string>{"routine-created", "routine-created"}), note_kinds(r));
+  // Any routine of the name, of either kind, takes it.
+  EXPECT_EQ("name-taken",
+            failed(edit(k_shop, {}, request("shop", R"j({"op": "add_routine", "routine": {"name": "P1", "kind": "function", "returns": "INT", "body": "RETURN 1"}})j"))).kind);
+  EXPECT_EQ("bad-request",
+            failed(edit(k_shop, {}, request("shop", R"j({"op": "add_routine", "routine": {"name": "r", "kind": "procedure", "body": "BEGIN SELECT FROM; END"}})j"))).kind);
+}
+
+TEST(Schema_edit, add_routine_in_a_new_delimiter_block) {
+  const std::string script = "CREATE TABLE t (a INT);\n";
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "add_routine", "routine": {"name": "p", "kind": "procedure", "body": "BEGIN\n  SELECT a FROM t;\nEND"}})j")));
+  // Names unquoted, as the script writes them.
+  EXPECT_EQ("CREATE TABLE t (a INT);\nDELIMITER $$\nCREATE PROCEDURE p()\nBEGIN\n  SELECT a FROM t;\nEND$$\nDELIMITER ;\n", text(r, ""));
+  // A body without a semicolon needs no block.
+  const auto r2 = ok(edit(script, {}, request("", R"j({"op": "add_routine", "routine": {"name": "p", "kind": "procedure", "body": "SELECT 1"}})j")));
+  EXPECT_EQ("CREATE TABLE t (a INT);\nCREATE PROCEDURE p() SELECT 1;\n", text(r2, ""));
+}
+
+TEST(Schema_edit, drop_routine) {
+  const auto r = ok(edit(k_shop, {}, request("shop", R"j({"op": "drop_routine", "routine": "p1"})j")));
+  EXPECT_EQ(shop_with("CREATE PROCEDURE `p1`()\nBEGIN\n  SELECT note FROM orders;\nEND$$\n", ""), text(r, ""));
+  EXPECT_EQ(std::vector<std::string>{"DROP PROCEDURE `p1`"}, migration(r));
+  EXPECT_EQ("unknown-object", failed(edit(k_shop, {}, request("shop", R"j({"op": "drop_routine", "routine": "p1", "kind": "function"})j"))).kind);
+}
+
+TEST(Schema_edit, rename_column_in_a_key_part_with_a_prefix_length) {
+  const auto r = ok(edit("CREATE TABLE t (a TEXT, b INT, INDEX ix (a(10), b));\n", {},
+                         request("", R"j({"op": "rename_column", "table": "t", "column": "a", "new_name": "z"})j")));
+  EXPECT_EQ("CREATE TABLE t (z TEXT, b INT, INDEX ix (z(10), b));\n", text(r, ""));
+}
+
+TEST(Schema_edit, renames_reach_the_drop_before_the_create) {
+  // MSM writes Section 150 to run on every deployment: drop, then create.
+  // A DROP left under the old name breaks the second deployment.
+  const std::string script =
+      "USE shop;\n"
+      "DELIMITER %%\n"
+      "\n"
+      "DROP PROCEDURE IF EXISTS `count_customers`%%\n"
+      "DROP PROCEDURE IF EXISTS shop.count_customers%%\n"
+      "DROP FUNCTION IF EXISTS `count_customers`%%\n"
+      "CREATE PROCEDURE `count_customers`()\n"
+      "BEGIN\n"
+      "    SELECT COUNT(*) AS `customers` FROM `customer`;\n"
+      "END%%\n"
+      "\n"
+      "DELIMITER ;\n";
+  const auto r = ok(edit(script, {}, request("shop", R"j({"op": "rename_routine", "routine": "count_customers",
+      "new_name": "count_clients", "kind": "procedure"})j")));
+  // A DROP FUNCTION is not a reference of the procedure.
+  EXPECT_EQ(
+      "USE shop;\n"
+      "DELIMITER %%\n"
+      "\n"
+      "DROP PROCEDURE IF EXISTS `count_clients`%%\n"
+      "DROP PROCEDURE IF EXISTS shop.count_clients%%\n"
+      "DROP FUNCTION IF EXISTS `count_customers`%%\n"
+      "CREATE PROCEDURE `count_clients`()\n"
+      "BEGIN\n"
+      "    SELECT COUNT(*) AS `customers` FROM `customer`;\n"
+      "END%%\n"
+      "\n"
+      "DELIMITER ;\n",
+      text(r, ""));
+  // msm takes the DROP of the old name from the migration.
+  ASSERT_FALSE(migration(r).empty());
+  EXPECT_EQ("DROP PROCEDURE `count_customers`", migration(r)[0]);
+
+  const auto f = ok(edit("DROP FUNCTION IF EXISTS f;\nCREATE FUNCTION f() RETURNS INT RETURN 1;\nDROP PROCEDURE IF EXISTS f;\n", {},
+                         request("", R"j({"op": "rename_routine", "routine": "f", "new_name": "g"})j")));
+  EXPECT_EQ("DROP FUNCTION IF EXISTS g;\nCREATE FUNCTION g() RETURNS INT RETURN 1;\nDROP PROCEDURE IF EXISTS f;\n", text(f, ""));
+
+  const auto v = ok(edit("DROP VIEW IF EXISTS `v`;\nCREATE VIEW `v` AS SELECT 1;\n", {},
+                         request("", R"j({"op": "rename_view", "view": "v", "new_name": "w"})j")));
+  EXPECT_EQ("DROP VIEW IF EXISTS `w`;\nCREATE VIEW `w` AS SELECT 1;\n", text(v, ""));
+
+  // A Workbench export.
+  const auto t = ok(edit("DROP TABLE IF EXISTS `mydb`.`t` ;\nCREATE TABLE IF NOT EXISTS `mydb`.`t` (`a` INT);\n", {},
+                         request("mydb", R"j({"op": "rename_table", "table": "t", "new_name": "u"})j")));
+  EXPECT_EQ("DROP TABLE IF EXISTS `mydb`.`u` ;\nCREATE TABLE IF NOT EXISTS `mydb`.`u` (`a` INT);\n", text(t, ""));
+}
+
+TEST(Schema_edit, a_routine_rename_leaves_triggers_and_events_of_its_name) {
+  const std::string script =
+      "CREATE TABLE t (a INT);\n"
+      "CREATE PROCEDURE x() SELECT 1;\n"
+      "DROP TRIGGER IF EXISTS x;\n"
+      "CREATE TRIGGER x BEFORE INSERT ON t FOR EACH ROW SET NEW.a = 1;\n"
+      "DROP EVENT IF EXISTS x;\n"
+      "ALTER EVENT x DISABLE;\n";
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "rename_routine", "routine": "x", "new_name": "y"})j")));
+  EXPECT_EQ(1u, edit_count(r, ""));
+  EXPECT_NE(std::string::npos, text(r, "").find("CREATE PROCEDURE y()"));
+}
+
+TEST(Schema_edit, string_literals_follow_the_sql_mode) {
+  const std::string request_json =
+      R"j({"op": "add_column", "table": "t", "column": {"name": "b", "type": "INT", "comment": "C:\\dir 'x'"}})j";
+  const auto r = ok(edit("CREATE TABLE t (\n  a INT\n);\n", {}, request("", request_json)));
+  EXPECT_NE(std::string::npos, text(r, "").find(R"(b INT COMMENT 'C:\\dir ''x'')")) << text(r, "");
+  const auto n = ok(edit("SET sql_mode = 'NO_BACKSLASH_ESCAPES';\nCREATE TABLE t (\n  a INT\n);\n", {},
+                         request("", request_json)));
+  EXPECT_NE(std::string::npos, text(n, "").find(R"(b INT COMMENT 'C:\dir ''x'')")) << text(n, "");
+}
+
+TEST(Schema_edit, rename_routine_to_a_name_of_the_other_kind) {
+  const std::string script = "CREATE PROCEDURE p() SELECT 1;\nCREATE FUNCTION f() RETURNS INT RETURN 1;\n";
+  EXPECT_EQ("name-taken",
+            failed(edit(script, {}, request("", R"j({"op": "rename_routine", "routine": "p", "new_name": "f"})j"))).kind);
+}
+
+TEST(Schema_edit, an_undo_request) {
+  // The viewer's undo of "add a column, a foreign key on it": in reverse.
+  const auto added = ok(edit(k_shop, {}, request("shop", R"j({"op": "add_column", "table": "orders", "column": {"name": "customer_id2", "type": "INT", "nullable": false}})j")));
+  const std::string script = text(added, "");
+  const auto r = ok(edit(script, {}, request("shop", R"j({"op": "drop_column", "table": "orders", "column": "customer_id2"})j")));
+  EXPECT_EQ(k_shop, text(r, ""));
 }
 
 }  // namespace mdbls

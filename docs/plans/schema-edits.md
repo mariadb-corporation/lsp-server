@@ -341,3 +341,96 @@ blocks, quoting, order, all or nothing, notes, the self-check), `tests/e2e/test_
 (fixture project; the MRS project: rename `url_host`, referenced by foreign keys, and a
 column of it, apply the edits, `outline` of the files equals the returned one, `check`
 passes). The decisions of §5 stand until the user says otherwise.
+
+**Interface agreed with the VS Code diagram viewer, 2026-11-06** (the viewer's palette places
+tables, views and routines and draws relationships; every change goes viewer →
+`msm.edit_schema` → `mariadb-lsp edit`). Binding for PR 2 and PR 3:
+
+- PR 2: `add_table`, `drop_table`, `add_column`, `modify_column`, `drop_column`,
+  `set_table_options`, `add_view`, `drop_view`, `add_routine`, `drop_routine`.
+  PR 3: `add_index`, `drop_index`, `add_foreign_key`, `drop_foreign_key`, `set_primary_key`.
+- An unknown member in a request struct is `bad-request` naming it. `add_table`'s generated
+  CREATE TABLE is parsed before anything is written; on failure each column is parsed alone
+  and the error is `bad-request` with the message starting "column `x`: ". Empty `columns`
+  and duplicate column names are `bad-request` too.
+- `add_foreign_key` writes no supporting index (the server creates one); the viewer sends
+  `add_index` first when it wants one written. No column type check, no note.
+- `set_primary_key {op, table, columns}`: a PR 3 op of its own because its migration must be
+  one statement, `ALTER TABLE t DROP PRIMARY KEY, ADD PRIMARY KEY (...)` (a separate DROP
+  fails when an AUTO_INCREMENT column is the key); `ADD PRIMARY KEY` alone when the table had
+  none. The CREATE TABLE's `PRIMARY KEY` element is replaced or added where `add_index` places
+  one; a column-level `PRIMARY KEY` attribute is removed; a key an `ALTER TABLE ... ADD
+  PRIMARY KEY` defines is replaced there. Columns only (DESC and prefixes go through
+  `drop_index` + `add_index`); the same columns in the same order change nothing.
+- `add_view {op, view: {name, definition, columns?, algorithm?, security?, definer?,
+  check_option?}}`: after the schema's last CREATE VIEW, else after its last CREATE TABLE;
+  `definition` is the SELECT only, `check_option` writes `WITH ... CHECK OPTION` (the outline
+  keeps it in the definition). A definition that is empty or does not parse is `bad-request`.
+  Migration: the CREATE VIEW.
+- `add_routine {op, routine: {name, kind, parameters, returns?, body, deterministic?,
+  data_access?, security?, comment?}}`: after the schema's last routine inside its DELIMITER
+  block, else a `DELIMITER $$ ... $$ DELIMITER ;` block written as the script's other routines
+  are, after the last view or table; a function needs `returns`; the whole statement is laid
+  out by the formatter. Migration: the CREATE, with the new note `routine-created` (same
+  meaning as `routine-recreated`; msm treats both alike).
+- `name-taken` for a routine (`add_routine`, `rename_routine`): any routine of either kind
+  with the name, since references cannot tell a procedure from a function of one name and the
+  pair becomes un-renameable (`rename_routine` is tightened from "same kind" in PR 2).
+- Feature detection: PR 2 adds a `--help` line under `edit`, `edit ops: <op> <op> ...`,
+  space-separated, exactly the ops the binary does; PR 3 extends it. A binary with `edit` in
+  `--help` but no `edit ops:` line does the four renames only.
+
+**PR 2 (tables, columns, views, routines), 2026-11-06:** built as agreed above, with these
+differences from §2:
+
+- Request members the plan left open: `modify_column {table, column, new_column}`,
+  `set_table_options {table, options: {name: value | null}}`, `drop_view {view}`,
+  `drop_routine {routine, kind?}`. The structs are read strictly (unknown members refused),
+  the outline's position members ignored.
+- `Column::definition` is unchanged (hover keeps its text); the edits write columns, keys,
+  checks, periods, options and whole statements with their own helpers in
+  `src/schema_edit_text.cc`, keywords in the file's case.
+- A column's `type` must start with a known MariaDB data type: the grammar takes any name as
+  a plugin type, so `VARCHR(45)` parses.
+- Everything is computed in the expanded text and mapped back per file (`change()`), so
+  includes and slices take the same path as the renames. Statements about an object are
+  found by a light scanner of their leading words (`subject_of`), then parsed where items
+  are edited (field lists, `ALTER TABLE` items, key parts).
+- A removed statement takes the blank lines above it (what an add puts there), those below
+  only when the text or the slice ends above it: add then drop gives the files back byte for
+  byte (checked on the MRS project).
+- Blank lines before a new statement are counted in its neighbour's own file.
+- `set_table_options` edits the `CREATE TABLE` only; an option a later `ALTER TABLE` sets
+  makes the self-check refuse the edit.
+- Found on the way: references missed a key part with a prefix length (`a(10)`, the grammar's
+  `ident '(' NUM ')'` form of `key_part`); `sql_names` now takes it as a column, which fixes
+  rename and references in the server too.
+
+Tests: `schema_edit_t.cc` (every op, placement and style, CRLF, includes with slices, the
+1833 migration, removal spacing, errors), `tests/e2e/test_edit.py` (fixture project: add a
+table, columns, a view, a routine, drop a table; MRS project: add a table with a foreign key,
+a column, a view, a routine, check, then drop them all and get the outline back).
+
+**Fix on PR 2, 2026-11-06 (found by msm's tests, mariadb-shell-plugins PR #89):**
+`rename_routine` left the `DROP PROCEDURE IF EXISTS old` before the renamed `CREATE`, so
+Section 150 failed on the second deployment after a rename; the self-check cannot see it, as
+the outline keeps no DROP statements. The name in `drop_routine` (`DROP sp_handler
+opt_if_exists ident`, no `sp_name`) was not classified; `sql_names` now takes it as a
+routine, which fixes references and rename in the server too. References do not tell the
+two kinds apart, so `rename_routine` skips the hits in a DROP of the other kind. The
+migration is unchanged (msm takes its `DROP PROCEDURE old`). `rename_table` and
+`rename_view` already reached their `DROP ... IF EXISTS`; no rename reaches triggers or
+events. Tests: `renames_reach_the_drop_before_the_create`, a navigation test, the fixture's
+routine rename with a DROP, and a routine rename on the MRS project.
+
+**Cleanup on PR 2 (/simplify), 2026-11-06:** the edits' grammar symbols come from
+`catalog_symbols.inc`, so the catalog's missing-symbol test covers them (`udt_name` added).
+A misspelt type is caught on the parse tree: a `udt_name` must be one of the type plugins
+MariaDB ships (the list of all built-in types is gone; the grammar knows those, by mode).
+`subject_of` reads versioned comments (`/*!50003 CREATE*/ ... TRIGGER`) and `--` followed by
+any blank. The formatter writes a CRLF file's line breaks itself. `sql_names` no longer takes
+the name in `DROP TRIGGER`, `DROP EVENT` or `ALTER EVENT` for a routine's, so renaming a
+routine leaves a trigger or event of its name alone. Left for later: a routine kind in
+`Object_id` (it would replace `rename_routine`'s DROP filter and the "both kinds" refusal),
+and `ALTER TABLE ... DROP INDEX|CONSTRAINT|FOREIGN KEY name`, whose name `sql_names` still
+takes for a column.

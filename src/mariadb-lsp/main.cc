@@ -100,6 +100,7 @@ const char *const k_usage =
     "           SOURCE directives include: prints the text edits, the migration\n"
     "           DDL and the edited outline as JSON; writes no file; exit 1 when\n"
     "           the edits are refused\n"
+    "@EDIT_OPS@"
     "  format   print a SQL file with its statements laid out (queries, DML,\n"
     "           views, tables, routines, compound statements, GRANT, REVOKE,\n"
     "           users, REST SQL, when they parse; the rest, and the rows of a\n"
@@ -198,6 +199,18 @@ struct Options {
   std::string source_dir;  // --source-dir, absolute; "": the file's folder
   std::string edits;       // edit: --edits FILE
 };
+
+// The usage text, with the `edit ops:` line: the ops this binary does,
+// which msm and the VS Code extension read to tell what they may send.
+std::string usage() {
+  std::string u = k_usage;
+  const std::string marker = "@EDIT_OPS@";
+  const size_t at = u.find(marker);
+  if (at != std::string::npos) {
+    u.replace(at, marker.size(), "           edit ops: " + mdbls::supported_edit_ops() + "\n");
+  }
+  return u;
+}
 
 // The --connection server's catalog, read once.
 std::shared_ptr<const mdbls::Live_snapshot> g_live;
@@ -775,7 +788,7 @@ std::optional<Options> parse_args(int argc, char **argv) {
       return n;
     };
     if (arg == "--help" || arg == "-h") {
-      std::cout << k_usage;
+      std::cout << usage();
       std::exit(k_exit_ok);
     } else if (arg == "--version") {
       std::cout << "mariadb-lsp " MDBLS_VERSION "\n";
@@ -927,7 +940,7 @@ std::optional<Options> parse_args(int argc, char **argv) {
       o.command != "edit") {
     std::cerr << (o.command.empty() ? std::string("mariadb-lsp: no command given\n")
                                     : "mariadb-lsp: unknown command " + o.command + "\n")
-              << k_usage;
+              << usage();
     return std::nullopt;
   }
   if (!o.source_dir.empty()) {

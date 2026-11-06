@@ -35,10 +35,10 @@ struct Name_syms {
 #define S(x) int x = grammar::symbol(#x);
   S(ident)
   // names
-  S(table_ident) S(simple_ident) S(simple_ident_nospvar) S(field_ident) S(key_part_simple)
+  S(table_ident) S(simple_ident) S(simple_ident_nospvar) S(field_ident) S(key_part_simple) S(key_part)
   S(insert_ident) S(select_alias) S(ident_table_alias) S(table_alias_clause) S(table_alias_ref)
   S(table_ident_opt_wild) S(select_sublist_qualified_asterisk) S(function_call_generic)
-  S(sp_name) S(call) S(use) S(create) S(alter) S(drop) S(table_to_table)
+  S(sp_name) S(call) S(use) S(create) S(alter) S(drop) S(drop_routine) S(table_to_table)
   S(references) S(ref_list) S(using_list) S(view_list) S(alter_list_item)
   S(field_spec) S(key_def) S(sp_param_name) S(sp_decl_ident) S(sp_decl_idents)
   S(sp_decl_idents_init_vars) S(with_element_head) S(with_list_element) S(with_column_list)
@@ -51,7 +51,7 @@ struct Name_syms {
   S(query_specification_start) S(from_clause) S(table_reference_list) S(DUAL_SYM)
   S(verb_clause) S(sp_proc_stmt) S(sp_decl)
   // tokens
-  S(TABLE_SYM) S(VIEW_SYM) S(SEQUENCE_SYM) S(INDEX_SYM) S(DATABASE)
+  S(TABLE_SYM) S(VIEW_SYM) S(SEQUENCE_SYM) S(INDEX_SYM) S(DATABASE) S(TRIGGER_SYM) S(EVENT_SYM)
 #undef S
   int delete_ = grammar::symbol("delete");
   int dot = grammar::symbol("'.'");
@@ -411,7 +411,8 @@ Name_ref Statement_names::classify(uint32_t token) const {
     set_owner(ddl_table(), &ref);
     return ref;
   }
-  if (sym == s.key_part_simple || sym == s.ref_list || sym == s.alter_list_item) {
+  // A key part: `a`, or `a(10)` with a prefix length.
+  if (sym == s.key_part_simple || sym == s.key_part || sym == s.ref_list || sym == s.alter_list_item) {
     ref.kind = Name_kind::column;
     const uint32_t r = ancestor(a, s.references);
     set_owner(r != npos ? m_tree.child(r, s.table_ident) : ddl_table(), &ref);
@@ -474,10 +475,23 @@ Name_ref Statement_names::classify(uint32_t token) const {
       ref.kind = Name_kind::routine;
       return ref;
     }
-    // A trigger's or event's name is not a routine's.
-    const bool other = ancestor(a, s.trigger_tail) != npos || ancestor(a, s.event_tail) != npos;
+    // A trigger's or event's name is not a routine's: CREATE (their tails),
+    // and DROP TRIGGER, DROP EVENT, ALTER EVENT (the keyword beside it).
+    const uint32_t p = m_tree.node(a).parent;
+    const bool beside = p != npos && (m_tree.child(p, s.TRIGGER_SYM) != npos || m_tree.child(p, s.EVENT_SYM) != npos);
+    const bool other = beside || ancestor(a, s.trigger_tail) != npos || ancestor(a, s.event_tail) != npos;
     ref.kind = other ? Name_kind::other : Name_kind::routine;
     ref.defining = ancestor(a, s.create) != npos;
+    return ref;
+  }
+  // DROP PROCEDURE|FUNCTION [IF EXISTS] [s.]r: the name holds no sp_name.
+  if (sym == s.drop_routine) {
+    if (schema_part) {
+      ref.kind = Name_kind::schema;
+      return ref;
+    }
+    qualify();
+    ref.kind = Name_kind::routine;
     return ref;
   }
   if (sym == s.use) {
