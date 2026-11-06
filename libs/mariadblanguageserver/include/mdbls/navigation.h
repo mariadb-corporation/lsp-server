@@ -22,6 +22,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "mdbls/catalog_view.h"
@@ -51,12 +52,22 @@ enum class Target_kind : uint8_t {
 // names refer to the same object when their identities are equal.  Names
 // compare without regard to case.
 struct Object_id {
+  Object_id() = default;
+  Object_id(Target_kind k, std::string s, std::string t, std::string n, std::string rk = {})
+      : kind(k), schema(std::move(s)), table(std::move(t)), name(std::move(n)), routine_kind(std::move(rk)) {}
+
   Target_kind kind = Target_kind::none;
   std::string schema;  // the schema it was looked up in ("" when unknown)
   std::string table;   // for a column: its table
   std::string name;
+  // For a routine: "procedure" or "function"; "" when the name's context
+  // does not say (it then stands for a routine of either kind).
+  std::string routine_kind;
 
   bool operator==(const Object_id &o) const;
+  // Whether a name resolved to this stands for `target`: equal, but a
+  // routine of unknown kind (on either side) matches one of either kind.
+  bool matches(const Object_id &target) const;
   // Defined in the statement that uses it (alias, CTE, variable): its
   // references and renames stay inside it.
   bool statement_local() const {

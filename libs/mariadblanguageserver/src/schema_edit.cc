@@ -25,7 +25,6 @@
 #include <cctype>
 #include <cstring>
 #include <filesystem>
-#include <functional>
 #include <map>
 #include <memory>
 #include <set>
@@ -1028,7 +1027,7 @@ class Lookup {
     std::vector<std::pair<const Schema *, const Routine *>> out;
     for (const Schema *s : m_schemas) {
       for (const auto &r : s->routines) {
-        if (iequals(r.name, name) && (kind.empty() || r.kind == kind)) out.push_back({s, &r});
+        if (iequals(r.name, name) && (kind.empty() || iequals(r.kind, kind))) out.push_back({s, &r});
       }
     }
     return out;
@@ -1283,11 +1282,9 @@ class Editor {
 
   // Every name referring to `id`, by file, each rewritten to `new_name`;
   // `definition` must be among them.
-  // `skip`: a hit (in the searched text) that is not a reference after all.
   std::optional<Edit_error> rewrite_references(size_t edit, const Object_id &id,
                                                const Origin &definition, const std::string &new_name,
-                                               Changes &changes,
-                                               const std::function<bool(const Range &)> &skip = {}) {
+                                               Changes &changes) {
     Reference_options ro;
     ro.version_id = m_s.options().index.version_id;
     ro.initial_schema = m_s.options().schema;
@@ -1297,7 +1294,6 @@ class Editor {
     bool definition_found = false;
     const auto def_file = m_s.file_of(definition.source);
     for (const auto &r : refs) {
-      if (skip && skip(r.range)) continue;
       const auto m = outline().map(r.range);
       const auto file = m_s.file_of(m.source);
       if (!file) continue;
@@ -1382,12 +1378,13 @@ class Editor {
     }
   }
 
-  // REST objects naming `name`: their SQL is not rewritten.
-  void rest_notes(size_t edit, const std::string &name, bool routine, const std::string &what) {
+  // REST objects of `kind` (view for a table or view, procedure, function)
+  // naming `name`: their SQL is not rewritten.
+  void rest_notes(size_t edit, const std::string &name, std::string_view kind, const std::string &what) {
     for (const auto &svc : outline().catalog.rest_services()) {
       for (const auto &sch : svc.schemas) {
         for (const auto &o : sch.objects) {
-          if ((o.kind == "view") == routine) continue;
+          if (!iequals(o.kind, kind)) continue;
           if (!iequals(last_name_part(o.object), name)) continue;
           note(edit, "rest-reference", o.origin.source, o.origin.statement.begin,
                "the REST object " + o.path + " names " + what + "; its REST SQL was not changed");
@@ -1431,7 +1428,7 @@ class Editor {
     m_old_name = name;
     const std::string what = noun + " `" + name + "`";
     string_notes(i, {name}, what);
-    rest_notes(i, name, false, what);
+    rest_notes(i, name, "view", what);
     if (auto err = rewrite_references(i, *id, origin, e.new_name, changes)) return err;
     // The same name again changes nothing: RENAME TABLE t TO t fails on the
     // server (the table exists).
@@ -1472,32 +1469,17 @@ class Editor {
       return error(i, "bad-request", "`" + e.routine + "` names a procedure and a function: give \"kind\"");
     }
     const Routine *routine = found[0].second;
-    // References do not tell a procedure from a function of one name.
-    if (l.routines(e.routine, "").size() > 1) {
-      return error(i, "unsupported",
-                   "a procedure and a function are both named `" + routine->name +
-                       "`: renaming one of them is not supported yet");
-    }
-    // Any kind: references cannot tell a procedure from a function of one
-    // name, so such a pair could not be renamed again.
-    if (!iequals(routine->name, e.new_name) && !l.routines(e.new_name, "").empty()) {
-      return error(i, "name-taken", "a routine `" + e.new_name + "` exists");
+    // A procedure and a function may share a name: only one of its own kind
+    // takes it.
+    if (!iequals(routine->name, e.new_name) && !l.routines(e.new_name, routine->kind).empty()) {
+      return error(i, "name-taken", "a " + routine->kind + " `" + e.new_name + "` exists");
     }
     const auto id = resolve(routine->origin, Target_kind::routine);
     if (!id) return error(i, "self-check", "the definition of `" + routine->name + "` cannot be resolved");
     const std::string old_name = routine->name;
     string_notes(i, {old_name}, routine->kind + " `" + old_name + "`");
-    rest_notes(i, old_name, true, routine->kind + " `" + old_name + "`");
-    // References do not tell a procedure from a function: the DROP of a
-    // routine of the other kind is not this one's.
-    const std::string other = routine->kind == "procedure" ? "FUNCTION" : "PROCEDURE";
-    auto other_kind = [&](const Range &hit) {
-      const size_t k = index().find(hit.begin);
-      if (k >= index().statements().size()) return false;
-      const auto subject = subject_of(index().text_of(text(), statement(k)));
-      return subject && subject->verb == "DROP" && subject->kind == other;
-    };
-    if (auto err = rewrite_references(i, *id, routine->origin, e.new_name, changes, other_kind)) return err;
+    rest_notes(i, old_name, routine->kind, routine->kind + " `" + old_name + "`");
+    if (auto err = rewrite_references(i, *id, routine->origin, e.new_name, changes)) return err;
     m_old_name = old_name;
     m_routine_kind = routine->kind;
     return std::nullopt;
@@ -2278,7 +2260,7 @@ class Editor {
   // notes what still refers to the object and migrates with `sql`.
   std::optional<Edit_error> drop_statements(size_t i, const std::vector<std::pair<size_t, std::string>> &gone,
                                             const std::optional<Object_id> &id, const std::string &name,
-                                            const std::string &what, bool routine, std::string sql,
+                                            const std::string &what, std::string_view rest_kind, std::string sql,
                                             Changes &changes) {
     std::vector<Range> removed;
     for (const auto &[k, banner] : gone) {
@@ -2287,7 +2269,7 @@ class Editor {
       removed.push_back(*r);
     }
     still_referenced(i, id, removed, what);
-    rest_notes(i, name, routine, what);
+    rest_notes(i, name, rest_kind, what);
     m_old_name = name;
     migrate(i, std::move(sql));
     return std::nullopt;
@@ -2315,7 +2297,7 @@ class Editor {
       if (!iequals(tr.table, name)) continue;
       for (const size_t k : statements_about("TRIGGER", tr.name, schema->name)) gone.push_back({k, tr.name});
     }
-    return drop_statements(i, gone, id, name, "table `" + name + "`", false, "DROP TABLE " + backtick_quote(name),
+    return drop_statements(i, gone, id, name, "table `" + name + "`", "view", "DROP TABLE " + backtick_quote(name),
                            changes);
   }
 
@@ -2690,16 +2672,15 @@ class Editor {
     const std::string name = view->name;
     std::vector<std::pair<size_t, std::string>> gone;
     for (const size_t k : statements_about("VIEW", name, schema->name)) gone.push_back({k, name});
-    return drop_statements(i, gone, resolve(view->origin, Target_kind::view), name, "view `" + name + "`", false,
+    return drop_statements(i, gone, resolve(view->origin, Target_kind::view), name, "view `" + name + "`", "view",
                            "DROP VIEW " + backtick_quote(name), changes);
   }
 
   std::optional<Edit_error> add_routine(size_t i, const Schema_edit &e, Changes &changes) {
     const Routine &r = *e.new_routine;
     const auto l = lookup();
-    // Any kind: references cannot tell a procedure from a function of one
-    // name, so such a pair could not be renamed.
-    if (!l.routines(r.name, "").empty()) return error(i, "name-taken", "a routine `" + r.name + "` exists");
+    // A procedure and a function may share a name.
+    if (!l.routines(r.name, r.kind).empty()) return error(i, "name-taken", "a " + r.kind + " `" + r.name + "` exists");
     // An MSM script's routines are in Section 150, which every deployment
     // runs again: the routine is dropped first (or CREATE OR REPLACE), as
     // the routine it follows is.
@@ -2737,13 +2718,11 @@ class Editor {
     const auto [schema, routine] = found[0];
     const std::string name = routine->name;
     const std::string kind = routine->kind;
-    // References cannot tell a procedure from a function of one name.
-    std::optional<Object_id> id;
-    if (lookup().routines(name, "").size() == 1) id = resolve(routine->origin, Target_kind::routine);
+    const std::optional<Object_id> id = resolve(routine->origin, Target_kind::routine);
     std::vector<std::pair<size_t, std::string>> gone;
     for (const size_t k : statements_about(upper(kind), name, schema->name)) gone.push_back({k, name});
     m_routine_kind = kind;
-    return drop_statements(i, gone, id, name, kind + " `" + name + "`", true,
+    return drop_statements(i, gone, id, name, kind + " `" + name + "`", kind,
                            (kind == "function" ? "DROP FUNCTION " : "DROP PROCEDURE ") + backtick_quote(name), changes);
   }
 

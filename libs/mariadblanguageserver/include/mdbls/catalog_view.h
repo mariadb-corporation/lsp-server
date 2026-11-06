@@ -76,7 +76,9 @@ class Catalog_view {
     const Schema *schema = nullptr;
     const Catalog_layer *layer = nullptr;
   };
-  Routine_hit find_routine(std::string_view schema, std::string_view name) const;
+  // `kind`: "procedure" or "function"; "" for either.
+  Routine_hit find_routine(std::string_view schema, std::string_view name,
+                           std::string_view kind = {}) const;
 
   // Schema names, each once, in layer order.
   std::vector<std::string> schema_names() const;

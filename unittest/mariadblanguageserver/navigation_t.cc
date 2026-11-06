@@ -206,6 +206,17 @@ TEST(Navigation, references_to_a_column) {
             (std::vector<std::string>{"title*", "title", "title", "title", "title"}));
 }
 
+// A key or constraint named like a column in ALTER TABLE is not the column.
+TEST(Navigation, references_to_a_column_skip_key_names_in_alter_table) {
+  Doc d(
+      "CREATE TABLE t (k| INT, j INT, KEY k (k), CONSTRAINT k FOREIGN KEY (j) REFERENCES t (k));\n"
+      "ALTER TABLE t DROP INDEX k, DROP KEY k, DROP FOREIGN KEY k, DROP CONSTRAINT k;\n"
+      "ALTER TABLE t RENAME INDEX k TO k2, ALTER INDEX k IGNORED, DROP COLUMN k;\n"
+      "DROP INDEX k ON t;\n",
+      false);
+  EXPECT_EQ(d.references(), (std::vector<std::string>{"k*", "k", "k", "k"}));
+}
+
 TEST(Navigation, references_to_a_routine_include_its_drop) {
   Doc d(
       "CALL refresh_a|ll(NOW(), @n);\n"
@@ -213,6 +224,14 @@ TEST(Navigation, references_to_a_routine_include_its_drop) {
       "DROP PROCEDURE sakila.refresh_all;\n");
   // The use, both DROPs, and the definition in the schema script after them.
   EXPECT_EQ(d.references(), (std::vector<std::string>{"refresh_all*", "refresh_all", "refresh_all", "refresh_all"}));
+}
+
+// An event renamed to a routine's name is not a reference to the routine.
+TEST(Navigation, references_to_a_routine_skip_an_event_rename) {
+  Doc d(
+      "CALL refresh_a|ll(NOW(), @n);\n"
+      "ALTER EVENT e RENAME TO refresh_all;\n");
+  EXPECT_EQ(d.references(), (std::vector<std::string>{"refresh_all*", "refresh_all"}));
 }
 
 TEST(Navigation, references_to_an_alias_stay_in_the_statement) {

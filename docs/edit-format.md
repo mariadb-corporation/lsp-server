@@ -140,8 +140,8 @@ has above it (a banner's comment lines not counted); no banner is written.
   `CREATE OR REPLACE`; in Section 150 always one of the two, the `DROP` unless the neighbour
   uses `OR REPLACE`. Blank lines before it are counted above the neighbour's `DROP`. The
   migration holds the `CREATE` alone. A function needs `returns`.
-  Its name must be free among the routines of both kinds (`name-taken`): references do not
-  tell a procedure from a function of one name.
+  Its name must be free among the routines of its kind (`name-taken`); a procedure and a
+  function may share a name, as in MariaDB.
 - **A statement removed** (with the `DROP ... IF EXISTS` of the object before it, which is
   also removed) goes with its lines, with the comment lines right above it when
   one of them names the object (a Workbench banner), and the blank lines above it, as
@@ -250,9 +250,9 @@ A refused request writes no edits, whatever edits before the failing one did:
 | Kind | When |
 | --- | --- |
 | `bad-request` | the request is not JSON of format 1, an op is unknown, a member is missing, empty, unknown or of the wrong type, a new name is too long, a routine name is ambiguous without `kind`, a column's type is not a MariaDB data type, or a definition does not parse |
-| `unsupported` | an op this binary does not do, a routine renamed while a routine of the other kind has its name (references do not tell the two apart), or a column added to a table whose columns the script does not list (`CREATE TABLE ... AS SELECT`, `LIKE`) |
+| `unsupported` | an op this binary does not do, or a column added to a table whose columns the script does not list (`CREATE TABLE ... AS SELECT`, `LIKE`) |
 | `unknown-object` | the table, column, view or routine is not in the outline, nor the table or column a foreign key references, nor the column `after` names |
-| `name-taken` | the new name is taken: by a table or view for a table or view (they share a namespace), by a column of the table, by a routine of either kind, by an index of the table, by a foreign key of the schema; a second primary key (use `set_primary_key`); a change of case only is a rename |
+| `name-taken` | the new name is taken: by a table or view for a table or view (they share a namespace), by a column of the table, by a routine of the same kind, by an index of the table, by a foreign key of the schema; a second primary key (use `set_primary_key`); a change of case only is a rename |
 | `referenced` | `drop_table` of a table another table's foreign key references; `drop_column` of a column a foreign key uses; `drop_index` or `set_primary_key` taking away the index a foreign key or an `AUTO_INCREMENT` column needs |
 | `edit-outside-slice` | an edit of an included file would cross the bound of a directive's slice, lie outside every slice of the file, or leave a slice that cannot be written to select the edited text |
 | `self-check` | the outline of the edited texts does not show the edit (the table under its new name, the old name gone from every foreign key, trigger and index; an added object where it was asked for; a dropped one gone), or has a statement it cannot read that the input's outline read (an unapplied note the input did not have) |
