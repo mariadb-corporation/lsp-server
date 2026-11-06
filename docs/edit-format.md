@@ -100,6 +100,10 @@ its first keyword; the file's line breaks. A new statement is laid out by the fo
 `DELIMITER $$` block), and has as many blank lines before it as the statement it follows
 has above it (a banner's comment lines not counted); no banner is written.
 
+- **An MSM script** (one with `-- MSM Section NNN: ...` marker lines) keeps its sections: a
+  table goes into Section 140 (after its last table there, else at the end of the section),
+  a view or routine into Section 150, which every deployment runs again (below). Other
+  scripts follow the rules below without sections.
 - **A table** goes after the `CREATE TABLE` of the schema's last table (in the order of the
   expanded script), in that statement's file; to the end of the script when the schema has
   none. Its keys and foreign keys go into it; a foreign key's table must exist (or be the
@@ -120,16 +124,26 @@ has above it (a banner's comment lines not counted); no banner is written.
   sets later wins over it, so the self-check refuses such an edit. Option names are the
   outline's (`engine`, `charset`, `collation`, `comment`, `auto_increment`, `row_format`,
   an engine-defined one under its own name); `comment` is the text, quoted when written.
-- **A view** goes after the schema's last view, else after its last table. Its `definition`
+- **A view** goes after the schema's last view, else after its last table; in an MSM script
+  after its last view in Section 150, else at the end of Section 150 (after its last
+  statement, or after its banner when it has none). It is written as its neighbouring view
+  is: `CREATE OR REPLACE VIEW`, or with a `DROP VIEW IF EXISTS` before it. In Section 150 it is
+  always one of the two, `CREATE OR REPLACE` unless the neighbour drops first. Its `definition`
   is the `SELECT` alone: `check_option` writes the `WITH ... CHECK OPTION` (the outline's
   definition holds it, so remove it before sending a view of the outline back). A
   definition that is empty or does not parse is `bad-request`.
 - **A routine** goes after the schema's last routine of either kind, inside its
   `DELIMITER` block; where `;` is the delimiter and the routine holds one, in a new block
-  (`DELIMITER $$`, or the delimiter the script uses elsewhere). A function needs `returns`.
+  (`DELIMITER $$`, or the delimiter the script uses elsewhere). In an MSM script: after its
+  last routine in Section 150, else its last view there, else at the end of Section 150. It is
+  written as the routine it follows is: with `DROP PROCEDURE|FUNCTION IF EXISTS` before it, or
+  `CREATE OR REPLACE`; in Section 150 always one of the two, the `DROP` unless the neighbour
+  uses `OR REPLACE`. Blank lines before it are counted above the neighbour's `DROP`. The
+  migration holds the `CREATE` alone. A function needs `returns`.
   Its name must be free among the routines of both kinds (`name-taken`): references do not
   tell a procedure from a function of one name.
-- **A statement removed** goes with its lines, with the comment lines right above it when
+- **A statement removed** (with the `DROP ... IF EXISTS` of the object before it, which is
+  also removed) goes with its lines, with the comment lines right above it when
   one of them names the object (a Workbench banner), and the blank lines above it, as
   adding put them there (those below when nothing is above it). So adding an object and
   dropping it again gives the files back as they were.

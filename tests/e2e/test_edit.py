@@ -305,6 +305,102 @@ class Edit_fixture(unittest.TestCase):
         self.assertNotIn("orders", table_names(result["outline"]))
 
 
+MSM_SCRIPT = """\
+-- MSM Section 110: Database Schema Creation
+CREATE SCHEMA IF NOT EXISTS `shop`;
+USE `shop`;
+
+-- #############################################################################
+-- MSM Section 140: Non-idempotent Schema Objects
+-- #############################################################################
+
+CREATE TABLE `customer` (
+  `id` INT NOT NULL,
+  PRIMARY KEY (`id`)
+);
+
+CREATE TABLE `orders` (
+  `id` INT NOT NULL,
+  `customer_id` INT NOT NULL,
+  PRIMARY KEY (`id`),
+  CONSTRAINT `fk_orders_customer` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`)
+);
+
+-- #############################################################################
+-- MSM Section 150: Idempotent Schema Objects
+-- #############################################################################
+
+DELIMITER %%
+
+DROP PROCEDURE IF EXISTS `count_customers`%%
+CREATE PROCEDURE `count_customers`()
+BEGIN
+  SELECT COUNT(*) AS `customers` FROM `customer`;
+END%%
+
+CREATE OR REPLACE VIEW `customer_ids` AS
+    SELECT `id` FROM `customer`%%
+
+DELIMITER ;
+
+-- #############################################################################
+-- MSM Section 170: Authorization
+-- #############################################################################
+
+SELECT 1;
+"""
+
+ADD_VIEW = {"op": "add_view", "view": {"name": "order_ids", "definition": "SELECT `id` FROM `orders`"}}
+ADD_ROUTINE = {"op": "add_routine", "routine": {
+    "name": "count_orders", "kind": "procedure", "body": "BEGIN\n  SELECT COUNT(*) FROM `orders`;\nEND"}}
+
+
+class Edit_msm_sections(unittest.TestCase):
+    """Section 150 of an MSM script runs on every deployment: what the edits
+    write there must be safe to run again."""
+
+    def setUp(self):
+        dev = pathlib.Path(tempfile.mkdtemp(prefix="mdbls-msm-"))
+        self.addCleanup(shutil.rmtree, dev, True)
+        (dev / "shop_next.sql").write_text(MSM_SCRIPT)
+        self.p = Edit_project(self, dev, "shop_next.sql")
+
+    def apply(self, edits):
+        code, result = self.p.edit(edits, "shop")
+        self.assertEqual(code, 0, result)
+        self.p.apply(result)
+        self.assertEqual(self.p.outline(), result["outline"])
+        check = self.p.run("check", "--source-dir", str(self.p.dev), "-")
+        self.assertEqual(check.returncode, 0, check.stdout.decode())
+        return result
+
+    def section(self, number):
+        start = self.p.script.index("-- MSM Section %d" % number)
+        end = self.p.script.find("-- MSM Section", start + 1)
+        return self.p.script[start:end]
+
+    def test_a_view_is_created_or_replaced(self):
+        self.apply([ADD_VIEW])
+        self.assertIn("CREATE OR REPLACE VIEW `order_ids` AS SELECT `id` FROM `orders`%%",
+                      self.section(150))
+        self.apply([{"op": "drop_view", "view": "order_ids"}])
+        self.assertEqual(self.p.script, MSM_SCRIPT)
+
+    def test_a_routine_is_dropped_before_its_create(self):
+        result = self.apply([ADD_ROUTINE])
+        self.assertIn("END%%\n\nDROP PROCEDURE IF EXISTS `count_orders`%%\nCREATE PROCEDURE `count_orders`()",
+                      self.section(150))
+        self.assertEqual([m["sql"].split("\n")[0] for m in result["migration"]],
+                         ["CREATE PROCEDURE `count_orders`()"])
+        self.apply([{"op": "drop_routine", "routine": "count_orders"}])
+        self.assertEqual(self.p.script, MSM_SCRIPT)
+
+    def test_a_first_view_goes_into_section_150(self):
+        self.apply([{"op": "drop_view", "view": "customer_ids"}, ADD_VIEW])
+        self.assertIn("CREATE OR REPLACE VIEW `order_ids`", self.section(150))
+        self.assertNotIn("order_ids", self.section(140))
+
+
 @unittest.skipUnless((MRS_PROJECT / "development").is_dir(),
                      "no MariaDB REST Service MSM project (MDBLS_MRS_PROJECT)")
 class Edit_mrs_project(unittest.TestCase):
@@ -374,8 +470,21 @@ class Edit_mrs_project(unittest.TestCase):
         self.assertEqual(self.p.outline(), before)
         self.assertEqual({f: f.read_bytes() for f in self.p.dev.rglob("*.sql")}, files)
 
+    def test_new_views_and_routines_in_section_150(self):
+        code, result = self.p.edit([ADD_VIEW | {"view": {"name": "view1", "definition": "SELECT 1"}},
+                                    ADD_ROUTINE | {"routine": dict(ADD_ROUTINE["routine"], name="routine1")}],
+                                   "mariadb_rest_service")
+        self.assertEqual(code, 0, result)
+        self.p.apply(result)
+        views = (self.p.dev / "sections" / "150-10_views.sql").read_text()
+        self.assertRegex(views, r"CREATE OR REPLACE\s.*VIEW `view1`")
+        # After restore_roles, the last routine, which the script drops first.
+        self.assertIn("DROP PROCEDURE IF EXISTS `routine1`%%\nCREATE PROCEDURE `routine1`()", self.p.script)
+
     def test_add_and_drop(self):
         before = self.p.outline()
+        files = {f: f.read_bytes() for f in self.p.dev.rglob("*.sql")}
+        script = self.p.script
         code, result = self.p.edit([
             {"op": "add_table", "table": {
                 "name": "audit_note",
@@ -408,6 +517,8 @@ class Edit_mrs_project(unittest.TestCase):
         self.assertEqual(code, 0, result)
         self.p.apply(result)
         self.assertEqual(self.p.outline(), before)
+        self.assertEqual({f: f.read_bytes() for f in self.p.dev.rglob("*.sql")}, files)
+        self.assertEqual(self.p.script, script)
 
 
 if __name__ == "__main__":

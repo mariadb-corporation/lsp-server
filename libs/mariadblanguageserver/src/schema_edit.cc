@@ -1656,7 +1656,9 @@ class Editor {
     std::string lead;       // line breaks before the new statement
     std::string delimiter;  // the delimiter in force at `at`
   };
-  Spot after_statement(size_t k, const std::string &eol) const {
+  // `gap_from`: the statement whose blank lines above count, when the
+  // object at `k` starts before it (a DROP ... IF EXISTS before its CREATE).
+  Spot after_statement(size_t k, const std::string &eol, std::optional<size_t> gap_from = std::nullopt) const {
     const std::string_view t = text();
     const Statement &st = statement(k);
     Spot s;
@@ -1672,14 +1674,16 @@ class Editor {
     // Counted in the statement's own file: what is above an included
     // file's first statement belongs to another.
     int blanks = 0;
-    if (const auto f = file_at(st.begin)) {
+    if (const auto f = file_at(statement(gap_from.value_or(k)).begin)) {
       const std::string_view ft = m_s.files()[f->first].log.text();
       uint32_t lb = line_begin(ft, f->second);
       while (lb > 0) {
         const uint32_t pb = line_begin(ft, lb - 1);
         const std::string_view line = ft.substr(pb, lb - 1 - pb);
+        // A comment block is the statement's banner, unless it is an MSM
+        // section's: the blank lines above that are the section's.
         if (trim(line).empty()) ++blanks;
-        else if (!is_comment_line(line)) break;
+        else if (!is_comment_line(line) || line.find("MSM Section ") != std::string_view::npos) break;
         lb = pb;
       }
     }
@@ -1696,6 +1700,15 @@ class Editor {
   std::optional<std::pair<size_t, uint32_t>> insert_statement(Changes &changes, std::optional<size_t> k,
                                                                const std::string &sql, const edit_text::Style &st,
                                                                bool wrap) {
+    return insert_at(changes, k ? std::optional<Spot>(after_statement(*k, st.eol)) : std::nullopt, sql, st, wrap);
+  }
+
+  // The same at `spot` (the end of the script when there is none), with
+  // statement `before` (a DROP ... IF EXISTS) right before `sql`.
+  std::optional<std::pair<size_t, uint32_t>> insert_at(Changes &changes, const std::optional<Spot> &spot,
+                                                       const std::string &sql, const edit_text::Style &st, bool wrap,
+                                                       const std::string &before = "") {
+    auto statements = [&](const std::string &d) { return (before.empty() ? "" : before + d + st.eol) + sql + d; };
     auto block = [&](const std::string &restore) {
       std::string d = "$$";
       for (const auto &x : index().delimiters()) {
@@ -1704,12 +1717,12 @@ class Editor {
           break;
         }
       }
-      return st.kw("DELIMITER") + " " + d + st.eol + sql + d + st.eol + st.kw("DELIMITER") + " " + restore;
+      return st.kw("DELIMITER") + " " + d + st.eol + statements(d) + st.eol + st.kw("DELIMITER") + " " + restore;
     };
-    if (k) {
-      const Spot s = after_statement(*k, st.eol);
+    if (spot) {
+      const Spot &s = *spot;
       const bool wrapped = wrap && s.delimiter == ";";
-      const std::string body = wrapped ? block(s.delimiter) : sql + s.delimiter;
+      const std::string body = wrapped ? block(s.delimiter) : statements(s.delimiter);
       const auto at = file_at(s.at);
       if (!at || !change(changes, s.at, s.at, s.lead + body)) return std::nullopt;
       return at;
@@ -1721,7 +1734,7 @@ class Editor {
     if (d.empty()) d = ";";
     const bool wrapped = wrap && d == ";";
     const auto at = static_cast<uint32_t>(script.size());
-    changes[0].push_back({at, at, lead + (wrapped ? block(d) : sql + d) + st.eol});
+    changes[0].push_back({at, at, lead + (wrapped ? block(d) : statements(d)) + st.eol});
     return std::make_pair(size_t{0}, at);
   }
 
@@ -1916,17 +1929,94 @@ class Editor {
   struct Anchor {
     std::optional<size_t> k;
     const Origin *origin = nullptr;
+    std::string name;
   };
   // The object of `objects` (a schema's tables, views or routines) placed
-  // last in the searched text.
+  // last in the searched text, within searched range `within` when given.
   template <typename Objects>
-  Anchor last_of(const Objects &objects) const {
+  Anchor last_of(const Objects &objects, std::optional<Range> within = std::nullopt) const {
     Anchor best;
     for (const auto &o : objects) {
       const auto k = statement_of(o.origin);
-      if (k && (!best.k || *k > *best.k)) best = {k, &o.origin};
+      if (!k || (within && (statement(*k).begin < within->begin || statement(*k).begin >= within->end))) continue;
+      if (!best.k || *k > *best.k) best = {k, &o.origin, o.name};
     }
     return best;
+  }
+
+  // An MSM script's section `id`: from its marker (a line `-- MSM Section
+  // 150: ...`) to the next one, in the searched text; nullopt when the
+  // script has no such marker (it is not an MSM script).
+  std::optional<Range> msm_section(int id) const {
+    const std::string_view t = text();
+    const std::string_view marker = "-- MSM Section ";
+    std::optional<Range> out;
+    for (size_t p = t.find(marker); p != std::string_view::npos; p = t.find(marker, p + 1)) {
+      if (p != line_begin(t, static_cast<uint32_t>(p))) continue;
+      size_t q = p + marker.size();
+      int n = 0;
+      while (q < t.size() && std::isdigit(static_cast<unsigned char>(t[q]))) n = n * 10 + (t[q++] - '0');
+      if (out && out->end == t.size()) out->end = static_cast<uint32_t>(p);
+      if (n == id && !out) out = Range{static_cast<uint32_t>(p), static_cast<uint32_t>(t.size())};
+    }
+    return out;
+  }
+
+  // Where a statement goes at the end of a section: after its last
+  // statement, else after the comment block of its marker.
+  Spot end_of_section(Range r, const std::string &eol) const {
+    std::optional<size_t> last;
+    std::optional<size_t> before;  // the last statement above the section
+    for (size_t k = 0; k < index().statements().size(); ++k) {
+      const Statement &st = statement(k);
+      if (st.kind != Statement_kind::sql) continue;
+      if (st.begin < r.begin) before = k;
+      else if (st.begin < r.end) last = k;
+    }
+    if (last) {
+      // The blank lines above it count from its DROP ... IF EXISTS, if any.
+      size_t gap_from = *last;
+      const auto subject = subject_of(index().text_of(text(), statement(*last)));
+      if (subject && subject->verb == "CREATE" && subject->names.size() == 1) {
+        if (const auto drop = form_at(*last, subject->names[0].second).drop) gap_from = *drop;
+      }
+      return after_statement(*last, eol, gap_from);
+    }
+    const std::string_view t = text();
+    uint32_t p = r.begin;
+    while (p < r.end) {
+      const uint32_t le = line_end(t, p);
+      const uint32_t next = past_line_break(t, le);
+      if (next == p || !is_comment_line(t.substr(p, le - p))) break;
+      p = next;
+    }
+    Spot s;
+    s.at = p > r.begin ? line_end(t, p - 1) : r.begin;
+    s.lead = eol + eol;
+    s.delimiter = before ? index().delimiters()[statement(*before).active_delimiter] : ";";
+    if (s.delimiter.empty()) s.delimiter = ";";
+    return s;
+  }
+
+  // How the script writes the object at statement `k`: CREATE OR REPLACE,
+  // or with a DROP ... IF EXISTS of it right before (`drop`, its statement).
+  struct Form {
+    bool or_replace = false;
+    std::optional<size_t> drop;
+  };
+  Form form_at(size_t k, const std::string &name) const {
+    Form f;
+    const auto w = words_of(index().text_of(text(), statement(k)), 3);
+    f.or_replace = w.size() == 3 && iequals(w[1].text, "OR") && iequals(w[2].text, "REPLACE");
+    for (size_t j = k; j-- > 0;) {
+      if (statement(j).kind != Statement_kind::sql) continue;
+      const auto subject = subject_of(index().text_of(text(), statement(j)));
+      if (subject && subject->verb == "DROP" && subject->names.size() == 1 && iequals(subject->names[0].second, name)) {
+        f.drop = j;
+      }
+      break;
+    }
+    return f;
   }
   // The home schema's last routine (with `routines`), else its last view
   // (with `views`), else its last table.
@@ -1939,6 +2029,35 @@ class Editor {
     if (!a.k) a = last_of(h->tables);
     return a;
   }
+  // Where a new object goes: after `anchor`, else at `spot`, else at the
+  // end of the script.
+  struct Place {
+    Anchor anchor;
+    std::optional<Spot> spot;
+  };
+  // In an MSM script, after the last of `objects` (then of `also`) in
+  // section `section`, else at that section's end; nullopt for a script
+  // without MSM sections.
+  template <typename A, typename B>
+  std::optional<Place> msm_place(int section, const A *objects, const B *also) const {
+    const auto r = msm_section(section);
+    if (!r) return std::nullopt;
+    Place p;
+    if (objects != nullptr) p.anchor = last_of(*objects, r);
+    if (!p.anchor.k && also != nullptr) p.anchor = last_of(*also, r);
+    if (!p.anchor.k) p.spot = end_of_section(*r, style_at(std::nullopt, std::nullopt).eol);
+    return p;
+  }
+  std::optional<Spot> spot_of(const Place &p, const edit_text::Style &st,
+                              std::optional<size_t> gap_from = std::nullopt) const {
+    return p.anchor.k ? std::optional<Spot>(after_statement(*p.anchor.k, st.eol, gap_from)) : p.spot;
+  }
+  // `CREATE ...` as `CREATE OR REPLACE ...`.
+  static std::string or_replace(const std::string &sql, const edit_text::Style &st) {
+    const std::string create = st.kw("CREATE");
+    return create + " " + st.kw("OR REPLACE") + sql.substr(create.size());
+  }
+
   edit_text::Style style_of(const Anchor &a) const {
     return a.origin == nullptr ? style_at(std::nullopt, std::nullopt) : style_of(*a.origin);
   }
@@ -2078,8 +2197,11 @@ class Editor {
     for (const auto &fk : t.foreign_keys) {
       if (auto err = check_foreign_key(i, t, fk)) return err;
     }
-    const Anchor at = anchor(false, false);
-    const edit_text::Style st = style_of(at);
+    // An MSM script's tables are in Section 140.
+    const Schema *h = home();
+    const Place place = msm_place(140, h != nullptr ? &h->tables : nullptr, static_cast<const std::vector<Table> *>(nullptr))
+                            .value_or(Place{anchor(false, false), std::nullopt});
+    const edit_text::Style st = style_of(place.anchor);
     for (const auto &c : t.columns) {
       if (auto err = check_column(i, c, edit_text::column_sql(c, edit_text::column_checks(t, c.name), st))) {
         return err;
@@ -2098,7 +2220,7 @@ class Editor {
       return error(i, "bad-request", "the CREATE TABLE of `" + t.name + "` does not parse (" + *problem + ")");
     }
     const std::string laid = laid_out(sql, st, false);
-    if (!insert_statement(changes, at.k, laid, st, false)) {
+    if (!insert_at(changes, spot_of(place, st), laid, st, false)) {
       return error(i, "self-check", "no place for the CREATE TABLE of `" + t.name + "` was found");
     }
     migrate(i, laid);
@@ -2550,14 +2672,22 @@ class Editor {
     if (l.table(v.name).second != nullptr || l.view(v.name).second != nullptr) {
       return error(i, "name-taken", "a table or view `" + v.name + "` exists");
     }
-    const Anchor at = anchor(false, true);
-    const edit_text::Style st = style_of(at);
-    const std::string sql = edit_text::create_view_sql(v, st);
+    // An MSM script's views are in Section 150, which every deployment runs
+    // again: the view must be CREATE OR REPLACE (or dropped first).
+    const Schema *h = home();
+    const auto msm = msm_place(150, h != nullptr ? &h->views : nullptr, static_cast<const std::vector<View> *>(nullptr));
+    const Place place = msm.value_or(Place{anchor(false, true), std::nullopt});
+    const bool after_view = place.anchor.k && h != nullptr && h->view(place.anchor.name) != nullptr;
+    const Form form = after_view ? form_at(*place.anchor.k, place.anchor.name) : Form{};
+    const edit_text::Style st = style_of(place.anchor);
+    std::string sql = edit_text::create_view_sql(v, st);
+    if (form.or_replace || (msm && !form.drop)) sql = or_replace(sql, st);
+    const std::string drop = form.drop && !form.or_replace ? st.kw("DROP VIEW IF EXISTS") + " " + st.id(v.name) : "";
     if (const auto p = parse_problem(sql)) {
       return error(i, "bad-request", "view `" + v.name + "` does not parse (" + *p + ")");
     }
     const std::string laid = laid_out(sql, st, false);
-    if (!insert_statement(changes, at.k, laid, st, false)) {
+    if (!insert_at(changes, spot_of(place, st, form.drop), laid, st, false, drop)) {
       return error(i, "self-check", "no place for the CREATE VIEW of `" + v.name + "` was found");
     }
     migrate(i, laid);
@@ -2580,14 +2710,34 @@ class Editor {
     // Any kind: references cannot tell a procedure from a function of one
     // name, so such a pair could not be renamed.
     if (!l.routines(r.name, "").empty()) return error(i, "name-taken", "a routine `" + r.name + "` exists");
-    const Anchor after = anchor(true, true);
-    const edit_text::Style st = style_of(after);
-    const std::string sql = edit_text::create_routine_sql(r, st);
+    // An MSM script's routines are in Section 150, which every deployment
+    // runs again: the routine is dropped first (or CREATE OR REPLACE), as
+    // the routine it follows is.
+    const Schema *h = home();
+    const auto msm = msm_place(150, h != nullptr ? &h->routines : nullptr, h != nullptr ? &h->views : nullptr);
+    Place place;
+    if (msm) {
+      place = *msm;
+    } else {
+      if (h != nullptr) place.anchor = last_of(h->routines);
+      if (!place.anchor.k) place.anchor = anchor(false, true);
+    }
+    const bool after_routine = place.anchor.k && h != nullptr && !lookup().routines(place.anchor.name, "").empty() &&
+                               h->view(place.anchor.name) == nullptr && h->table(place.anchor.name) == nullptr;
+    const Form form = after_routine ? form_at(*place.anchor.k, place.anchor.name) : Form{};
+    const edit_text::Style st = style_of(place.anchor);
+    std::string sql = edit_text::create_routine_sql(r, st);
+    if (form.or_replace) sql = or_replace(sql, st);
+    const bool drop_first = form.drop || (msm && !form.or_replace);
+    const std::string drop =
+        drop_first ? st.kw(r.kind == "function" ? "DROP FUNCTION IF EXISTS" : "DROP PROCEDURE IF EXISTS") + " " + st.id(r.name)
+                   : "";
     if (const auto p = parse_problem(sql)) {
       return error(i, "bad-request", r.kind + " `" + r.name + "` does not parse (" + *p + ")");
     }
     const std::string laid = laid_out(sql, st, true);
-    const auto at = insert_statement(changes, after.k, laid, st, laid.find(';') != std::string::npos);
+    const auto at = insert_at(changes, spot_of(place, st, form.drop), laid, st,
+                              laid.find(';') != std::string::npos, drop);
     if (!at) return error(i, "self-check", "no place for the CREATE of `" + r.name + "` was found");
     migrate(i, laid);
     m_routine_kind = r.kind;

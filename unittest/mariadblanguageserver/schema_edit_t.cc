@@ -647,6 +647,14 @@ std::string shop_with(const std::string &from, const std::string &to) {
   return s;
 }
 
+// `text` with `from` replaced by `to` (once; it must be there).
+std::string shop_with_in(std::string text, const std::string &from, const std::string &to) {
+  const size_t at = text.find(from);
+  EXPECT_NE(std::string::npos, at) << from;
+  if (at != std::string::npos) text.replace(at, from.size(), to);
+  return text;
+}
+
 }  // namespace
 }  // namespace mdbls
 
@@ -1210,6 +1218,166 @@ TEST(Schema_edit, a_relationship_and_its_undo) {
       {"op": "drop_index", "table": "orders", "name": "fk_1_UNIQUE"},
       {"op": "drop_column", "table": "orders", "column": "customer_id1"})j")));
   EXPECT_EQ(k_shop, text(back, ""));
+}
+
+}  // namespace mdbls
+
+// ---------------------------------------------------------------------------
+// MSM sections: Section 150 runs on every deployment
+
+namespace mdbls {
+namespace {
+
+// An MSM script: tables in Section 140, a routine dropped and created and
+// a view created or replaced in Section 150.
+std::string msm_script(const std::string &section_150) {
+  return "-- MSM Section 110: Database Schema Creation\n"
+         "USE `shop`;\n"
+         "\n"
+         "-- #############################################################################\n"
+         "-- MSM Section 140: Non-idempotent Schema Objects\n"
+         "-- #############################################################################\n"
+         "\n"
+         "CREATE TABLE `customer` (\n  `id` INT NOT NULL,\n  PRIMARY KEY (`id`)\n);\n"
+         "\n"
+         "CREATE TABLE `orders` (\n  `id` INT NOT NULL,\n  `customer_id` INT NOT NULL,\n  PRIMARY KEY (`id`)\n);\n"
+         "\n"
+         "-- #############################################################################\n"
+         "-- MSM Section 150: Idempotent Schema Objects\n"
+         "-- #############################################################################\n" +
+         section_150 +
+         "\n"
+         "-- #############################################################################\n"
+         "-- MSM Section 170: Authorization\n"
+         "-- #############################################################################\n"
+         "\n"
+         "SELECT 1;\n";
+}
+
+const std::string k_section_150 =
+    "\n"
+    "DELIMITER %%\n"
+    "\n"
+    "DROP PROCEDURE IF EXISTS `count_customers`%%\n"
+    "CREATE PROCEDURE `count_customers`()\n"
+    "BEGIN\n"
+    "  SELECT COUNT(*) AS `customers` FROM `customer`;\n"
+    "END%%\n"
+    "\n"
+    "CREATE OR REPLACE VIEW `customer_ids` AS\n"
+    "    SELECT `id` FROM `customer`%%\n"
+    "\n"
+    "DELIMITER ;\n";
+
+const char *const k_add_view = R"j({"op": "add_view", "view": {"name": "order_ids", "definition": "SELECT `id` FROM `orders`"}})j";
+const char *const k_add_routine =
+    R"j({"op": "add_routine", "routine": {"name": "count_orders", "kind": "procedure", "body": "BEGIN\n  SELECT COUNT(*) FROM `orders`;\nEND"}})j";
+
+// `script` after `first`, then after `second` on the result.
+std::string twice(const std::string &script, const std::string &first, const std::string &second) {
+  const auto r = ok(edit(script, {}, request("shop", first)));
+  return text(ok(edit(text(r, ""), {}, request("shop", second))), "");
+}
+
+}  // namespace
+
+TEST(Schema_edit, msm_views_are_created_or_replaced) {
+  const auto r = ok(edit(msm_script(k_section_150), {}, request("shop", k_add_view)));
+  EXPECT_EQ(msm_script(shop_with_in(k_section_150, "    SELECT `id` FROM `customer`%%\n",
+                                    "    SELECT `id` FROM `customer`%%\n"
+                                    "\n"
+                                    "CREATE OR REPLACE VIEW `order_ids` AS SELECT `id` FROM `orders`%%\n")),
+            text(r, ""));
+  EXPECT_EQ(msm_script(k_section_150),
+            twice(msm_script(k_section_150), k_add_view, R"j({"op": "drop_view", "view": "order_ids"})j"));
+}
+
+TEST(Schema_edit, msm_routines_are_dropped_before_they_are_created) {
+  const auto r = ok(edit(msm_script(k_section_150), {}, request("shop", k_add_routine)));
+  // After the routine, with the blank line above its DROP.
+  EXPECT_EQ(msm_script(shop_with_in(k_section_150, "END%%\n",
+                                    "END%%\n"
+                                    "\n"
+                                    "DROP PROCEDURE IF EXISTS `count_orders`%%\n"
+                                    "CREATE PROCEDURE `count_orders`()\n"
+                                    "BEGIN\n"
+                                    "  SELECT COUNT(*) FROM `orders`;\n"
+                                    "END%%\n")),
+            text(r, ""));
+  // The migration has the CREATE: msm drops it and keeps the DROP of
+  // Section 150.
+  EXPECT_EQ(std::vector<std::string>{"CREATE PROCEDURE `count_orders`()\nBEGIN\n  SELECT COUNT(*) FROM `orders`;\nEND"},
+            migration(r));
+  // Dropped again, the DROP line goes too.
+  EXPECT_EQ(msm_script(k_section_150),
+            twice(msm_script(k_section_150), k_add_routine, R"j({"op": "drop_routine", "routine": "count_orders"})j"));
+}
+
+TEST(Schema_edit, first_views_and_routines_go_into_section_150) {
+  // A schema without views: not after the last table (Section 140, which an
+  // upgrade does not run), but at the end of Section 150.
+  const std::string no_view =
+      "\n"
+      "DELIMITER %%\n"
+      "\n"
+      "DROP PROCEDURE IF EXISTS `count_customers`%%\n"
+      "CREATE PROCEDURE `count_customers`()\n"
+      "BEGIN\n"
+      "  SELECT COUNT(*) AS `customers` FROM `customer`;\n"
+      "END%%\n"
+      "\n"
+      "DELIMITER ;\n";
+  const auto r = ok(edit(msm_script(no_view), {}, request("shop", k_add_view)));
+  EXPECT_EQ(msm_script(shop_with_in(no_view, "END%%\n",
+                                    "END%%\n\nCREATE OR REPLACE VIEW `order_ids` AS SELECT `id` FROM `orders`%%\n")),
+            text(r, ""));
+  // An empty Section 150: after its banner; a routine gets its own block.
+  const auto e = ok(edit(msm_script(""), {}, request("shop", std::string(k_add_view) + ", " + k_add_routine)));
+  EXPECT_EQ(msm_script("\n"
+                       "CREATE OR REPLACE VIEW `order_ids` AS SELECT `id` FROM `orders`;\n"
+                       "\n"
+                       "DELIMITER $$\n"
+                       "DROP PROCEDURE IF EXISTS `count_orders`$$\n"
+                       "CREATE PROCEDURE `count_orders`()\n"
+                       "BEGIN\n"
+                       "  SELECT COUNT(*) FROM `orders`;\n"
+                       "END$$\n"
+                       "DELIMITER ;\n"),
+            text(e, ""));
+  const View *v = nullptr;
+  if (const Schema *s = e.outline.catalog.find("shop")) v = s->view("order_ids");
+  EXPECT_NE(nullptr, v);
+}
+
+TEST(Schema_edit, msm_tables_go_into_section_140) {
+  const std::string script = msm_script(k_section_150);
+  const auto r = ok(edit(script, {}, request("shop", R"j({"op": "add_table", "table": {"name": "product", "columns": [{"name": "id", "type": "INT"}]}})j")));
+  const std::string t = text(r, "");
+  EXPECT_LT(t.find("CREATE TABLE `product`"), t.find("MSM Section 150"));
+  EXPECT_GT(t.find("CREATE TABLE `product`"), t.find("CREATE TABLE `orders`"));
+}
+
+TEST(Schema_edit, outside_msm_new_objects_follow_their_neighbours_form) {
+  // A view after a view dropped first; a routine after one created or
+  // replaced; a plain view after a plain one.
+  const std::string script =
+      "CREATE TABLE t (a INT);\n"
+      "DROP VIEW IF EXISTS v;\n"
+      "CREATE VIEW v AS SELECT a FROM t;\n"
+      "CREATE OR REPLACE PROCEDURE p() SELECT 1;\n";
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "add_view", "view": {"name": "w", "definition": "SELECT 2"}},
+      {"op": "add_routine", "routine": {"name": "q", "kind": "procedure", "body": "SELECT 2"}})j")));
+  EXPECT_EQ(
+      "CREATE TABLE t (a INT);\n"
+      "DROP VIEW IF EXISTS v;\n"
+      "CREATE VIEW v AS SELECT a FROM t;\n"
+      "DROP VIEW IF EXISTS w;\n"
+      "CREATE VIEW w AS SELECT 2;\n"
+      "CREATE OR REPLACE PROCEDURE p() SELECT 1;\n"
+      "CREATE OR REPLACE PROCEDURE q() SELECT 2;\n",
+      text(r, ""));
+  const auto plain = ok(edit("CREATE VIEW v AS SELECT 1;\n", {}, request("", R"j({"op": "add_view", "view": {"name": "w", "definition": "SELECT 2"}})j")));
+  EXPECT_EQ("CREATE VIEW v AS SELECT 1;\nCREATE VIEW w AS SELECT 2;\n", text(plain, ""));
 }
 
 }  // namespace mdbls

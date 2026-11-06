@@ -456,3 +456,16 @@ takes for a column.
 Tests: `schema_edit_t.cc` (each op, each place a key is defined, the errors, the viewer's
 1:n and 1:1 relationships and their undo giving the script back), `test_edit.py` (fixture:
 a relationship and its undo; MRS: a 1:1 relationship added, checked, undone byte for byte).
+
+**Section 150 on PR 3, 2026-11-06 (found by msm's deployment tests against #26):** Section
+150 runs on every deployment, so what an edit writes there must run again: `add_view` wrote a
+plain `CREATE VIEW` and `add_routine` a `CREATE` without the `DROP ... IF EXISTS` its
+neighbour had, and a first view (or routine) went after the last table, into Section 140,
+which an upgrade does not run. The engine now reads MSM's section markers (`-- MSM Section
+NNN:`; no request member needed): views and routines go into Section 150 (after the last of
+their kind there, a routine else after the last view, else at the section's end), tables
+into Section 140. New views and routines take their neighbour's form (`OR REPLACE`, or a
+`DROP ... IF EXISTS` pair); in Section 150 always an idempotent one. A routine's gap counts
+from its `DROP`, and a section's banner no longer counts as a statement's. Before this, a
+first routine in an MSM project without routines went after its last view (Section 150 when
+it had views) or its last table (Section 140), or to the end of the script; now Section 150.
