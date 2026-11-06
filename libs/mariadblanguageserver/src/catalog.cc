@@ -198,6 +198,11 @@ const Event *Schema::event(std::string_view n) const {
   return it == events.end() ? nullptr : &*it;
 }
 
+const Sequence *Schema::sequence(std::string_view n) const {
+  auto it = find_named(sequences, n);
+  return it == sequences.end() ? nullptr : &*it;
+}
+
 const Routine *Schema::routine(std::string_view n, std::string_view kind) const {
   auto it = std::find_if(routines.begin(), routines.end(), [&](const Routine &r) {
     return iequals(r.name, n) && (kind.empty() || iequals(r.kind, kind));
@@ -1453,13 +1458,18 @@ bool Catalog_fold::rename(uint32_t n) {
     auto [to_schema, to_id] = qualified(idents[1]);
     Schema *from = c_.find_schema(from_schema);
     if (from == nullptr) continue;
-    auto it = find_named(from->tables, name_of(from_id));
-    if (it == from->tables.end()) continue;
-    Table moved = std::move(*it);
-    from->tables.erase(it);
-    moved.name = name_of(to_id);
-    c_.schema(to_schema).tables.push_back(std::move(moved));
-    changed = true;
+    // RENAME TABLE renames a table, a view or a sequence (one namespace).
+    auto move = [&](auto member) {
+      auto &v = from->*member;
+      auto it = find_named(v, name_of(from_id));
+      if (it == v.end()) return false;
+      auto moved = std::move(*it);
+      v.erase(it);
+      moved.name = name_of(to_id);
+      (c_.schema(to_schema).*member).push_back(std::move(moved));
+      return true;
+    };
+    if (move(&Schema::tables) || move(&Schema::views) || move(&Schema::sequences)) changed = true;
   }
   return changed;
 }

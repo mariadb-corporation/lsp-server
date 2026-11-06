@@ -298,7 +298,8 @@ TEST(Schema_edit, supported_ops) {
   EXPECT_EQ(
       "rename_table rename_column rename_view rename_routine add_table drop_table add_column modify_column "
       "drop_column add_index drop_index add_foreign_key drop_foreign_key set_table_options add_view drop_view "
-      "add_routine drop_routine set_primary_key add_trigger drop_trigger rename_trigger add_event drop_event rename_event",
+      "add_routine drop_routine set_primary_key add_trigger drop_trigger rename_trigger add_event drop_event rename_event add_sequence "
+      "drop_sequence rename_sequence",
       supported_edit_ops());
 }
 
@@ -728,8 +729,8 @@ TEST(Schema_edit, add_table_errors) {
     const auto r = edit(k_shop, {}, request("shop", R"j({"op": "add_table", "table": )j" + table + "}"));
     return std::holds_alternative<Edit_error>(r) ? std::get<Edit_error>(r).kind + ": " + std::get<Edit_error>(r).message : "ok";
   };
-  EXPECT_EQ("name-taken: a table or view `Customer` exists", kind(R"j({"name": "Customer", "columns": [{"name": "a", "type": "INT"}]})j"));
-  EXPECT_EQ("name-taken: a table or view `v_orders` exists", kind(R"j({"name": "v_orders", "columns": [{"name": "a", "type": "INT"}]})j"));
+  EXPECT_EQ("name-taken: a table, view or sequence `Customer` exists", kind(R"j({"name": "Customer", "columns": [{"name": "a", "type": "INT"}]})j"));
+  EXPECT_EQ("name-taken: a table, view or sequence `v_orders` exists", kind(R"j({"name": "v_orders", "columns": [{"name": "a", "type": "INT"}]})j"));
   // The viewer shows the message on the column's editor.
   EXPECT_EQ("bad-request: column `price`: `VARCHR(45)` is not a MariaDB data type",
             kind(R"j({"name": "x", "columns": [{"name": "id", "type": "INT"}, {"name": "price", "type": "VARCHR(45)"}]})j"));
@@ -1897,6 +1898,109 @@ TEST(Schema_edit, rename_table_keeps_its_triggers) {
       "CREATE TRIGGER t1 BEFORE INSERT ON u FOR EACH ROW SET NEW.a = 1;\n"
       "CREATE EVENT e1 ON SCHEDULE EVERY 1 DAY DO DELETE FROM u;\n",
       text(r, ""));
+}
+
+}  // namespace mdbls
+
+// ---------------------------------------------------------------------------
+// Sequences
+
+namespace mdbls {
+namespace {
+
+const char *const k_add_sequence = R"j({"op": "add_sequence", "sequence": {"name": "order_ids"}})j";
+
+const std::string k_sequences =
+    "CREATE DATABASE shop;\n"
+    "USE shop;\n"
+    "\n"
+    "CREATE SEQUENCE `s` START WITH 100;\n"
+    "ALTER SEQUENCE `s` RESTART 100;\n"
+    "CREATE TABLE `t` (`id` INT DEFAULT NEXT VALUE FOR `s`, `b` INT);\n"
+    "CREATE TABLE `u` (`a` INT);\n"
+    "CREATE VIEW `v` AS SELECT NEXTVAL(`s`) AS `n`;\n";
+
+}  // namespace
+
+TEST(Schema_edit, sequence_request_errors) {
+  auto kind = [](const std::string &edit_json) {
+    const auto r = parse_edit_request(request("s", edit_json));
+    return std::holds_alternative<Edit_request>(r) ? std::string("ok") : std::get<Edit_error>(r).kind;
+  };
+  EXPECT_EQ("ok", kind(k_add_sequence));
+  EXPECT_EQ("ok", kind(R"j({"op": "add_sequence", "sequence": {"name": "q", "type": "INT UNSIGNED", "start": "1", "increment": "-1", "minvalue": null, "maxvalue": "100", "cache": "0", "cycle": true, "options": {"engine": "InnoDB"}}})j"));
+  EXPECT_EQ("bad-request", kind(R"j({"op": "add_sequence", "sequence": {"name": "q", "start": "one"}})j"));
+  EXPECT_EQ("bad-request", kind(R"j({"op": "add_sequence", "sequence": {"name": "q", "start": 1}})j"));
+  EXPECT_EQ("bad-request", kind(R"j({"op": "add_sequence", "sequence": {"name": "q", "order": "x"}})j"));
+  EXPECT_EQ("bad-request", kind(R"j({"op": "drop_sequence", "sequence": "q", "table": "t"})j"));
+  EXPECT_EQ("bad-request", kind(R"j({"op": "rename_sequence", "sequence": "q"})j"));
+}
+
+TEST(Schema_edit, add_sequence) {
+  // After the last sequence.
+  const auto r = ok(edit(k_sequences, {}, request("shop", R"j({"op": "add_sequence", "sequence": {"name": "q", "start": "1", "increment": "2", "cache": "0", "cycle": false}})j")));
+  EXPECT_EQ(shop_with_in(k_sequences, "CREATE SEQUENCE `s` START WITH 100;\n",
+                         "CREATE SEQUENCE `s` START WITH 100;\n\nCREATE SEQUENCE `q` START WITH 1 INCREMENT BY 2 NOCACHE NOCYCLE;\n"),
+            text(r, ""));
+  EXPECT_EQ(Tags{"create sequence q"}, tags(r));
+  EXPECT_TRUE(note_kinds(r).empty());
+  // Without one, before the first table, whose defaults may use it.
+  const auto f = ok(edit(k_shop, {}, request("shop", k_add_sequence)));
+  EXPECT_EQ(shop_with("USE shop;\n", "USE shop;\nCREATE SEQUENCE `order_ids`;\n"), text(f, ""));
+  EXPECT_EQ(k_shop, twice(k_shop, k_add_sequence, R"j({"op": "drop_sequence", "sequence": "order_ids"})j"));
+  // One namespace with tables and views.
+  EXPECT_EQ("name-taken", failed(edit(k_shop, {}, request("shop", R"j({"op": "add_sequence", "sequence": {"name": "orders"}})j"))).kind);
+  EXPECT_EQ("name-taken", failed(edit(k_sequences, {}, request("shop", R"j({"op": "add_view", "view": {"name": "s", "definition": "SELECT 1"}})j"))).kind);
+  EXPECT_EQ("name-taken", failed(edit(k_sequences, {}, request("shop", rename_table("u", "S")))).kind);
+}
+
+TEST(Schema_edit, msm_sequences_go_before_the_first_table) {
+  const auto r = ok(edit(msm_script(k_section_150), {}, request("shop", k_add_sequence)));
+  EXPECT_EQ(msm_script(k_section_150).replace(msm_script(k_section_150).find("CREATE TABLE `customer`"), 0,
+                                              "CREATE SEQUENCE `order_ids`;\n\n"),
+            text(r, ""));
+  EXPECT_EQ(msm_script(k_section_150),
+            twice(msm_script(k_section_150), k_add_sequence, R"j({"op": "drop_sequence", "sequence": "order_ids"})j"));
+}
+
+TEST(Schema_edit, drop_sequence) {
+  // A column default takes values from it: the CREATE TABLE would fail.
+  EXPECT_EQ("referenced", failed(edit(k_sequences, {}, request("shop", R"j({"op": "drop_sequence", "sequence": "s"})j"))).kind);
+  EXPECT_EQ("unknown-object", failed(edit(k_sequences, {}, request("shop", R"j({"op": "drop_sequence", "sequence": "t"})j"))).kind);
+  const std::string script =
+      "CREATE SEQUENCE s;\n"
+      "ALTER SEQUENCE s RESTART 1;\n"
+      "CREATE TABLE t (a INT);\n"
+      "CREATE VIEW v AS SELECT NEXTVAL(s) AS n;\n";
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "drop_sequence", "sequence": "s"})j")));
+  EXPECT_EQ("CREATE TABLE t (a INT);\nCREATE VIEW v AS SELECT NEXTVAL(s) AS n;\n", text(r, ""));
+  EXPECT_EQ(Tags{"drop sequence s"}, tags(r));
+  EXPECT_EQ(std::vector<std::string>{"DROP SEQUENCE `s`"}, migration(r));
+  EXPECT_EQ(std::vector<std::string>{"still-referenced"}, note_kinds(r));
+}
+
+TEST(Schema_edit, rename_sequence) {
+  const auto r = ok(edit(k_sequences, {}, request("shop", R"j({"op": "rename_sequence", "sequence": "s", "new_name": "ids"})j")));
+  EXPECT_EQ(
+      "CREATE DATABASE shop;\n"
+      "USE shop;\n"
+      "\n"
+      "CREATE SEQUENCE `ids` START WITH 100;\n"
+      "ALTER SEQUENCE `ids` RESTART 100;\n"
+      "CREATE TABLE `t` (`id` INT DEFAULT NEXT VALUE FOR `ids`, `b` INT);\n"
+      "CREATE TABLE `u` (`a` INT);\n"
+      "CREATE VIEW `v` AS SELECT NEXTVAL(`ids`) AS `n`;\n",
+      text(r, ""));
+  // A deployed column default still names the old sequence after RENAME
+  // TABLE: it is set again.
+  EXPECT_EQ((Tags{"rename sequence s -> ids", "alter column id (t)"}), tags(r));
+  EXPECT_EQ((std::vector<std::string>{"RENAME TABLE `s` TO `ids`",
+                                      "ALTER TABLE `t` ALTER COLUMN `id` SET DEFAULT NEXT VALUE FOR `ids`"}),
+            migration(r));
+  EXPECT_EQ("name-taken", failed(edit(k_sequences, {}, request("shop", R"j({"op": "rename_sequence", "sequence": "s", "new_name": "v"})j"))).kind);
+  EXPECT_EQ("unknown-object", failed(edit(k_sequences, {}, request("shop", R"j({"op": "rename_sequence", "sequence": "u", "new_name": "x"})j"))).kind);
+  // And back.
+  EXPECT_EQ(k_sequences, text(ok(edit(text(r, ""), {}, request("shop", R"j({"op": "rename_sequence", "sequence": "ids", "new_name": "s"})j"))), ""));
 }
 
 }  // namespace mdbls

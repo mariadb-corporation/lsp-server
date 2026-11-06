@@ -137,6 +137,23 @@ TEST(Catalog, drop_rename_like_and_if_not_exists) {
   EXPECT_TRUE(dflt->views.empty());
 }
 
+TEST(Catalog, rename_table_renames_views_and_sequences) {
+  // RENAME TABLE renames whatever has the name: a table, view or sequence.
+  const auto o = outline_of(
+      "CREATE SEQUENCE s;\n"
+      "CREATE VIEW v AS SELECT 1;\n"
+      "RENAME TABLE s TO s2, v TO db.w;\n");
+  const Schema *dflt = schema(o, "");
+  ASSERT_NE(nullptr, dflt);
+  ASSERT_EQ(1u, dflt->sequences.size());
+  EXPECT_EQ("s2", dflt->sequences[0].name);
+  EXPECT_TRUE(dflt->views.empty());
+  const Schema *db = schema(o, "db");
+  ASSERT_NE(nullptr, db);
+  ASSERT_EQ(1u, db->views.size());
+  EXPECT_EQ("w", db->views[0].name);
+}
+
 TEST(Catalog, routines_triggers_events) {
   const auto o = outline_of(
       "DELIMITER //\n"

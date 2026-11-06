@@ -514,3 +514,15 @@ EVENT ... RENAME TO`, `rename_trigger` with a `DROP` and the `CREATE`. A trigger
 follows or precedes is `referenced`. Migration `object`s `trigger` and `event`. Sequences
 (`add_sequence`, `drop_sequence`, `rename_sequence`) come next: their references (`NEXT VALUE
 FOR s`, `NEXTVAL(s)`) need the resolver first.
+
+**Sequences, 2026-11-06:** `add_sequence`, `drop_sequence` and `rename_sequence`. The
+resolver needed nothing: every place a sequence is named (`NEXT VALUE FOR`, `NEXTVAL()`,
+`LASTVAL()`, `SETVAL()`, `PREVIOUS VALUE FOR`, `FROM`, `RENAME TABLE`, `ALTER SEQUENCE`) is a
+`table_ident`, and a sequence's `CREATE` resolves to a table-kind `Object_id`, so
+`rewrite_references` and `still_referenced` find them all. A new sequence goes after the last
+one, else before the first table (Section 140 in MSM), since a column default may take values
+from it. Checked against MariaDB 12.3: a `CREATE TABLE` whose default names a missing sequence
+fails (1146), so such a sequence is `referenced`; `RENAME TABLE` leaves a deployed default
+naming the old sequence, so `rename_sequence` migrates `ALTER COLUMN ... SET DEFAULT` for each
+such column; `CREATE`/`DROP SEQUENCE` and `RENAME TABLE` run inside a stored procedure (no
+note). The fold now applies `RENAME TABLE` to views and sequences too.

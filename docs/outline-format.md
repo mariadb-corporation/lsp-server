@@ -26,8 +26,9 @@ TABLE ... LIKE t` of such a table (`unknown-table`); the `LIKE` statement is sti
 creates the table. A statement that parses but changes nothing (`CREATE`/`DROP USER`, `ROLE` or
 `SERVER`, `CREATE PACKAGE`, an `ALTER` of anything but a database, view, table, procedure,
 function, event or sequence, an `ALTER PROCEDURE`, `FUNCTION`, `EVENT` or `SEQUENCE` of an
-object the file does not create, a `RENAME` of a table the file does not create, `USE REST
-SERVICE`) is not applied and gets no note. `ALTER PROCEDURE`/`FUNCTION` changes the
+object the file does not create, a `RENAME` of a table, view or sequence the file does not
+create, `USE REST SERVICE`) is not applied and gets no note. `RENAME TABLE` renames or moves a
+table, a view or a sequence, as MariaDB does. `ALTER PROCEDURE`/`FUNCTION` changes the
 characteristics it writes, `ALTER EVENT` what it writes (schedule, completion, status, comment,
 body, definer; `RENAME TO` renames or moves the event), `ALTER SEQUENCE` the options it writes.
 

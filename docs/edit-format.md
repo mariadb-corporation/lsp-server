@@ -55,7 +55,7 @@ Names compare without regard to case, as in the outline. A new name is at most 6
 characters, does not end in a space and holds no NUL.
 
 The ops that add or change an object carry it in the outline's shape
-([outline-format.md](outline-format.md)): a `Column`, `Table`, `View`, `Routine`, `Trigger` or `Event` object
+([outline-format.md](outline-format.md)): a `Column`, `Table`, `View`, `Routine`, `Trigger`, `Event` or `Sequence` object
 with the members the outline gives it. A member left out takes the outline's default
 (`nullable` true, `default` null, `comment` null, ...), so `modify_column` with only `name`
 and `type` drops the column's comment. An unknown member is `bad-request`, naming it; the
@@ -92,6 +92,9 @@ unknown members.
 | `add_event` | `event` (Event: `name`, `schedule`, `body`; `on_completion_preserve`, `status`, `comment`, `definer` optional) | done | a `CREATE EVENT` after the schema's last event (below) |
 | `drop_event` | `event` | done | its `CREATE`, `ALTER` and `DROP` statements |
 | `rename_event` | `event`, `new_name` | done | its `CREATE`, `ALTER EVENT` and `DROP EVENT [IF EXISTS]` statements |
+| `add_sequence` | `sequence` (Sequence: `name`; `type`, `start`, `increment`, `minvalue`, `maxvalue`, `cache`, `cycle`, `options` optional) | done | a `CREATE SEQUENCE` after the schema's last sequence, else before its first table (below) |
+| `drop_sequence` | `sequence` | done | its `CREATE`, `ALTER` and `DROP SEQUENCE` statements |
+| `rename_sequence` | `sequence`, `new_name` | done | the definition and every reference (`NEXT VALUE FOR`, `NEXTVAL()`, `LASTVAL()`, `SETVAL()`, `PREVIOUS VALUE FOR`, `FROM s`, `RENAME TABLE`), as `rename_table` finds them |
 
 An op this binary does not do, or does not know (one added after it was built), is refused
 with `unsupported`. `mariadb-lsp edit --ops` lists the ops the binary does as JSON (see
@@ -176,6 +179,14 @@ has above it (a banner's comment lines not counted); no banner is written.
   follows or precedes cannot be dropped (`referenced`): that one's `CREATE` fails without it.
   A trigger or event rename changes the statements about it by name (no reference search: SQL
   names neither elsewhere), with `name-in-string` notes as the other renames.
+- **A sequence** goes after the schema's last sequence, else before its first table (its
+  `DROP TABLE IF EXISTS` included), whose column defaults may take values from it: after the
+  last statement above that table, else after the script's (or the section's) opening
+  comments; in an MSM script in Section 140. Its numbers (`start`, `increment`, `minvalue`,
+  `maxvalue`, `cache`) are strings of an integer, as the outline writes them; `cache` `"0"` writes
+  `NOCACHE`. Sequences share the namespace of tables and views (`name-taken`). A sequence a
+  column's default takes values from cannot be dropped (`referenced`): that table's `CREATE
+  TABLE` fails without it (MariaDB error 1146).
 - **A statement removed** (with the `DROP ... IF EXISTS` of the object before it, which is
   also removed) goes with its lines, with the comment lines right above it when
   one of them names the object (a Workbench banner), and the blank lines above it, as
@@ -250,10 +261,10 @@ Each statement says what it does, so a program need not read its SQL:
 
 | Member | Values |
 | --- | --- |
-| `action` | `create`, `drop` (a table, view, routine, trigger or event); `add`, `drop` (a member of a table); `alter`; `rename` |
-| `object` | `table`, `view`, `procedure`, `function`, `trigger`, `event`; `column`, `index`, `primary_key`, `foreign_key`, `table_options` |
+| `action` | `create`, `drop` (a table, view, routine, trigger, event or sequence); `add`, `drop` (a member of a table); `alter`; `rename` |
+| `object` | `table`, `view`, `procedure`, `function`, `trigger`, `event`, `sequence`; `column`, `index`, `primary_key`, `foreign_key`, `table_options` |
 | `name` | the object's name before the edit (for a `create` or `add`, the new object's); `PRIMARY` for a primary key; for `table_options`, the table's |
-| `table` | a member's table (as named when the statement runs); left out for a table, view, routine, trigger or event |
+| `table` | a member's table (as named when the statement runs); left out for a table, view, routine, trigger, event or sequence |
 | `new_name` | the name after a `rename`, or after an `alter` of a column that `CHANGE COLUMN` renames; left out otherwise |
 
 | op | Statements | Tags (`action` `object`) |
@@ -277,6 +288,9 @@ Each statement says what it does, so a program need not read its SQL:
 | `drop_trigger`, `drop_event` | `DROP TRIGGER t`, `DROP EVENT e` | `drop` `trigger` or `event` |
 | `rename_trigger` | `DROP TRIGGER a`, then the trigger's `CREATE` from the edited script, its included text expanded; with the note `trigger-recreated`. MariaDB fires a table's triggers of one timing and event in the order they were created, so the triggers the script creates after it on its table, at its timing, on an event it or one of them fires on, are dropped after it and created again after it, each with a `trigger-recreated` note | `drop` `trigger` (the old name, then those after it), then `create` `trigger` (the new name, then those after it) |
 | `rename_event` | `ALTER EVENT a RENAME TO b`; none for a change of case (event names do not tell case apart) | `rename` `event` |
+| `add_sequence` | the `CREATE SEQUENCE` as written | `create` `sequence` |
+| `drop_sequence` | `DROP SEQUENCE s` | `drop` `sequence` |
+| `rename_sequence` | `RENAME TABLE a TO b`, then for each column whose default takes values from it `ALTER TABLE t ALTER COLUMN c SET DEFAULT ...` with the default as the edited script writes it: a deployed default still names the old sequence after `RENAME TABLE` | `rename` `sequence`, then `alter` `column` for each such column |
 
 ## Notes
 
@@ -308,9 +322,9 @@ A refused request writes no edits, whatever edits before the failing one did:
 | --- | --- |
 | `bad-request` | the request is not JSON of format 1, a member is missing, empty, unknown or of the wrong type, a new name is too long, a routine name is ambiguous without `kind`, a column's type is not a MariaDB data type, or a definition does not parse |
 | `unsupported` | an op this binary does not do or does not know (a newer binary may), or a column added to a table whose columns the script does not list (`CREATE TABLE ... AS SELECT`, `LIKE`) |
-| `unknown-object` | the table, column, view, routine, trigger or event is not in the outline, nor the table or column a foreign key references, nor the column `after` names, nor a trigger's table (a view is not one) or the trigger its `order` names; `drop_trigger`'s `table` is not the trigger's |
-| `name-taken` | the new name is taken: by a table or view for a table or view (they share a namespace), by a column of the table, by a routine of the same kind, by an index of the table, by a foreign key of the schema, by a trigger or an event of the schema for a trigger or event; a second primary key (use `set_primary_key`); a change of case only is a rename |
-| `referenced` | `drop_table` of a table another table's foreign key references; `drop_column` of a column a foreign key uses; `drop_index` or `set_primary_key` taking away the index a foreign key or an `AUTO_INCREMENT` column needs; `drop_trigger` of a trigger another one follows or precedes |
+| `unknown-object` | the table, column, view, routine, trigger, event or sequence is not in the outline, nor the table or column a foreign key references, nor the column `after` names, nor a trigger's table (a view is not one) or the trigger its `order` names; `drop_trigger`'s `table` is not the trigger's |
+| `name-taken` | the new name is taken: by a table, view or sequence for a table, view or sequence (they share a namespace), by a column of the table, by a routine of the same kind, by an index of the table, by a foreign key of the schema, by a trigger or an event of the schema for a trigger or event; a second primary key (use `set_primary_key`); a change of case only is a rename |
+| `referenced` | `drop_table` of a table another table's foreign key references; `drop_column` of a column a foreign key uses; `drop_index` or `set_primary_key` taking away the index a foreign key or an `AUTO_INCREMENT` column needs; `drop_trigger` of a trigger another one follows or precedes; `drop_sequence` of a sequence a column's default takes values from |
 | `edit-outside-slice` | an edit of an included file would cross the bound of a directive's slice, lie outside every slice of the file, or leave a slice that cannot be written to select the edited text |
 | `self-check` | the outline of the edited texts does not show the edit (the table under its new name, the old name gone from every foreign key, trigger and index; an added object where it was asked for; a dropped one gone), or has a statement it cannot read that the input's outline read (an unapplied note the input did not have) |
 

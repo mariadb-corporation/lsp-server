@@ -77,6 +77,9 @@ constexpr Op_name k_ops[] = {
     {Edit_op::add_event, "add_event"},
     {Edit_op::drop_event, "drop_event"},
     {Edit_op::rename_event, "rename_event"},
+    {Edit_op::add_sequence, "add_sequence"},
+    {Edit_op::drop_sequence, "drop_sequence"},
+    {Edit_op::rename_sequence, "rename_sequence"},
 };
 
 // The longest name the server takes for a table, column or routine.
@@ -199,6 +202,7 @@ const char *to_string(Migration_object o) {
     case Migration_object::function: return "function";
     case Migration_object::trigger: return "trigger";
     case Migration_object::event: return "event";
+    case Migration_object::sequence: return "sequence";
     case Migration_object::column: return "column";
     case Migration_object::index: return "index";
     case Migration_object::primary_key: return "primary_key";
@@ -751,6 +755,35 @@ std::optional<Event> read_event(Json_reader &r, const Json &v) {
   return e;
 }
 
+// An integer as a sequence option writes it: digits, a sign before them.
+bool sequence_number(std::string_view v) {
+  if (!v.empty() && (v[0] == '-' || v[0] == '+')) v.remove_prefix(1);
+  return !v.empty() && std::all_of(v.begin(), v.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)); });
+}
+
+std::optional<Sequence> read_sequence(Json_reader &r, const Json &v) {
+  const std::string what = "\"sequence\"";
+  if (!r.object(v, what, {"name", "type", "start", "increment", "minvalue", "maxvalue", "cache", "cycle", "options"})) {
+    return std::nullopt;
+  }
+  Sequence q;
+  r.str(v, "name", &q.name, true, what);
+  const std::string w = "sequence `" + q.name + "`";
+  r.str(v, "type", &q.type, false, w);
+  for (auto [member, out] : {std::pair{"start", &q.start}, std::pair{"increment", &q.increment},
+                             std::pair{"minvalue", &q.minvalue}, std::pair{"maxvalue", &q.maxvalue},
+                             std::pair{"cache", &q.cache}}) {
+    r.str(v, member, out, false, w);
+    if (r.ok() && !out->empty() && !sequence_number(*out)) {
+      r.fail("\"" + std::string(member) + "\" of " + w + " is not an integer: " + *out);
+    }
+  }
+  r.opt_bool(v, "cycle", &q.cycle, w);
+  r.options(v, "options", &q.options, w);
+  if (!r.ok()) return std::nullopt;
+  return q;
+}
+
 // A name the server takes for a table, column, view or routine.
 std::optional<std::string> bad_name(const std::string &name) {
   if (char_count(name) > k_max_name_characters) return "the name `" + name + "` is longer than 64 characters";
@@ -961,6 +994,20 @@ std::variant<Edit_request, Edit_error> parse_edit_request(std::string_view json)
       case Edit_op::rename_event:
         members({"op", "event", "new_name"});
         name("event", &se.event);
+        name("new_name", &se.new_name);
+        break;
+      case Edit_op::add_sequence:
+        members({"op", "sequence"});
+        if (const Json *q = object("sequence")) se.new_sequence = read_sequence(r, *q);
+        if (se.new_sequence) names_to_check.push_back(se.new_sequence->name);
+        break;
+      case Edit_op::drop_sequence:
+        members({"op", "sequence"});
+        name("sequence", &se.sequence);
+        break;
+      case Edit_op::rename_sequence:
+        members({"op", "sequence", "new_name"});
+        name("sequence", &se.sequence);
         name("new_name", &se.new_name);
         break;
       default:
@@ -1211,6 +1258,16 @@ class Lookup {
     }
     return {nullptr, nullptr};
   }
+  std::pair<const Schema *, const Sequence *> sequence(std::string_view name) const {
+    for (const Schema *s : m_schemas) {
+      if (const Sequence *q = s->sequence(name)) return {s, q};
+    }
+    return {nullptr, nullptr};
+  }
+  // A table, view or sequence (they share a namespace) of that name.
+  bool relation(std::string_view name) const {
+    return table(name).second != nullptr || view(name).second != nullptr || sequence(name).second != nullptr;
+  }
   // The routines of that name, of `kind` when it is not "".
   std::vector<std::pair<const Schema *, const Routine *>> routines(std::string_view name,
                                                                    std::string_view kind) const {
@@ -1441,6 +1498,9 @@ class Editor {
       case Edit_op::add_event: err = add_event(i, e, changes); break;
       case Edit_op::drop_event: err = drop_event(i, e, changes); break;
       case Edit_op::rename_event: err = rename_event(i, e, changes); break;
+      case Edit_op::add_sequence: err = add_sequence(i, e, changes); break;
+      case Edit_op::drop_sequence: err = drop_sequence(i, e, changes); break;
+      case Edit_op::rename_sequence: err = rename_sequence(i, e, changes); break;
       default:
         return error(i, "unsupported", std::string("this binary does not do ") + to_string(e.op) + " yet");
     }
@@ -1593,14 +1653,12 @@ class Editor {
     }
   }
 
-  // The name is free among tables and views (they share a namespace).
+  // The name is free among tables, views and sequences (they share a
+  // namespace).
   std::optional<Edit_error> table_name_free(size_t edit, const std::string &old_name,
                                             const std::string &new_name) {
     if (iequals(old_name, new_name)) return std::nullopt;
-    const auto l = lookup();
-    if (l.table(new_name).second != nullptr || l.view(new_name).second != nullptr) {
-      return error(edit, "name-taken", "a table or view `" + new_name + "` exists");
-    }
+    if (lookup().relation(new_name)) return error(edit, "name-taken", "a table, view or sequence `" + new_name + "` exists");
     return std::nullopt;
   }
 
@@ -2127,7 +2185,7 @@ class Editor {
   // Where a new object goes after: the statement of an existing one, and
   // its origin, whose name's quoting the new text follows.
   // The kinds of object a new one is placed among.
-  enum class Kind : uint8_t { table, view, routine, trigger, event };
+  enum class Kind : uint8_t { table, view, routine, trigger, event, sequence };
   struct Anchor {
     std::optional<size_t> k;
     const Origin *origin = nullptr;
@@ -2142,6 +2200,7 @@ class Editor {
       case Kind::routine: return f(h.routines);
       case Kind::trigger: return f(h.triggers);
       case Kind::event: return f(h.events);
+      case Kind::sequence: return f(h.sequences);
       case Kind::table: break;
     }
     return f(h.tables);
@@ -2152,7 +2211,8 @@ class Editor {
     else if constexpr (std::is_same_v<T, View>) return Kind::view;
     else if constexpr (std::is_same_v<T, Routine>) return Kind::routine;
     else if constexpr (std::is_same_v<T, Trigger>) return Kind::trigger;
-    else return Kind::event;
+    else if constexpr (std::is_same_v<T, Event>) return Kind::event;
+    else return Kind::sequence;
   }
   // The object of `objects` (a schema's tables, views, routines, triggers or
   // events) placed last in the searched text, within searched range
@@ -2293,7 +2353,10 @@ class Editor {
       const auto kt = statement_of(after_table->origin);
       if (kt && (!p.anchor.k || *p.anchor.k < *kt)) p.anchor = {kt, &after_table->origin, after_table->name, Kind::table};
     }
-    if (r && !p.anchor.k) p.spot = end_of_section(within, style_at(std::nullopt, std::nullopt).eol);
+    // In a section, or before the first object of `before`: at the end of
+    // that range.
+    const bool bounded = r || within.end < text().size();
+    if (bounded && !p.anchor.k) p.spot = end_of_section(within, style_at(std::nullopt, std::nullopt).eol);
     return p;
   }
   std::optional<Spot> spot_of(const Place &p, const edit_text::Style &st) const {
@@ -2517,9 +2580,7 @@ class Editor {
   std::optional<Edit_error> add_table(size_t i, const Schema_edit &e, Changes &changes) {
     const Table &t = *e.new_table;
     const auto l = lookup();
-    if (l.table(t.name).second != nullptr || l.view(t.name).second != nullptr) {
-      return error(i, "name-taken", "a table or view `" + t.name + "` exists");
-    }
+    if (auto err = table_name_free(i, "", t.name)) return err;
     for (size_t a = 0; a < t.columns.size(); ++a) {
       for (size_t b = a + 1; b < t.columns.size(); ++b) {
         if (iequals(t.columns[a].name, t.columns[b].name)) {
@@ -3085,10 +3146,7 @@ class Editor {
 
   std::optional<Edit_error> add_view(size_t i, const Schema_edit &e, Changes &changes) {
     const View &v = *e.new_view;
-    const auto l = lookup();
-    if (l.table(v.name).second != nullptr || l.view(v.name).second != nullptr) {
-      return error(i, "name-taken", "a table or view `" + v.name + "` exists");
-    }
+    if (auto err = table_name_free(i, "", v.name)) return err;
     // An MSM script's views are in Section 150, which every deployment runs
     // again: the view must be CREATE OR REPLACE (or dropped first).
     const Place place = place_for(150, {Kind::view, Kind::table});
@@ -3315,6 +3373,80 @@ class Editor {
     if (!iequals(old_name, e.new_name)) {
       migrate(i, "ALTER EVENT " + backtick_quote(old_name) + " RENAME TO " + backtick_quote(e.new_name), Act::rename,
               Obj::event, old_name, e.new_name);
+    }
+    m_old_name = old_name;
+    return std::nullopt;
+  }
+
+
+  // ---------------------------------------------------------------------
+  // Sequences
+
+  // Whether a column default takes its values from sequence `name`
+  // (NEXT VALUE FOR s, NEXTVAL(s), ...).
+  static bool default_uses(const std::optional<std::string> &value, const std::string &name) {
+    if (!value) return false;
+    const std::string v = upper(*value);
+    return has_word(v, upper(name)) && (has_word(v, "NEXT") || has_word(v, "NEXTVAL") || has_word(v, "LASTVAL") ||
+                                        has_word(v, "PREVIOUS") || has_word(v, "SETVAL"));
+  }
+
+  std::optional<Edit_error> add_sequence(size_t i, const Schema_edit &e, Changes &changes) {
+    const Sequence &q = *e.new_sequence;
+    if (auto err = table_name_free(i, "", q.name)) return err;
+    // After the last sequence, else before the first table (whose column
+    // defaults may take values from it); in an MSM script in Section 140.
+    Place place = place_for(140, {Kind::sequence});
+    if (!place.anchor.k) place = place_for(140, {}, {Kind::table});
+    const edit_text::Style st = style_of(place.anchor);
+    const std::string sql = edit_text::create_sequence_sql(q, st);
+    if (const auto p = parse_problem(sql)) {
+      return error(i, "bad-request", "sequence `" + q.name + "` does not parse (" + *p + ")");
+    }
+    const std::string laid = laid_out(sql, st, false);
+    if (!insert_at(changes, spot_of(place, st), laid, st, false)) {
+      return error(i, "self-check", "no place for the CREATE SEQUENCE of `" + q.name + "` was found");
+    }
+    migrate(i, laid, Act::create, Obj::sequence, q.name);
+    return std::nullopt;
+  }
+
+  std::optional<Edit_error> drop_sequence(size_t i, const Schema_edit &e, Changes &changes) {
+    const auto l = lookup();
+    const auto [schema, sequence] = l.sequence(e.sequence);
+    if (sequence == nullptr) return error(i, "unknown-object", "there is no sequence `" + e.sequence + "`");
+    const std::string name = sequence->name;
+    // A CREATE TABLE whose column default names a sequence that does not
+    // exist fails (MariaDB error 1146).
+    for (const Schema *s : l.schemas()) {
+      for (const auto &t : s->tables) {
+        for (const auto &c : t.columns) {
+          if (default_uses(c.default_value, name)) {
+            return error(i, "referenced", "column `" + t.name + "`.`" + c.name + "` takes its default from `" + name + "`");
+          }
+        }
+      }
+    }
+    std::vector<std::pair<size_t, std::string>> gone;
+    for (const size_t k : statements_about("SEQUENCE", name, schema->name)) gone.push_back({k, name});
+    return drop_statements(i, gone, resolve(sequence->origin, Target_kind::table), name, "sequence `" + name + "`",
+                           "view", Obj::sequence, changes);
+  }
+
+  std::optional<Edit_error> rename_sequence(size_t i, const Schema_edit &e, Changes &changes) {
+    const Sequence *sequence = lookup().sequence(e.sequence).second;
+    if (sequence == nullptr) return error(i, "unknown-object", "there is no sequence `" + e.sequence + "`");
+    if (auto err = table_name_free(i, sequence->name, e.new_name)) return err;
+    // A sequence's name resolves as a table's: NEXT VALUE FOR s, NEXTVAL(s),
+    // FROM s and RENAME TABLE s all name a table.
+    const auto id = resolve(sequence->origin, Target_kind::table);
+    if (!id) return error(i, "self-check", "the definition of sequence `" + sequence->name + "` cannot be resolved");
+    const std::string old_name = sequence->name;
+    string_notes(i, {old_name}, "sequence `" + old_name + "`");
+    if (auto err = rewrite_references(i, *id, sequence->origin, e.new_name, changes)) return err;
+    if (old_name != e.new_name) {
+      migrate(i, "RENAME TABLE " + backtick_quote(old_name) + " TO " + backtick_quote(e.new_name), Act::rename,
+              Obj::sequence, old_name, e.new_name);
     }
     m_old_name = old_name;
     return std::nullopt;
@@ -4046,6 +4178,38 @@ class Editor {
         if (ev == nullptr || ev->name != e.new_name) return fail("the edited script has no event `" + e.new_name + "`");
         if (!case_only && l.event(old_name).second != nullptr) {
           return fail("the edited script still has event `" + old_name + "`");
+        }
+        break;
+      }
+      case Edit_op::add_sequence: {
+        const Sequence *q = l.sequence(e.new_sequence->name).second;
+        if (q == nullptr || q->name != e.new_sequence->name) {
+          return fail("the edited script has no sequence `" + e.new_sequence->name + "`");
+        }
+        break;
+      }
+      case Edit_op::drop_sequence:
+        if (l.sequence(old_name).second != nullptr) return fail("the edited script still has sequence `" + old_name + "`");
+        break;
+      case Edit_op::rename_sequence: {
+        const Sequence *q = l.sequence(e.new_name).second;
+        if (q == nullptr || q->name != e.new_name) return fail("the edited script has no sequence `" + e.new_name + "`");
+        if (case_only) break;
+        if (l.sequence(old_name).second != nullptr) return fail("the edited script still has sequence `" + old_name + "`");
+        // A deployed column default still names the old sequence after
+        // RENAME TABLE: set it again.
+        for (const Schema *s : l.schemas()) {
+          for (const auto &t : s->tables) {
+            for (const auto &c : t.columns) {
+              if (default_uses(c.default_value, old_name)) {
+                return fail("column `" + t.name + "`.`" + c.name + "` still takes its default from `" + old_name + "`");
+              }
+              if (default_uses(c.default_value, e.new_name)) {
+                migrate_member(i, t.name, "ALTER COLUMN " + backtick_quote(c.name) + " SET DEFAULT " + *c.default_value,
+                               Act::alter, Obj::column, c.name);
+              }
+            }
+          }
         }
         break;
       }
