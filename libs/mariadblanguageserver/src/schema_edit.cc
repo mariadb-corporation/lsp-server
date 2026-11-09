@@ -1807,15 +1807,21 @@ class Editor {
   using Act = Migration_action;
   using Obj = Migration_object;
   static Obj routine_object(const std::string &kind) { return kind == "function" ? Obj::function : Obj::procedure; }
-  // `sql` doing `a` to object `o` named `name` (a table, view or routine).
-  void migrate(size_t edit, std::string sql, Act a, Obj o, std::string name, std::string new_name = {}) {
+  // A statement of edit `edit` tagged as doing `a` to object `o` named
+  // `name`, without its SQL.
+  static Migration_statement tagged(size_t edit, Act a, Obj o, std::string name, std::string new_name) {
     Migration_statement m;
     m.edit = edit;
-    m.sql = std::move(sql);
     m.action = a;
     m.object = o;
     m.name = std::move(name);
     m.new_name = std::move(new_name);
+    return m;
+  }
+  // `sql` doing `a` to object `o` named `name` (a table, view or routine).
+  void migrate(size_t edit, std::string sql, Act a, Obj o, std::string name, std::string new_name = {}) {
+    Migration_statement m = tagged(edit, a, o, std::move(name), std::move(new_name));
+    m.sql = std::move(sql);
     m_result.migration.push_back(std::move(m));
   }
   // DROP TABLE|VIEW|PROCEDURE|FUNCTION `name`.
@@ -1827,16 +1833,12 @@ class Editor {
   // for merge_alters.
   void migrate_member(size_t edit, const std::string &table, const std::string &clause, Act a, Obj o,
                       std::string name, Alter_names names, std::string new_name = {}) {
-    Migration_statement m;
-    m.edit = edit;
-    m.action = a;
-    m.object = o;
-    m.name = o == Obj::primary_key ? "PRIMARY" : std::move(name);
+    Migration_statement m =
+        tagged(edit, a, o, o == Obj::primary_key ? "PRIMARY" : std::move(name), std::move(new_name));
     m.table = table;
-    m.new_name = std::move(new_name);
     m.spec = clause;
     m.sql = alter_table_sql(table, clause);
-    m.names = {std::move(names)};
+    m.names.push_back(std::move(names));
     m_result.migration.push_back(std::move(m));
   }
   // A foreign key of `table` depends on the table it references.
