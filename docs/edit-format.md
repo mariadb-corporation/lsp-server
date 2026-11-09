@@ -30,11 +30,13 @@ error or an unreadable script or request.
 `edit ops:` line of `--help` lists the same, for people):
 
 ```json
-{"format": 1, "ops": ["rename_table", "rename_column", ...]}
+{"format": 1, "ops": ["rename_table", "rename_column", ...], "merge_alters": true}
 ```
 
 A binary that answers `--ops` also tags each migration statement (`action`, `object`, ...)
 and answers `unsupported` for an op it does not know; older ones (#25 to #28) exit 2 there.
+`merge_alters` is there when the binary understands the request member of that name (an
+older one ignores it, as it ignores any member it does not know at the top level).
 
 ## Request
 
@@ -50,6 +52,7 @@ and answers `unsupported` for an op it does not know; older ones (#25 to #28) ex
 | `format` | number | `1` |
 | `schema` | string or null | the outline schema the names belong to; objects are looked up there, then among the objects of the part of the script that names no schema (before the first `USE`), as msm's snapshot takes both; null for a script without `USE` |
 | `edits` | array | applied in order, each to the result of the ones before (rename a table, then a column of it under the new name) |
+| `merge_alters` | boolean, optional | `true`: the `ALTER TABLE` statements of a table are merged into one where that runs as they do one after another ([Merged ALTER TABLE statements](#merged-alter-table-statements)); left out or `false`: the migration has one statement per change, as before |
 
 Names compare without regard to case, as in the outline. A new name is at most 64
 characters, does not end in a space and holds no NUL.
@@ -242,7 +245,7 @@ has above it (a banner's comment lines not counted); no banner is written.
 | `format` | number | `1` |
 | `files` | array | `{file, edits}` for each file that changes, the script first, then the included files in the order they are first included; `file` is `-` for stdin (else the script as given), an included file's path relative to `--source-dir` with `/` separators |
 | `files[].edits` | array | `{range, new_text}`: LSP ranges (0-based line, UTF-16 character) in that file's text as it is on disk, not the sliced or expanded text; sorted and not overlapping, so they can be applied back to front |
-| `migration` | array | `{edit, sql, action, object, name, table?, new_name?}`: the statements that take a deployed schema of the old shape to the new one, in edit order, each with what it does (see [Migration](#migration)) |
+| `migration` | array | `{edit, sql, action, object, name, table?, new_name?}`: the statements that take a deployed schema of the old shape to the new one, in edit order, each with what it does (see [Migration](#migration)); with `merge_alters`, an `ALTER TABLE` also has `edits`, `spec` and `clauses` |
 | `notes` | array | `{edit, kind, file, source?, start, message}`: what an edit could not do itself, for a person to check; they do not refuse the edit (see [Notes](#notes)). `file` as in `files`; `source` the index in the outline's `includes` of the file's first directive (left out for the script); `start` a position in that file's text on disk |
 | `outline` | object | the outline ([outline-format.md](outline-format.md), format 1) of the edited texts, as `mariadb-lsp outline` of the edited files gives it; `file` as in `files` |
 
@@ -292,6 +295,73 @@ Each statement says what it does, so a program need not read its SQL:
 | `add_sequence` | the `CREATE SEQUENCE` as written | `create` `sequence` |
 | `drop_sequence` | `DROP SEQUENCE s` | `drop` `sequence` |
 | `rename_sequence` | `RENAME TABLE a TO b`, then for each column whose default takes values from it (in its definition, or set by `ALTER COLUMN c SET DEFAULT`) `ALTER TABLE t ALTER COLUMN c SET DEFAULT ...` with the default as the edited script writes it: a deployed default still names the old sequence after `RENAME TABLE` | `rename` `sequence`, then `alter` `column` for each such column |
+
+### Merged ALTER TABLE statements
+
+With `"merge_alters": true` in the request, the `ALTER TABLE` statements of one table become
+one statement, `ALTER TABLE t clause, clause, ...`, wherever that gives what running them one
+after another gives, so that a table is altered (and perhaps copied) once. MSM runs each
+`ALTER TABLE` as an online ALTER and adds `ALGORITHM` and `LOCK` itself; the migration never
+has them. The text edits, notes and outline do not change.
+
+A statement joins the last statement of its table when:
+
+- only `ALTER TABLE` statements of other tables lie between them, and none of those depends
+  on it nor it on them: neither is a statement of the other's table nor has a foreign key
+  referencing (or, when dropped, having referenced) the other's table. Any other statement
+  (`RENAME TABLE`, a `CREATE` or `DROP`, ...) in between keeps them apart, so the order
+  between tables holds: around `modify_column`, another table's `DROP FOREIGN KEY` still runs
+  before the column's change and its `ADD CONSTRAINT` after;
+- none of its clauses conflicts with a clause already in that statement.
+
+Two clauses conflict unless what both name is used in one of these ways (each checked on
+MariaDB 12.3 against two statements, comparing `SHOW CREATE TABLE`):
+
+| First clause | Then | Example |
+| --- | --- | --- |
+| adds a column, or renames one to it | names it in a key or `AFTER` | `ADD COLUMN c INT, ADD INDEX ic (c)`; `RENAME COLUMN a TO c, ADD COLUMN d INT AFTER c` |
+| changes a column in place (`MODIFY`) | names it in a key | `MODIFY COLUMN b BIGINT, ADD INDEX ib (b)` |
+| names a column in a key or `AFTER` | names it in a key or `AFTER` | `ADD COLUMN c INT AFTER a, ADD COLUMN d INT AFTER a` |
+| renames a column away | adds a column of the old name | `RENAME COLUMN a TO c, ADD COLUMN a INT` |
+| drops an index, the primary key or a foreign key | adds one of the same kind and name | `DROP INDEX ia, ADD INDEX ia (a, b)`; `DROP FOREIGN KEY fk, MODIFY COLUMN c ..., ADD CONSTRAINT fk ...` |
+| drops a foreign key | drops the index of its name | `DROP FOREIGN KEY fk, DROP INDEX fk` |
+
+Clauses that name nothing in common merge, table options with anything among them. These stay
+apart, as MariaDB refuses them in one statement or runs them differently: a column changed
+twice (`MODIFY` and `MODIFY`, `MODIFY` and `ALTER COLUMN ... SET DEFAULT`), renamed and then
+changed under either name, added and then dropped, dropped and then added again; a clause
+that names a column by its old name after a rename; a key added and then dropped; a column
+`DEFAULT` that is not a literal, a `CHECK` or a generated column next to a clause that renames
+or drops a column (an expression naming the renamed column fails); a foreign key referencing
+its own table next to a change of a column it references (errno 150). Column names compare
+without regard to case, table names with it.
+
+A statement made of several clauses is tagged `alter` `table` with the table's name, and lists
+its clauses:
+
+```json
+{"edit": 0, "edits": [0, 1, 2],
+ "sql": "ALTER TABLE `orders` ADD COLUMN `qty` INT, ADD INDEX `ix_qty` (`qty`), COMMENT='all orders'",
+ "action": "alter", "object": "table", "name": "orders", "table": "orders",
+ "spec": "ADD COLUMN `qty` INT, ADD INDEX `ix_qty` (`qty`), COMMENT='all orders'",
+ "clauses": [
+   {"edit": 0, "spec": "ADD COLUMN `qty` INT", "action": "add", "object": "column", "name": "qty", "table": "orders"},
+   {"edit": 1, "spec": "ADD INDEX `ix_qty` (`qty`)", "action": "add", "object": "index", "name": "ix_qty", "table": "orders"},
+   {"edit": 2, "spec": "COMMENT='all orders'", "action": "alter", "object": "table_options", "name": "orders", "table": "orders"}]}
+```
+
+| Member | Meaning |
+| --- | --- |
+| `edit` | its first clause's edit; the statement stands where that clause's own statement would have stood |
+| `edits` | the edits it holds clauses of, in order, each once |
+| `table` | the table, as named when the statement runs |
+| `spec` | the text after `` ALTER TABLE `t` ``: the clauses, comma-separated |
+| `clauses` | `{edit, spec, action, object, name, table, new_name?}` per clause, in order: the tags its own statement would have had and its text (`set_primary_key`'s `DROP PRIMARY KEY, ADD PRIMARY KEY (...)` is one clause) |
+
+An `ALTER TABLE` that nothing joined keeps its own tags and has `edits`, `spec` and a
+`clauses` list of one too, so a program can read every `ALTER TABLE` the same way. `RENAME
+TABLE` and the other statements are left as they are, without these members. Without
+`merge_alters` no statement has them.
 
 ## Notes
 

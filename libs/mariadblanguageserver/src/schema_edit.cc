@@ -22,9 +22,11 @@
 #include <rapidjson/writer.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstring>
 #include <filesystem>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <set>
@@ -158,6 +160,103 @@ std::string note_key(const Note &n) {
   return std::string(to_string(n.kind)) + "\n" + std::string(m);
 }
 
+// A default that names no column: a number, a string, NULL, TRUE or FALSE.
+// Anything else (a function, an expression in parentheses, a "name" that
+// ANSI_QUOTES makes an identifier) may name one.
+bool is_literal(std::string_view v) {
+  v = trim(v);
+  if (v.empty()) return false;
+  if (iequals(v, "NULL") || iequals(v, "TRUE") || iequals(v, "FALSE")) return true;
+  if (v.front() == '\'') {
+    // One string: a quote is doubled or escaped inside it.
+    for (size_t k = 1; k < v.size(); ++k) {
+      if (v[k] == '\\') {
+        ++k;
+      } else if (v[k] == '\'') {
+        if (k + 1 < v.size() && v[k + 1] == '\'') ++k;
+        else return k + 1 == v.size();
+      }
+    }
+    return false;
+  }
+  // A number: digits, a point, an exponent; it starts with a digit after
+  // its sign (or with the point), so a word is none.
+  size_t k = v.front() == '-' || v.front() == '+' ? 1 : 0;
+  if (k == v.size() || !(std::isdigit(static_cast<unsigned char>(v[k])) || v[k] == '.')) return false;
+  for (; k < v.size(); ++k) {
+    const char c = v[k];
+    if (!std::isdigit(static_cast<unsigned char>(c)) && c != '.' && c != 'e' && c != 'E' && c != '-' && c != '+') {
+      return false;
+    }
+  }
+  return true;
+}
+
+// A clause writing a column definition, or a default of its own, names
+// other columns when it has an expression.
+bool has_expression(const std::optional<std::string> &default_value, bool checks = false, bool generated = false) {
+  return checks || generated || (default_value && !is_literal(*default_value));
+}
+
+std::string alter_table_sql(const std::string &table, const std::string &spec) {
+  return "ALTER TABLE " + backtick_quote(table) + " " + spec;
+}
+
+// ---------------------------------------------------------------------------
+// Merging ALTER TABLE statements (merge_alters).  The rules come from
+// running each pair of clauses one statement after the other and in one
+// statement on MariaDB 12.3 and comparing SHOW CREATE TABLE.
+
+bool shares(const std::vector<std::string> &a, const std::vector<std::string> &b) {
+  return std::any_of(a.begin(), a.end(), [&](const std::string &x) { return names(b, x); });
+}
+
+// Clause `l` cannot go into the statement of the earlier clause `e`.
+bool conflicts(const Alter_names &e, const Alter_names &l) {
+  // A column both name, by what each does to it.  These pairs give what
+  // two statements give: a column added or renamed to, then named by a key
+  // or AFTER; changed in place, then named by a key; renamed from, then
+  // added again.  Any other pair fails (a column changed twice, added then
+  // dropped, dropped then added, named by its old name after a rename) or
+  // was not tried.
+  enum { defines, modifies, renames, drops, refers, exclusive };
+  auto roles = [](const Alter_names &n) {
+    return std::array{&n.defines, &n.modifies, &n.renames, &n.drops, &n.refers, &n.exclusive};
+  };
+  const auto er = roles(e);
+  const auto lr = roles(l);
+  for (size_t a = 0; a < er.size(); ++a) {
+    for (size_t b = 0; b < lr.size(); ++b) {
+      if (!shares(*er[a], *lr[b])) continue;
+      const bool fine = (b == refers && (a == defines || a == modifies || a == refers)) || (a == renames && b == defines);
+      if (!fine) return true;
+    }
+  }
+  // A key both name, foreign keys and indexes alike: dropped, then added
+  // again; or a foreign key dropped, then its index.  Anything else (added
+  // then dropped, two of one name) fails or was not tried.
+  for (const auto &a : e.keys) {
+    for (const auto &b : l.keys) {
+      if (!iequals(a.name, b.name)) continue;
+      const bool readd = !a.add && b.add && a.foreign_key == b.foreign_key;
+      const bool fk_index = !a.add && !b.add && a.foreign_key && !b.foreign_key;
+      if (!readd && !fk_index) return true;
+    }
+  }
+  // An expression may name a column the other clause renames or drops: a
+  // DEFAULT or CHECK naming a column renamed in the same statement fails.
+  const bool e_moves = !e.renames.empty() || !e.drops.empty();
+  const bool l_moves = !l.renames.empty() || !l.drops.empty();
+  return (e.expression && l_moves) || (l.expression && e_moves);
+}
+
+// A statement of `table` with these clauses touches table `other`: it is
+// `other`, or one of its foreign keys references it.
+bool touches(const std::string &table, const std::vector<Alter_names> &clauses, const std::string &other) {
+  return table == other ||
+         std::any_of(clauses.begin(), clauses.end(), [&](const Alter_names &n) { return names(n.tables, other); });
+}
+
 }  // namespace
 
 std::optional<Edit_op> edit_op_from_string(std::string_view op) {
@@ -212,6 +311,47 @@ const char *to_string(Migration_object o) {
   return "";
 }
 
+void merge_alter_statements(std::vector<Migration_statement> &migration) {
+  std::vector<Migration_statement> out;
+  for (auto &m : migration) {
+    if (!m.is_alter_table()) {
+      out.push_back(std::move(m));
+      continue;
+    }
+    // The table's last statement, past ALTER TABLEs of other tables that
+    // neither depend on the other; anything else in between stops it.
+    Migration_statement *into = nullptr;
+    for (auto o = out.rbegin(); o != out.rend() && o->is_alter_table(); ++o) {
+      if (o->table == m.table) {
+        into = &*o;
+        break;
+      }
+      if (touches(o->table, o->names, m.table) || touches(m.table, m.names, o->table)) break;
+    }
+    const bool fits = into != nullptr && std::none_of(into->names.begin(), into->names.end(), [&](const Alter_names &e) {
+      return std::any_of(m.names.begin(), m.names.end(), [&](const Alter_names &l) { return conflicts(e, l); });
+    });
+    if (!fits) {
+      m.clauses = {m};
+      out.push_back(std::move(m));
+      continue;
+    }
+    into->clauses.push_back(m);
+    into->spec.append(", ").append(m.spec);
+    std::move(m.names.begin(), m.names.end(), std::back_inserter(into->names));
+  }
+  // A statement of several clauses alters its table.
+  for (auto &o : out) {
+    if (o.clauses.size() < 2) continue;
+    o.sql = alter_table_sql(o.table, o.spec);
+    o.action = Migration_action::alter;
+    o.object = Migration_object::table;
+    o.name = o.table;
+    o.new_name.clear();
+  }
+  migration = std::move(out);
+}
+
 std::string edit_ops_json() {
   rapidjson::StringBuffer buf;
   rapidjson::Writer<rapidjson::StringBuffer> w(buf);
@@ -222,6 +362,9 @@ std::string edit_ops_json() {
   w.StartArray();
   for (const auto &o : k_ops) w.String(o.name);
   w.EndArray();
+  // The request's merge_alters is understood.
+  w.Key("merge_alters");
+  w.Bool(true);
   w.EndObject();
   return buf.GetString();
 }
@@ -809,6 +952,10 @@ std::variant<Edit_request, Edit_error> parse_edit_request(std::string_view json)
   }
   if (!d.HasMember("edits") || !d["edits"].IsArray()) {
     return error(std::nullopt, "bad-request", "the request has no \"edits\" array");
+  }
+  if (d.HasMember("merge_alters")) {
+    if (!d["merge_alters"].IsBool()) return error(std::nullopt, "bad-request", "\"merge_alters\" is not a boolean");
+    out.merge_alters = d["merge_alters"].GetBool();
   }
   size_t i = 0;
   for (const auto &e : d["edits"].GetArray()) {
@@ -1660,27 +1807,72 @@ class Editor {
   using Act = Migration_action;
   using Obj = Migration_object;
   static Obj routine_object(const std::string &kind) { return kind == "function" ? Obj::function : Obj::procedure; }
+  // A statement of edit `edit` tagged as doing `a` to object `o` named
+  // `name`, without its SQL.
+  static Migration_statement tagged(size_t edit, Act a, Obj o, std::string name, std::string new_name) {
+    Migration_statement m;
+    m.edit = edit;
+    m.action = a;
+    m.object = o;
+    m.name = std::move(name);
+    m.new_name = std::move(new_name);
+    return m;
+  }
   // `sql` doing `a` to object `o` named `name` (a table, view or routine).
   void migrate(size_t edit, std::string sql, Act a, Obj o, std::string name, std::string new_name = {}) {
-    m_result.migration.push_back({edit, std::move(sql), a, o, std::move(name), {}, std::move(new_name)});
+    Migration_statement m = tagged(edit, a, o, std::move(name), std::move(new_name));
+    m.sql = std::move(sql);
+    m_result.migration.push_back(std::move(m));
   }
   // DROP TABLE|VIEW|PROCEDURE|FUNCTION `name`.
   void migrate_drop(size_t edit, Obj o, const std::string &name) {
     migrate(edit, "DROP " + upper(to_string(o)) + " " + backtick_quote(name), Act::drop, o, name);
   }
   // ALTER TABLE `table` <clause>, doing `a` to `table`'s member `o` named
-  // `name` (PRIMARY for the primary key).
+  // `name` (PRIMARY for the primary key); `names`: what the clause names,
+  // for merge_alters.
   void migrate_member(size_t edit, const std::string &table, const std::string &clause, Act a, Obj o,
-                      std::string name, std::string new_name = {}) {
-    if (o == Obj::primary_key) name = "PRIMARY";
-    m_result.migration.push_back({edit, "ALTER TABLE " + backtick_quote(table) + " " + clause, a, o, std::move(name),
-                                  table, std::move(new_name)});
+                      std::string name, Alter_names names, std::string new_name = {}) {
+    Migration_statement m =
+        tagged(edit, a, o, o == Obj::primary_key ? "PRIMARY" : std::move(name), std::move(new_name));
+    m.table = table;
+    m.spec = clause;
+    m.sql = alter_table_sql(table, clause);
+    m.names.push_back(std::move(names));
+    m_result.migration.push_back(std::move(m));
   }
-  void migrate_drop_foreign_key(size_t edit, const std::string &table, const std::string &name) {
-    migrate_member(edit, table, "DROP FOREIGN KEY " + backtick_quote(name), Act::drop, Obj::foreign_key, name);
+  // A foreign key of `table` depends on the table it references.
+  static Alter_names foreign_key_names(const std::string &table, const Foreign_key &fk, bool add) {
+    Alter_names n;
+    n.keys = {{fk.name, true, add}};
+    // A name of another case is another table on Linux, the same one
+    // elsewhere: both, to be safe.
+    if (fk.ref_table != table) n.tables.push_back(fk.ref_table);
+    if (!add) return n;
+    n.refers = fk.columns;
+    // Checked on MariaDB 12.3: a key referencing its own table cannot be
+    // added in the statement that changes a referenced column (errno 150).
+    if (iequals(fk.ref_table, table)) n.exclusive = fk.ref_columns;
+    return n;
+  }
+  void migrate_drop_foreign_key(size_t edit, const std::string &table, const Foreign_key &fk) {
+    migrate_member(edit, table, "DROP FOREIGN KEY " + backtick_quote(fk.name), Act::drop, Obj::foreign_key, fk.name,
+                   foreign_key_names(table, fk, false));
   }
   void migrate_add_foreign_key(size_t edit, const std::string &table, const Foreign_key &fk) {
-    migrate_member(edit, table, "ADD " + edit_text::foreign_key_sql(fk, {}), Act::add, Obj::foreign_key, fk.name);
+    migrate_member(edit, table, "ADD " + edit_text::foreign_key_sql(fk, {}), Act::add, Obj::foreign_key, fk.name,
+                   foreign_key_names(table, fk, true));
+  }
+  static Alter_names column_names(const Column &c, bool checks) {
+    Alter_names n;
+    n.expression = has_expression(c.default_value, checks, c.generated.has_value());
+    return n;
+  }
+  static Alter_names key_names(const Index &ix, const std::string &name, bool add) {
+    Alter_names n;
+    n.keys = {{name, false, add}};
+    if (add) n.refers = ix.columns();
+    return n;
   }
 
   std::optional<Edit_error> rename_table(size_t i, const Schema_edit &e, Changes &changes) {
@@ -1733,8 +1925,11 @@ class Editor {
     string_notes(i, {old_name, table->name}, "column `" + table->name + "`.`" + old_name + "`");
     if (auto err = rewrite_references(i, *id, column->origin, e.new_name, changes)) return err;
     if (old_name != e.new_name) {
+      Alter_names n;
+      n.renames = {old_name};
+      n.defines = {e.new_name};
       migrate_member(i, table->name, "RENAME COLUMN " + backtick_quote(old_name) + " TO " + backtick_quote(e.new_name),
-                     Act::rename, Obj::column, old_name, e.new_name);
+                     Act::rename, Obj::column, old_name, std::move(n), e.new_name);
     }
     m_old_name = old_name;
     return std::nullopt;
@@ -2898,7 +3093,10 @@ class Editor {
     std::string clause = "ADD COLUMN " + edit_text::column_sql(c, {}, {});
     if (e.first) clause += " FIRST";
     else if (!e.after.empty()) clause += " AFTER " + backtick_quote(after);
-    migrate_member(i, table->name, clause, Act::add, Obj::column, c.name);
+    Alter_names n = column_names(c, false);
+    n.defines = {c.name};
+    if (!e.first && !e.after.empty()) n.refers = {after};
+    migrate_member(i, table->name, clause, Act::add, Obj::column, c.name, std::move(n));
     return std::nullopt;
   }
 
@@ -2964,11 +3162,18 @@ class Editor {
              "an unnamed foreign key of `" + x + "` uses the column: the migration cannot drop and add it again");
         continue;
       }
-      migrate_drop_foreign_key(i, x, fk.name);
+      migrate_drop_foreign_key(i, x, fk);
     }
     const std::string body = edit_text::column_sql(nc, checks, {});
+    Alter_names n = column_names(nc, !checks.empty());
+    if (renamed) {
+      n.renames = {old_name};
+      n.defines = {nc.name};
+    } else {
+      n.modifies = {old_name};
+    }
     migrate_member(i, table_name, (renamed ? "CHANGE COLUMN " + backtick_quote(old_name) + " " : "MODIFY COLUMN ") + body,
-                   Act::alter, Obj::column, old_name, renamed ? nc.name : std::string());
+                   Act::alter, Obj::column, old_name, std::move(n), renamed ? nc.name : std::string());
     for (auto [x, fk] : fks) {
       if (fk.name.empty()) continue;
       for (auto &col : fk.columns) {
@@ -3076,7 +3281,9 @@ class Editor {
     }
     still_referenced(i, id, removed, "column `" + table->name + "`.`" + name + "`");
     m_old_name = name;
-    migrate_member(i, table->name, "DROP COLUMN " + backtick_quote(name), Act::drop, Obj::column, name);
+    Alter_names n;
+    n.drops = {name};
+    migrate_member(i, table->name, "DROP COLUMN " + backtick_quote(name), Act::drop, Obj::column, name, std::move(n));
     return std::nullopt;
   }
 
@@ -3158,7 +3365,7 @@ class Editor {
       }
     }
     if (!sets.empty()) {
-      migrate_member(i, table->name, join(sets, " "), Act::alter, Obj::table_options, table->name);
+      migrate_member(i, table->name, join(sets, " "), Act::alter, Obj::table_options, table->name, {});
     }
     if (removes) {
       note(i, "no-migration", table->origin.source, table->origin.statement.begin,
@@ -3667,7 +3874,8 @@ class Editor {
                             : add_element(changes, *table, sql, {Element::index, Element::primary, Element::column}, st);
     if (!ok) return error(i, "self-check", "no place for the index was found in `" + table->name + "`");
     migrate_member(i, table->name, "ADD " + edit_text::index_sql(ix, {}), Act::add,
-                   primary ? Obj::primary_key : Obj::index, ix.name);
+                   primary ? Obj::primary_key : Obj::index, ix.name,
+                   key_names(ix, primary ? std::string("PRIMARY") : ix.name, true));
     return std::nullopt;
   }
 
@@ -3723,9 +3931,10 @@ class Editor {
       return error(i, "self-check", "the index cannot be removed from `" + table->name + "`");
     }
     if (ix.kind == "primary") {
-      migrate_member(i, table->name, "DROP PRIMARY KEY", Act::drop, Obj::primary_key, {});
+      migrate_member(i, table->name, "DROP PRIMARY KEY", Act::drop, Obj::primary_key, {}, key_names(ix, "PRIMARY", false));
     } else if (!ix.name.empty()) {
-      migrate_member(i, table->name, "DROP INDEX " + backtick_quote(ix.name), Act::drop, Obj::index, ix.name);
+      migrate_member(i, table->name, "DROP INDEX " + backtick_quote(ix.name), Act::drop, Obj::index, ix.name,
+                     key_names(ix, ix.name, false));
     } else {
       note(i, "no-migration", table->origin.source, table->origin.statement.begin,
            "an unnamed index of `" + table->name + "` was removed: the server's name for it is not known");
@@ -3771,8 +3980,10 @@ class Editor {
     if (!ok) return error(i, "self-check", "the primary key of `" + table->name + "` cannot be written");
     // One statement: a DROP PRIMARY KEY of its own fails when an
     // AUTO_INCREMENT column is the key.
+    Alter_names n = key_names(pk, "PRIMARY", true);
+    if (old != nullptr) n.keys.push_back({"PRIMARY", false, false});
     migrate_member(i, table->name, (old != nullptr ? "DROP PRIMARY KEY, ADD " : "ADD ") + edit_text::index_sql(pk, {}),
-                   old != nullptr ? Act::alter : Act::add, Obj::primary_key, {});
+                   old != nullptr ? Act::alter : Act::add, Obj::primary_key, {}, std::move(n));
     return std::nullopt;
   }
 
@@ -3849,7 +4060,7 @@ class Editor {
     }
     if (!ok) return error(i, "self-check", "the " + what + " cannot be removed from `" + table->name + "`");
     if (!fk.name.empty()) {
-      migrate_drop_foreign_key(i, table->name, fk.name);
+      migrate_drop_foreign_key(i, table->name, fk);
     } else {
       note(i, "no-migration", fk.origin.source, fk.origin.statement.begin,
            "an unnamed foreign key of `" + table->name + "` was removed: the server's name for it is not known");
@@ -4236,8 +4447,11 @@ class Editor {
           // A later ALTER TABLE dropped the default: the deployed column no
           // longer names the sequence.
           if (!c->default_value) continue;
+          Alter_names n;
+          n.modifies = {column};
+          n.expression = has_expression(c->default_value);
           migrate_member(i, table, "ALTER COLUMN " + backtick_quote(column) + " SET DEFAULT " + *c->default_value,
-                         Act::alter, Obj::column, column);
+                         Act::alter, Obj::column, column, std::move(n));
         }
         break;
       }
@@ -4280,6 +4494,7 @@ std::variant<Edit_result, Edit_error> apply_schema_edits(std::string_view script
   for (size_t i = 0; i < request.edits.size(); ++i) {
     if (auto err = editor.run(i)) return *err;
   }
+  if (request.merge_alters) merge_alter_statements(result.migration);
   for (const auto &n : s.outline().notes) {
     if (n.applied) continue;
     const auto it = before.find(note_key(n));
@@ -4364,6 +4579,31 @@ std::string edit_result_json(const Edit_result &result, std::string_view script_
     str(w, "name", m.name);
     if (!m.table.empty()) str(w, "table", m.table);
     if (!m.new_name.empty()) str(w, "new_name", m.new_name);
+    if (!m.clauses.empty()) {
+      // The clauses' edits, each once: they come in edit order.
+      w.Key("edits");
+      w.StartArray();
+      for (size_t k = 0; k < m.clauses.size(); ++k) {
+        if (k == 0 || m.clauses[k].edit != m.clauses[k - 1].edit) w.Uint64(m.clauses[k].edit);
+      }
+      w.EndArray();
+      str(w, "spec", m.spec);
+      w.Key("clauses");
+      w.StartArray();
+      for (const auto &c : m.clauses) {
+        w.StartObject();
+        w.Key("edit");
+        w.Uint64(c.edit);
+        str(w, "spec", c.spec);
+        str(w, "action", to_string(c.action));
+        str(w, "object", to_string(c.object));
+        str(w, "name", c.name);
+        str(w, "table", c.table);
+        if (!c.new_name.empty()) str(w, "new_name", c.new_name);
+        w.EndObject();
+      }
+      w.EndArray();
+    }
     w.EndObject();
   }
   w.EndArray();

@@ -2070,4 +2070,223 @@ TEST(Schema_edit, rename_sequence) {
   EXPECT_EQ((std::vector<std::string>{"RENAME TABLE `s` TO `ids`"}), migration(d));
 }
 
+// ---------------------------------------------------------------------------
+// merge_alters
+
+namespace {
+
+// `request(schema, edits)` asking for merged ALTER TABLE statements.
+std::string merged(const std::string &schema, const std::string &edits) {
+  std::string r = request(schema, edits);
+  r.insert(1, "\"merge_alters\": true, ");
+  return r;
+}
+
+// Each statement's clause tags, "|"-separated.
+std::vector<std::string> clause_tags(const Edit_result &r) {
+  std::vector<std::string> out;
+  for (const auto &m : r.migration) {
+    std::string t;
+    for (const auto &c : m.clauses) {
+      t += (t.empty() ? "" : "|") + std::to_string(c.edit) + " " + to_string(c.action) + " " + to_string(c.object) +
+           " " + c.name;
+    }
+    out.push_back(t);
+  }
+  return out;
+}
+
+// An ALTER TABLE statement of `table` with one clause, as migrate_member
+// writes it.
+Migration_statement alter(size_t edit, const std::string &table, const std::string &spec, Alter_names n = {}) {
+  Migration_statement m;
+  m.edit = edit;
+  m.sql = "ALTER TABLE `" + table + "` " + spec;
+  m.action = Migration_action::add;
+  m.object = Migration_object::column;
+  m.name = "c";
+  m.table = table;
+  m.spec = spec;
+  m.names = {std::move(n)};
+  return m;
+}
+
+std::vector<std::string> merged_sql(std::vector<Migration_statement> m) {
+  Edit_result r;
+  r.migration = std::move(m);
+  merge_alter_statements(r.migration);
+  return migration(r);
+}
+
+}  // namespace
+
+TEST(Schema_edit, merge_alters_request) {
+  const auto r = parse_edit_request(merged("s", rename_table("t", "u")));
+  ASSERT_TRUE(std::holds_alternative<Edit_request>(r));
+  EXPECT_TRUE(std::get<Edit_request>(r).merge_alters);
+  EXPECT_FALSE(std::get<Edit_request>(parse_edit_request(request("s", rename_table("t", "u")))).merge_alters);
+  std::string bad = request("s", rename_table("t", "u"));
+  bad.insert(1, "\"merge_alters\": 1, ");
+  EXPECT_EQ("bad-request", std::get<Edit_error>(parse_edit_request(bad)).kind);
+  rapidjson::Document d;
+  d.Parse(edit_ops_json().c_str());
+  ASSERT_TRUE(d.HasMember("merge_alters"));
+  EXPECT_TRUE(d["merge_alters"].GetBool());
+}
+
+// What the Table Editor's Save sends: one statement, every clause tagged.
+TEST(Schema_edit, merge_alters_one_table) {
+  const std::string edits = R"j({"op": "add_column", "table": "orders", "column": {"name": "qty", "type": "INT"}},
+      {"op": "add_index", "table": "orders", "index": {"name": "ix_qty", "kind": "index", "columns": ["qty"]}},
+      {"op": "set_table_options", "table": "orders", "options": {"comment": "all orders"}})j";
+  // Without the flag: as before, no clauses, nothing more in the output.
+  const auto plain = ok(edit(k_shop, {}, request("shop", edits)));
+  EXPECT_EQ(3u, plain.migration.size());
+  const std::string plain_json = edit_result_json(plain, "-", "");
+  EXPECT_EQ(std::string::npos, plain_json.find("\"clauses\"")) << plain_json;
+  EXPECT_EQ(std::string::npos, plain_json.find("\"spec\"")) << plain_json;
+
+  const auto r = ok(edit(k_shop, {}, merged("shop", edits)));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `orders` ADD COLUMN `qty` INT, ADD INDEX `ix_qty` (`qty`), "
+                                     "COMMENT='all orders'"},
+            migration(r));
+  EXPECT_EQ(Tags{"alter table orders (orders)"}, tags(r));
+  EXPECT_EQ(std::vector<std::string>{"0 add column qty|1 add index ix_qty|2 alter table_options orders"},
+            clause_tags(r));
+  ASSERT_EQ(1u, r.migration.size());
+  EXPECT_EQ("ADD COLUMN `qty` INT, ADD INDEX `ix_qty` (`qty`), COMMENT='all orders'", r.migration[0].spec);
+  // The same text as the edits without the flag.
+  EXPECT_EQ(text(plain, ""), text(r, ""));
+
+  rapidjson::Document d;
+  d.Parse(edit_result_json(r, "-", "").c_str());
+  const auto &m = d["migration"][0];
+  EXPECT_STREQ("orders", m["table"].GetString());
+  EXPECT_STREQ("ADD COLUMN `qty` INT, ADD INDEX `ix_qty` (`qty`), COMMENT='all orders'", m["spec"].GetString());
+  ASSERT_EQ(3u, m["edits"].Size());
+  ASSERT_EQ(3u, m["clauses"].Size());
+  EXPECT_STREQ("ADD INDEX `ix_qty` (`qty`)", m["clauses"][1]["spec"].GetString());
+  EXPECT_STREQ("index", m["clauses"][1]["object"].GetString());
+  EXPECT_STREQ("orders", m["clauses"][1]["table"].GetString());
+  EXPECT_FALSE(m["clauses"][1].HasMember("new_name"));
+}
+
+// A statement left alone still says what it is made of.
+TEST(Schema_edit, merge_alters_single_statements) {
+  const auto r = ok(edit(k_shop, {}, merged("shop", R"j({"op": "rename_column", "table": "orders", "column": "note", "new_name": "remark"},
+      {"op": "rename_table", "table": "orders", "new_name": "order"})j")));
+  EXPECT_EQ((Tags{"rename column note (orders) -> remark", "rename table orders -> order"}), tags(r));
+  EXPECT_EQ((std::vector<std::string>{"0 rename column note", ""}), clause_tags(r));
+  EXPECT_EQ("RENAME COLUMN `note` TO `remark`", r.migration[0].spec);
+  EXPECT_TRUE(r.migration[1].spec.empty());
+  const std::string json = edit_result_json(r, "-", "");
+  EXPECT_NE(std::string::npos, json.find("\"edits\":[0],\"spec\":\"RENAME COLUMN")) << json;
+}
+
+TEST(Schema_edit, merge_alters_keeps_the_order_between_tables) {
+  // The other table's key goes before and comes back after the column's
+  // change; the column's own table's statements merge.
+  const auto r = ok(edit(k_shop, {}, merged("shop", R"j({"op": "modify_column", "table": "customer", "column": "id",
+      "new_column": {"name": "id", "type": "BIGINT", "nullable": false, "auto_increment": true}},
+      {"op": "add_column", "table": "customer", "column": {"name": "email", "type": "VARCHAR(80)"}},
+      {"op": "modify_column", "table": "orders", "column": "customer_id",
+       "new_column": {"name": "customer_id", "type": "BIGINT", "nullable": false}})j")));
+  // `email` stays after the key that references its table; the key added
+  // and then dropped again stays two statements.
+  EXPECT_EQ((std::vector<std::string>{
+                "ALTER TABLE `orders` DROP FOREIGN KEY `fk_orders_customer`",
+                "ALTER TABLE `customer` MODIFY COLUMN `id` BIGINT NOT NULL AUTO_INCREMENT",
+                "ALTER TABLE `orders` ADD CONSTRAINT `fk_orders_customer` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`)",
+                "ALTER TABLE `customer` ADD COLUMN `email` VARCHAR(80)",
+                "ALTER TABLE `orders` DROP FOREIGN KEY `fk_orders_customer`, MODIFY COLUMN `customer_id` BIGINT NOT NULL, "
+                "ADD CONSTRAINT `fk_orders_customer` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`)"}),
+            migration(r));
+  EXPECT_EQ((std::vector<std::string>{"0 drop foreign_key fk_orders_customer", "0 alter column id",
+                                      "0 add foreign_key fk_orders_customer", "1 add column email",
+                                      "2 drop foreign_key fk_orders_customer|2 alter column customer_id|"
+                                      "2 add foreign_key fk_orders_customer"}),
+            clause_tags(r));
+}
+
+// The pairs of clauses MariaDB 12.3 refuses, or runs differently, in one
+// statement stay apart.
+TEST(Schema_edit, merge_alters_conflicts) {
+  auto sqls = [](const std::string &script, const std::string &edits) {
+    return migration(ok(edit(script, {}, merged("", edits))));
+  };
+  const std::string t = "CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT, KEY ia (a));\n";
+  // A column renamed, then changed (MODIFY of either name fails).
+  EXPECT_EQ((std::vector<std::string>{"ALTER TABLE `t` RENAME COLUMN `a` TO `c`, ADD INDEX `ic` (`c`)",
+                                      "ALTER TABLE `t` MODIFY COLUMN `c` BIGINT"}),
+            sqls(t, R"j({"op": "rename_column", "table": "t", "column": "a", "new_name": "c"},
+      {"op": "add_index", "table": "t", "index": {"name": "ic", "kind": "index", "columns": ["c"]}},
+      {"op": "modify_column", "table": "t", "column": "c", "new_column": {"name": "c", "type": "BIGINT"}})j"));
+  // Changed twice.
+  EXPECT_EQ(2u, sqls(t, R"j({"op": "modify_column", "table": "t", "column": "b", "new_column": {"name": "b", "type": "BIGINT"}},
+      {"op": "modify_column", "table": "t", "column": "b", "new_column": {"name": "b", "type": "INT"}})j").size());
+  // Added, then dropped; dropped, then added.
+  EXPECT_EQ(2u, sqls(t, R"j({"op": "add_column", "table": "t", "column": {"name": "c", "type": "INT"}},
+      {"op": "drop_column", "table": "t", "column": "c"})j").size());
+  EXPECT_EQ(2u, sqls(t, R"j({"op": "drop_column", "table": "t", "column": "b"},
+      {"op": "add_column", "table": "t", "column": {"name": "b", "type": "INT"}})j").size());
+  // An index dropped and added again under its name is one statement; one
+  // added and dropped is not.
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `t` DROP INDEX `ia`, ADD UNIQUE INDEX `ia` (`a`, `b`)"},
+            sqls(t, R"j({"op": "drop_index", "table": "t", "name": "ia"},
+      {"op": "add_index", "table": "t", "index": {"name": "ia", "kind": "unique", "columns": ["a", "b"]}})j"));
+  EXPECT_EQ(2u, sqls(t, R"j({"op": "add_index", "table": "t", "index": {"name": "ib", "kind": "index", "columns": ["b"]}},
+      {"op": "drop_index", "table": "t", "name": "ib"})j").size());
+  // A DEFAULT expression may name a column another clause renames.
+  EXPECT_EQ(2u, sqls(t, R"j({"op": "add_column", "table": "t", "column": {"name": "g", "type": "INT", "default": "(b + 1)"}},
+      {"op": "rename_column", "table": "t", "column": "b", "new_name": "bb"})j").size());
+  EXPECT_EQ(1u, sqls(t, R"j({"op": "add_column", "table": "t", "column": {"name": "g", "type": "INT", "default": "-1"}},
+      {"op": "rename_column", "table": "t", "column": "b", "new_name": "bb"})j").size());
+  // A foreign key on its own table cannot come back in the statement that
+  // changes the column it references (errno 150).
+  const std::string u = "CREATE TABLE u (id INT NOT NULL PRIMARY KEY, parent INT,\n"
+                        "  CONSTRAINT fk_u FOREIGN KEY (parent) REFERENCES u (id));\n";
+  // Nor be dropped in the statement that added it.
+  EXPECT_EQ((std::vector<std::string>{
+                "ALTER TABLE `u` DROP FOREIGN KEY `fk_u`, MODIFY COLUMN `id` BIGINT NOT NULL",
+                "ALTER TABLE `u` ADD CONSTRAINT `fk_u` FOREIGN KEY (`parent`) REFERENCES `u` (`id`)",
+                "ALTER TABLE `u` DROP FOREIGN KEY `fk_u`, MODIFY COLUMN `parent` BIGINT, "
+                "ADD CONSTRAINT `fk_u` FOREIGN KEY (`parent`) REFERENCES `u` (`id`)"}),
+            sqls(u, R"j({"op": "modify_column", "table": "u", "column": "id", "new_column": {"name": "id", "type": "BIGINT", "nullable": false}},
+      {"op": "modify_column", "table": "u", "column": "parent", "new_column": {"name": "parent", "type": "BIGINT"}})j"));
+}
+
+TEST(Schema_edit, merge_alter_statements) {
+  Alter_names add_c;
+  add_c.defines = {"c"};
+  Alter_names index_c;
+  index_c.refers = {"c"};
+  index_c.keys = {{"ic", false, true}};
+  Alter_names fk_to_t;
+  fk_to_t.keys = {{"fk", true, true}};
+  fk_to_t.tables = {"t"};
+  // Past an ALTER TABLE of a table neither depends on.
+  EXPECT_EQ((std::vector<std::string>{"ALTER TABLE `t` ADD COLUMN `c` INT, ADD INDEX `ic` (`c`)",
+                                      "ALTER TABLE `w` ADD COLUMN `c` INT"}),
+            merged_sql({alter(0, "t", "ADD COLUMN `c` INT", add_c), alter(1, "w", "ADD COLUMN `c` INT", add_c),
+                        alter(2, "t", "ADD INDEX `ic` (`c`)", index_c)}));
+  // Not past one whose foreign key references the table, nor past one the
+  // statement's foreign key references.
+  EXPECT_EQ(3u, merged_sql({alter(0, "t", "ADD COLUMN `c` INT", add_c), alter(1, "w", "ADD CONSTRAINT ...", fk_to_t),
+                            alter(2, "t", "ADD INDEX `ic` (`c`)", index_c)})
+                    .size());
+  Alter_names fk_to_w = fk_to_t;
+  fk_to_w.tables = {"w"};
+  EXPECT_EQ(3u, merged_sql({alter(0, "t", "ADD COLUMN `c` INT", add_c), alter(1, "w", "ADD COLUMN `c` INT", add_c),
+                            alter(2, "t", "ADD CONSTRAINT ...", fk_to_w)})
+                    .size());
+  // Not past any other statement.
+  Migration_statement rename;
+  rename.sql = "RENAME TABLE `x` TO `y`";
+  rename.action = Migration_action::rename;
+  EXPECT_EQ(3u, merged_sql({alter(0, "t", "ADD COLUMN `c` INT", add_c), rename, alter(2, "t", "ADD INDEX `ic` (`c`)", index_c)})
+                    .size());
+  // Table names tell case apart (they do on Linux).
+  EXPECT_EQ(2u, merged_sql({alter(0, "t", "ADD COLUMN `c` INT", add_c), alter(1, "T", "ADD INDEX `ic` (`c`)", index_c)}).size());
+}
+
 }  // namespace mdbls

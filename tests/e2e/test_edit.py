@@ -89,9 +89,9 @@ class Edit_project:
         return subprocess.run([BINARY, *args], input=(self.script if stdin is None else stdin).encode(),
                               capture_output=True, timeout=120)
 
-    def edit(self, edits, schema):
+    def edit(self, edits, schema, **request):
         answer = self.run("edit", "--source-dir", str(self.dev), "-",
-                          edits={"format": 1, "schema": schema, "edits": edits})
+                          edits={"format": 1, "schema": schema, "edits": edits, **request})
         return answer.returncode, json.loads(answer.stdout)
 
     def apply(self, result):
@@ -144,6 +144,8 @@ class Edit_fixture(unittest.TestCase):
         listed = json.loads(answer.stdout)
         self.assertEqual(listed["format"], 1)
         self.assertEqual(listed["ops"], help_ops())
+        # The request's merge_alters is understood.
+        self.assertIs(listed["merge_alters"], True)
         # In any order of the arguments.
         self.assertEqual(subprocess.run([BINARY, "--ops", "edit"], capture_output=True, text=True).stdout,
                          answer.stdout)
@@ -256,6 +258,35 @@ class Edit_fixture(unittest.TestCase):
             "ALTER TABLE `customer` ADD COLUMN `phone` VARCHAR(20)",
             "ALTER TABLE `customer` MODIFY COLUMN `name` VARCHAR(80) NOT NULL"])
         self.checks()
+
+    def test_merged_alters(self):
+        edits = [
+            {"op": "add_column", "table": "customer", "column": {"name": "phone", "type": "VARCHAR(20)"}},
+            {"op": "add_column", "table": "orders", "column": {"name": "qty", "type": "INT"}},
+            {"op": "add_index", "table": "customer", "index": {"name": "ix_phone", "kind": "index",
+                                                               "columns": ["phone"]}},
+        ]
+        code, plain = self.p.edit(edits, "shop")
+        self.assertEqual(code, 0, plain)
+        self.assertEqual(len(plain["migration"]), 3)
+        self.assertNotIn("clauses", plain["migration"][0])
+        code, result = self.p.edit(edits, "shop", merge_alters=True)
+        self.assertEqual(code, 0, result)
+        # The same files; customer's statements merge past orders'.
+        self.assertEqual(result["files"], plain["files"])
+        self.assertEqual(result["migration"], [
+            {"edit": 0, "edits": [0, 2], "action": "alter", "object": "table", "name": "customer", "table": "customer",
+             "sql": "ALTER TABLE `customer` ADD COLUMN `phone` VARCHAR(20), ADD INDEX `ix_phone` (`phone`)",
+             "spec": "ADD COLUMN `phone` VARCHAR(20), ADD INDEX `ix_phone` (`phone`)",
+             "clauses": [{"edit": 0, "spec": "ADD COLUMN `phone` VARCHAR(20)", "action": "add", "object": "column",
+                          "name": "phone", "table": "customer"},
+                         {"edit": 2, "spec": "ADD INDEX `ix_phone` (`phone`)", "action": "add", "object": "index",
+                          "name": "ix_phone", "table": "customer"}]},
+            {"edit": 1, "edits": [1], "action": "add", "object": "column", "name": "qty", "table": "orders",
+             "sql": "ALTER TABLE `orders` ADD COLUMN `qty` INT", "spec": "ADD COLUMN `qty` INT",
+             "clauses": [{"edit": 1, "spec": "ADD COLUMN `qty` INT", "action": "add", "object": "column",
+                          "name": "qty", "table": "orders"}]},
+        ])
 
     def test_views_and_routines(self):
         code, result = self.p.edit([
