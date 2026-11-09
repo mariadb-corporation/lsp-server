@@ -336,9 +336,10 @@ that names a column by its old name after a rename; a key added and then dropped
 key dropped and then added again under its name (with `foreign_key_checks=0`, as MSM deploys,
 MariaDB refuses that with error 1826 unless `ALGORITHM=COPY`), so around `modify_column` its
 `ADD CONSTRAINT` is a statement of its own; a column `DEFAULT` that is not a literal, a
-`CHECK` or a generated column next to a clause that renames or drops a column (an expression naming the renamed column fails); a foreign key referencing
-its own table next to a change of a column it references (errno 150). Column names compare
-without regard to case, table names with it.
+`CHECK` or a generated column next to a clause that renames or drops a column (an
+expression naming the renamed column fails); a foreign key referencing its own table next to
+a change of a column it references (errno 150). Column names compare without regard to case,
+table names with it.
 
 A statement made of several clauses is tagged `alter` `table` with the table's name, and lists
 its clauses:
