@@ -2107,15 +2107,15 @@ Migration_statement alter(size_t edit, const std::string &table, const std::stri
   m.name = "c";
   m.table = table;
   m.spec = spec;
-  m.names = std::move(n);
+  m.names = {std::move(n)};
   return m;
 }
 
 std::vector<std::string> merged_sql(std::vector<Migration_statement> m) {
-  merge_alter_statements(m);
-  std::vector<std::string> out;
-  for (const auto &s : m) out.push_back(s.sql);
-  return out;
+  Edit_result r;
+  r.migration = std::move(m);
+  merge_alter_statements(r.migration);
+  return migration(r);
 }
 
 }  // namespace
@@ -2154,7 +2154,6 @@ TEST(Schema_edit, merge_alters_one_table) {
   EXPECT_EQ(std::vector<std::string>{"0 add column qty|1 add index ix_qty|2 alter table_options orders"},
             clause_tags(r));
   ASSERT_EQ(1u, r.migration.size());
-  EXPECT_EQ((std::vector<size_t>{0, 1, 2}), r.migration[0].edits);
   EXPECT_EQ("ADD COLUMN `qty` INT, ADD INDEX `ix_qty` (`qty`), COMMENT='all orders'", r.migration[0].spec);
   // The same text as the edits without the flag.
   EXPECT_EQ(text(plain, ""), text(r, ""));
@@ -2179,9 +2178,9 @@ TEST(Schema_edit, merge_alters_single_statements) {
   EXPECT_EQ((Tags{"rename column note (orders) -> remark", "rename table orders -> order"}), tags(r));
   EXPECT_EQ((std::vector<std::string>{"0 rename column note", ""}), clause_tags(r));
   EXPECT_EQ("RENAME COLUMN `note` TO `remark`", r.migration[0].spec);
-  EXPECT_EQ(std::vector<size_t>{0}, r.migration[0].edits);
   EXPECT_TRUE(r.migration[1].spec.empty());
-  EXPECT_TRUE(r.migration[1].edits.empty());
+  const std::string json = edit_result_json(r, "-", "");
+  EXPECT_NE(std::string::npos, json.find("\"edits\":[0],\"spec\":\"RENAME COLUMN")) << json;
 }
 
 TEST(Schema_edit, merge_alters_keeps_the_order_between_tables) {
@@ -2261,9 +2260,9 @@ TEST(Schema_edit, merge_alter_statements) {
   add_c.defines = {"c"};
   Alter_names index_c;
   index_c.refers = {"c"};
-  index_c.adds_keys = {"index:ic"};
+  index_c.keys = {{"ic", false, true}};
   Alter_names fk_to_t;
-  fk_to_t.adds_keys = {"foreign_key:fk"};
+  fk_to_t.keys = {{"fk", true, true}};
   fk_to_t.tables = {"t"};
   // Past an ALTER TABLE of a table neither depends on.
   EXPECT_EQ((std::vector<std::string>{"ALTER TABLE `t` ADD COLUMN `c` INT, ADD INDEX `ic` (`c`)",
