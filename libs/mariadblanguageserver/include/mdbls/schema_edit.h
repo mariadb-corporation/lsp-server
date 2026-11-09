@@ -117,6 +117,9 @@ struct Schema_edit {
 struct Edit_request {
   std::string schema;  // the outline schema the names belong to; "" for none
   std::vector<Schema_edit> edits;
+  // The ALTER TABLE statements of a table become one where that runs as
+  // they do one after another (merge_alter_statements).
+  bool merge_alters = false;
 };
 
 // Why a request was refused.  `kind` is stable: bad-request, unsupported,
@@ -164,6 +167,33 @@ enum class Migration_object : uint8_t {
 const char *to_string(Migration_action a);
 const char *to_string(Migration_object o);
 
+// What one ALTER TABLE clause names, for merge_alter_statements; not
+// written out.  Column and key names compare without regard to case.
+struct Alter_names {
+  std::vector<std::string> defines;    // columns it adds, or renames to
+  std::vector<std::string> modifies;   // columns it changes in place (MODIFY, ALTER COLUMN)
+  std::vector<std::string> renames;    // columns it renames from (RENAME COLUMN, CHANGE COLUMN)
+  std::vector<std::string> drops;      // columns it drops
+  std::vector<std::string> refers;     // columns it names: key parts, AFTER
+  std::vector<std::string> exclusive;  // columns no other clause of the statement may name
+  // Keys, as "index:" or "foreign_key:" and the name (index:PRIMARY).
+  std::vector<std::string> adds_keys;
+  std::vector<std::string> drops_keys;
+  std::vector<std::string> tables;  // other tables it depends on: a foreign key's
+  bool expression = false;          // writes an expression that may name columns
+};
+
+// One clause of a merged ALTER TABLE, tagged as its statement was.
+struct Migration_clause {
+  size_t edit = 0;
+  std::string spec;  // the clause's text
+  Migration_action action = Migration_action::alter;
+  Migration_object object = Migration_object::table;
+  std::string name;
+  std::string table;
+  std::string new_name;
+};
+
 // One statement of the migration, with what it does to which object.
 struct Migration_statement {
   size_t edit = 0;
@@ -173,7 +203,23 @@ struct Migration_statement {
   std::string name;      // the object's name before the edit (create, add: the new one's); PRIMARY for a primary key
   std::string table;     // a member's table; "" for an object
   std::string new_name;  // rename, and a column's alter that renames it; "" otherwise
+  // An ALTER TABLE: the text after `ALTER TABLE <table> `; "" otherwise.
+  std::string spec;
+  Alter_names names;  // an ALTER TABLE's, for merging
+  // After merge_alter_statements, for an ALTER TABLE: the edits and the
+  // clauses it is made of (one for a statement it left alone); empty
+  // otherwise.
+  std::vector<size_t> edits;
+  std::vector<Migration_clause> clauses;
 };
+
+// Makes the ALTER TABLE statements of one table one statement wherever that
+// runs as they do one after another (checked on MariaDB 12.3): a statement
+// joins the table's last one when no statement but ALTER TABLEs of other
+// tables, that it does not depend on nor they on it, lies between them, and
+// none of its clauses conflicts with one already there.  Other statements
+// stay where they are.  Every ALTER TABLE gets `edits` and `clauses`.
+void merge_alter_statements(std::vector<Migration_statement> &migration);
 
 struct Edit_result {
   std::vector<Edited_file> files;  // the script, then each included file once

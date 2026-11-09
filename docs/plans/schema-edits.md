@@ -526,3 +526,22 @@ fails (1146), so such a sequence is `referenced`; `RENAME TABLE` leaves a deploy
 naming the old sequence, so `rename_sequence` migrates `ALTER COLUMN ... SET DEFAULT` for each
 such column; `CREATE`/`DROP SEQUENCE` and `RENAME TABLE` run inside a stored procedure (no
 note). The fold now applies `RENAME TABLE` to views and sequences too.
+
+**Merged ALTER TABLE statements, 2026-11-09 (asked for by msm's online ALTER TABLE,
+mariadb-shell-plugins `msm_plugin/.claude/context/online-alter.md`, Next steps 6):** the
+request's `"merge_alters": true` makes the `ALTER TABLE`s of one table one statement where
+that runs as they do one after another, so an online ALTER copies a big table once per Save;
+without it the output is unchanged. `edit --ops` says `"merge_alters": true`. Each
+`ALTER TABLE` clause records what it names as it is written (`Alter_names` on the
+`Migration_statement`: columns added, changed, renamed from, dropped, named; keys added and
+dropped; tables its foreign key references), and `merge_alter_statements` runs after the
+edits: a statement joins its table's last one past `ALTER TABLE`s of other tables that
+neither depends on, never past another statement, when no pair of clauses conflicts. The
+allowed pairs came from running each pair one statement after the other and in one statement
+on MariaDB 12.3 and comparing `SHOW CREATE TABLE`; the cases that fail or change meaning (a
+column changed twice, renamed then changed, added then dropped, dropped then added; a key
+added then dropped; an expression next to a rename; a self-referencing key next to a change of
+its referenced column, errno 150) are listed in `docs/edit-format.md`. Every `ALTER TABLE`
+then has `edits`, `spec` (the text after `ALTER TABLE t `, what the Table Editor's live path
+hands to msm) and `clauses` with each clause's tags; never `ALGORITHM` or `LOCK`, which msm
+adds.
