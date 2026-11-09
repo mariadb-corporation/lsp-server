@@ -545,3 +545,16 @@ its referenced column, errno 150) are listed in `docs/edit-format.md`. Every `AL
 then has `edits`, `spec` (the text after `ALTER TABLE t `, what the Table Editor's live path
 hands to msm) and `clauses` with each clause's tags; never `ALGORITHM` or `LOCK`, which msm
 adds.
+
+**A foreign key dropped and added again stays two statements, 2026-11-09 (msm's real-binary
+test of `modify_column` on a column a foreign key uses):** `DROP FOREIGN KEY fk, ...,
+ADD CONSTRAINT fk ...` fails with error 1826 (duplicate constraint name) under
+`foreign_key_checks=0`, which every MSM deployment sets, plain and under every `ALGORITHM`/`LOCK`
+clause but `ALGORITHM=COPY`; the pairs were checked only with checks on. Now each pair is
+checked with `foreign_key_checks` 1 and 0 and under each clause msm adds (`ALGORITHM=INSTANT`;
+`NOCOPY, LOCK=NONE`; `COPY, LOCK=NONE`; `LOCK=SHARED`; `LOCK=EXCLUSIVE`): the merged statement
+must apply wherever the separate ones do, or be refused with 1845/1846, which msm steps past.
+Only the foreign key re-add broke that; an index or primary key dropped and added again, a
+foreign key then its index dropped, and `DROP FOREIGN KEY` merged with the column's change all
+hold. Around `modify_column` the key's `ADD CONSTRAINT` is now its own statement after the
+merged drop and change.

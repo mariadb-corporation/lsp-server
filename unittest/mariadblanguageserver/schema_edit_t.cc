@@ -2192,18 +2192,19 @@ TEST(Schema_edit, merge_alters_keeps_the_order_between_tables) {
       {"op": "modify_column", "table": "orders", "column": "customer_id",
        "new_column": {"name": "customer_id", "type": "BIGINT", "nullable": false}})j")));
   // `email` stays after the key that references its table; the key added
-  // and then dropped again stays two statements.
+  // and then dropped again stays two statements, and so does the key
+  // dropped and then added again (error 1826 with foreign_key_checks=0).
   EXPECT_EQ((std::vector<std::string>{
                 "ALTER TABLE `orders` DROP FOREIGN KEY `fk_orders_customer`",
                 "ALTER TABLE `customer` MODIFY COLUMN `id` BIGINT NOT NULL AUTO_INCREMENT",
                 "ALTER TABLE `orders` ADD CONSTRAINT `fk_orders_customer` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`)",
                 "ALTER TABLE `customer` ADD COLUMN `email` VARCHAR(80)",
-                "ALTER TABLE `orders` DROP FOREIGN KEY `fk_orders_customer`, MODIFY COLUMN `customer_id` BIGINT NOT NULL, "
-                "ADD CONSTRAINT `fk_orders_customer` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`)"}),
+                "ALTER TABLE `orders` DROP FOREIGN KEY `fk_orders_customer`, MODIFY COLUMN `customer_id` BIGINT NOT NULL",
+                "ALTER TABLE `orders` ADD CONSTRAINT `fk_orders_customer` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`)"}),
             migration(r));
   EXPECT_EQ((std::vector<std::string>{"0 drop foreign_key fk_orders_customer", "0 alter column id",
                                       "0 add foreign_key fk_orders_customer", "1 add column email",
-                                      "2 drop foreign_key fk_orders_customer|2 alter column customer_id|"
+                                      "2 drop foreign_key fk_orders_customer|2 alter column customer_id",
                                       "2 add foreign_key fk_orders_customer"}),
             clause_tags(r));
 }
@@ -2236,6 +2237,16 @@ TEST(Schema_edit, merge_alters_conflicts) {
       {"op": "add_index", "table": "t", "index": {"name": "ia", "kind": "unique", "columns": ["a", "b"]}})j"));
   EXPECT_EQ(2u, sqls(t, R"j({"op": "add_index", "table": "t", "index": {"name": "ib", "kind": "index", "columns": ["b"]}},
       {"op": "drop_index", "table": "t", "name": "ib"})j").size());
+  // A foreign key dropped and added again under its name is not: with
+  // foreign_key_checks=0, as MSM deploys, MariaDB refuses it (error 1826)
+  // unless ALGORITHM=COPY.
+  const std::string fk = "CREATE TABLE p (id INT PRIMARY KEY);\n"
+                         "CREATE TABLE c (pid INT, CONSTRAINT fk FOREIGN KEY (pid) REFERENCES p (id));\n";
+  EXPECT_EQ((std::vector<std::string>{"ALTER TABLE `c` DROP FOREIGN KEY `fk`",
+                                      "ALTER TABLE `c` ADD CONSTRAINT `fk` FOREIGN KEY (`pid`) REFERENCES `p` (`id`) ON DELETE CASCADE"}),
+            sqls(fk, R"j({"op": "drop_foreign_key", "table": "c", "name": "fk"},
+      {"op": "add_foreign_key", "table": "c", "foreign_key": {"name": "fk", "columns": ["pid"],
+       "references": {"table": "p", "columns": ["id"]}, "on_delete": "CASCADE"}})j"));
   // A DEFAULT expression may name a column another clause renames.
   EXPECT_EQ(2u, sqls(t, R"j({"op": "add_column", "table": "t", "column": {"name": "g", "type": "INT", "default": "(b + 1)"}},
       {"op": "rename_column", "table": "t", "column": "b", "new_name": "bb"})j").size());
@@ -2245,12 +2256,13 @@ TEST(Schema_edit, merge_alters_conflicts) {
   // changes the column it references (errno 150).
   const std::string u = "CREATE TABLE u (id INT NOT NULL PRIMARY KEY, parent INT,\n"
                         "  CONSTRAINT fk_u FOREIGN KEY (parent) REFERENCES u (id));\n";
-  // Nor be dropped in the statement that added it.
+  // Nor be dropped in the statement that added it, nor be added again in
+  // the one that dropped it.
   EXPECT_EQ((std::vector<std::string>{
                 "ALTER TABLE `u` DROP FOREIGN KEY `fk_u`, MODIFY COLUMN `id` BIGINT NOT NULL",
                 "ALTER TABLE `u` ADD CONSTRAINT `fk_u` FOREIGN KEY (`parent`) REFERENCES `u` (`id`)",
-                "ALTER TABLE `u` DROP FOREIGN KEY `fk_u`, MODIFY COLUMN `parent` BIGINT, "
-                "ADD CONSTRAINT `fk_u` FOREIGN KEY (`parent`) REFERENCES `u` (`id`)"}),
+                "ALTER TABLE `u` DROP FOREIGN KEY `fk_u`, MODIFY COLUMN `parent` BIGINT",
+                "ALTER TABLE `u` ADD CONSTRAINT `fk_u` FOREIGN KEY (`parent`) REFERENCES `u` (`id`)"}),
             sqls(u, R"j({"op": "modify_column", "table": "u", "column": "id", "new_column": {"name": "id", "type": "BIGINT", "nullable": false}},
       {"op": "modify_column", "table": "u", "column": "parent", "new_column": {"name": "parent", "type": "BIGINT"}})j"));
 }

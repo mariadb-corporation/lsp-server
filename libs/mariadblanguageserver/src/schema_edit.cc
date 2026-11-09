@@ -232,13 +232,15 @@ bool conflicts(const Alter_names &e, const Alter_names &l) {
       if (!fine) return true;
     }
   }
-  // A key both name, foreign keys and indexes alike: dropped, then added
-  // again; or a foreign key dropped, then its index.  Anything else (added
-  // then dropped, two of one name) fails or was not tried.
+  // A key both name: an index or primary key dropped, then added again;
+  // or a foreign key dropped, then its index.  Anything else fails or was
+  // not tried: a key added then dropped, two of one name, and a foreign key
+  // dropped then added again, which with foreign_key_checks=0 (as MSM
+  // deploys) fails unless ALGORITHM=COPY (error 1826, duplicate name).
   for (const auto &a : e.keys) {
     for (const auto &b : l.keys) {
       if (!iequals(a.name, b.name)) continue;
-      const bool readd = !a.add && b.add && a.foreign_key == b.foreign_key;
+      const bool readd = !a.add && b.add && !a.foreign_key && !b.foreign_key;
       const bool fk_index = !a.add && !b.add && a.foreign_key && !b.foreign_key;
       if (!readd && !fk_index) return true;
     }

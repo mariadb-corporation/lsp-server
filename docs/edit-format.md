@@ -315,7 +315,9 @@ A statement joins the last statement of its table when:
 - none of its clauses conflicts with a clause already in that statement.
 
 Two clauses conflict unless what both name is used in one of these ways (each checked on
-MariaDB 12.3 against two statements, comparing `SHOW CREATE TABLE`):
+MariaDB 12.3 against two statements, comparing `SHOW CREATE TABLE`, with
+`foreign_key_checks` 1 and 0 and under each `ALGORITHM`/`LOCK` clause MSM adds: the merged
+statement applies wherever the two do, or is refused with 1845 or 1846):
 
 | First clause | Then | Example |
 | --- | --- | --- |
@@ -323,14 +325,16 @@ MariaDB 12.3 against two statements, comparing `SHOW CREATE TABLE`):
 | changes a column in place (`MODIFY`) | names it in a key | `MODIFY COLUMN b BIGINT, ADD INDEX ib (b)` |
 | names a column in a key or `AFTER` | names it in a key or `AFTER` | `ADD COLUMN c INT AFTER a, ADD COLUMN d INT AFTER a` |
 | renames a column away | adds a column of the old name | `RENAME COLUMN a TO c, ADD COLUMN a INT` |
-| drops an index, the primary key or a foreign key | adds one of the same kind and name | `DROP INDEX ia, ADD INDEX ia (a, b)`; `DROP FOREIGN KEY fk, MODIFY COLUMN c ..., ADD CONSTRAINT fk ...` |
+| drops an index or the primary key | adds one of the same kind and name | `DROP INDEX ia, ADD INDEX ia (a, b)`; `DROP PRIMARY KEY, ADD PRIMARY KEY (id, a)` |
 | drops a foreign key | drops the index of its name | `DROP FOREIGN KEY fk, DROP INDEX fk` |
 
 Clauses that name nothing in common merge, table options with anything among them. These stay
 apart, as MariaDB refuses them in one statement or runs them differently: a column changed
 twice (`MODIFY` and `MODIFY`, `MODIFY` and `ALTER COLUMN ... SET DEFAULT`), renamed and then
 changed under either name, added and then dropped, dropped and then added again; a clause
-that names a column by its old name after a rename; a key added and then dropped; a column
+that names a column by its old name after a rename; a key added and then dropped; a foreign key dropped and then added again under its name
+(with `foreign_key_checks=0`, as MSM deploys, MariaDB refuses that with error 1826 unless
+`ALGORITHM=COPY`), so around `modify_column` its `ADD CONSTRAINT` is a statement of its own; a column
 `DEFAULT` that is not a literal, a `CHECK` or a generated column next to a clause that renames
 or drops a column (an expression naming the renamed column fails); a foreign key referencing
 its own table next to a change of a column it references (errno 150). Column names compare
