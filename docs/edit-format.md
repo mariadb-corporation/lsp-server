@@ -332,11 +332,11 @@ Clauses that name nothing in common merge, table options with anything among the
 apart, as MariaDB refuses them in one statement or runs them differently: a column changed
 twice (`MODIFY` and `MODIFY`, `MODIFY` and `ALTER COLUMN ... SET DEFAULT`), renamed and then
 changed under either name, added and then dropped, dropped and then added again; a clause
-that names a column by its old name after a rename; a key added and then dropped; a foreign key dropped and then added again under its name
-(with `foreign_key_checks=0`, as MSM deploys, MariaDB refuses that with error 1826 unless
-`ALGORITHM=COPY`), so around `modify_column` its `ADD CONSTRAINT` is a statement of its own; a column
-`DEFAULT` that is not a literal, a `CHECK` or a generated column next to a clause that renames
-or drops a column (an expression naming the renamed column fails); a foreign key referencing
+that names a column by its old name after a rename; a key added and then dropped; a foreign
+key dropped and then added again under its name (with `foreign_key_checks=0`, as MSM deploys,
+MariaDB refuses that with error 1826 unless `ALGORITHM=COPY`), so around `modify_column` its
+`ADD CONSTRAINT` is a statement of its own; a column `DEFAULT` that is not a literal, a
+`CHECK` or a generated column next to a clause that renames or drops a column (an expression naming the renamed column fails); a foreign key referencing
 its own table next to a change of a column it references (errno 150). Column names compare
 without regard to case, table names with it.
 

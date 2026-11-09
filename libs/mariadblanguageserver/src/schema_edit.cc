@@ -205,7 +205,8 @@ std::string alter_table_sql(const std::string &table, const std::string &spec) {
 // ---------------------------------------------------------------------------
 // Merging ALTER TABLE statements (merge_alters).  The rules come from
 // running each pair of clauses one statement after the other and in one
-// statement on MariaDB 12.3 and comparing SHOW CREATE TABLE.
+// statement on MariaDB 12.3 and comparing SHOW CREATE TABLE, with
+// foreign_key_checks 1 and 0 and under each ALGORITHM/LOCK clause msm adds.
 
 bool shares(const std::vector<std::string> &a, const std::vector<std::string> &b) {
   return std::any_of(a.begin(), a.end(), [&](const std::string &x) { return names(b, x); });

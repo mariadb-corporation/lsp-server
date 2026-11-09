@@ -2247,6 +2247,12 @@ TEST(Schema_edit, merge_alters_conflicts) {
             sqls(fk, R"j({"op": "drop_foreign_key", "table": "c", "name": "fk"},
       {"op": "add_foreign_key", "table": "c", "foreign_key": {"name": "fk", "columns": ["pid"],
        "references": {"table": "p", "columns": ["id"]}, "on_delete": "CASCADE"}})j"));
+  // A foreign key dropped, then the index of its name, is one statement.
+  const std::string fki = "CREATE TABLE p (id INT PRIMARY KEY);\n"
+                          "CREATE TABLE c (pid INT, KEY fk (pid), CONSTRAINT fk FOREIGN KEY (pid) REFERENCES p (id));\n";
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `c` DROP FOREIGN KEY `fk`, DROP INDEX `fk`"},
+            sqls(fki, R"j({"op": "drop_foreign_key", "table": "c", "name": "fk"},
+      {"op": "drop_index", "table": "c", "name": "fk"})j"));
   // A DEFAULT expression may name a column another clause renames.
   EXPECT_EQ(2u, sqls(t, R"j({"op": "add_column", "table": "t", "column": {"name": "g", "type": "INT", "default": "(b + 1)"}},
       {"op": "rename_column", "table": "t", "column": "b", "new_name": "bb"})j").size());
