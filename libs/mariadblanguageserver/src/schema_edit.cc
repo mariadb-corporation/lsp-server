@@ -746,7 +746,8 @@ std::optional<Table> read_table(Json_reader &r, const Json &v) {
 
 std::optional<View> read_view(Json_reader &r, const Json &v) {
   const std::string what = "\"view\"";
-  if (!r.object(v, what, {"name", "columns", "definition", "algorithm", "security", "definer", "check_option"})) {
+  // `reads` (an outline's, derived from the definition) is ignored.
+  if (!r.object(v, what, {"name", "columns", "definition", "algorithm", "security", "definer", "check_option", "reads"})) {
     return std::nullopt;
   }
   View vw;

@@ -186,11 +186,27 @@ i [NOT] IGNORED` sets `ignored`. `ADD INDEX`, `ADD KEY`, `ADD CONSTRAINT ... FOR
 
 | Object | Members |
 | --- | --- |
-| view | `name`, `columns` (the explicit column list, or empty), `definition` (the `SELECT` as written, blanks collapsed, with its `WITH ... CHECK OPTION` when written), `algorithm` (`UNDEFINED`, `MERGE`, `TEMPTABLE`), `security` (`DEFINER`, `INVOKER`), `definer`, `check_option` (`LOCAL`, or `CASCADED` for `WITH [CASCADED] CHECK OPTION`); the last four null when not written |
+| view | `name`, `columns` (the explicit column list, or empty), `definition` (the `SELECT` as written, blanks collapsed, with its `WITH ... CHECK OPTION` when written), `algorithm` (`UNDEFINED`, `MERGE`, `TEMPTABLE`), `security` (`DEFINER`, `INVOKER`), `definer`, `check_option` (`LOCAL`, or `CASCADED` for `WITH [CASCADED] CHECK OPTION`); the last four null when not written; `reads` (see below) |
 | routine | `name`, `kind` (`procedure`, `function`), `parameters: [{mode, name, type}]` (`mode` `IN`, `OUT`, `INOUT`, or null when not written; `type` is everything after the name to the end of the parameter, so with a `DEFAULT` clause when written), `returns` (the `RETURNS` type of a function; null for a procedure; upper-cased for a UDF), `body` (exactly as written, from the first word of the body to its end; null for a UDF), `deterministic` (true for `DETERMINISTIC`, false for `NOT DETERMINISTIC`, null when not written), `data_access` (`CONTAINS SQL`, `NO SQL`, `READS SQL DATA`, `MODIFIES SQL DATA`, or null), `security` (`DEFINER`, `INVOKER`, or null), `definer`, `comment` (the literal's contents, or null), `aggregate` (`CREATE AGGREGATE FUNCTION`), `soname` (a UDF's `SONAME` library, else null) |
 | trigger | `name`, `timing` (`BEFORE`, `AFTER`), `events` (`INSERT`, `UPDATE OR DELETE`, ...), `table` (the table name, without schema), `update_columns` (the columns of `UPDATE OF a, b`, else empty), `body` (exactly as written), `order` (`{kind, trigger}` for `FOLLOWS t` / `PRECEDES t`, `kind` upper-cased, or null), `definer`; the trigger belongs to the schema of its qualified name, else to the table's |
 | event | `name`, `schedule` (`AT ...` or `EVERY ... [STARTS ...] [ENDS ...]` as written, blanks collapsed), `on_completion_preserve` (true for `ON COMPLETION PRESERVE`, false for `ON COMPLETION NOT PRESERVE`, null when not written), `status` (`ENABLE`, `DISABLE`, `DISABLE ON SLAVE`, or null), `comment` (the literal's contents, or null), `body` (exactly as written), `definer` |
 | sequence | `name`, `type` (`AS INT UNSIGNED` gives `INT UNSIGNED`), `start`, `increment`, `minvalue`, `maxvalue`, `cache` (the numbers as written; null when not written, and `NO MINVALUE`/`NOMINVALUE`, `NO MAXVALUE`/`NOMAXVALUE` give null too, the server's default; `NOCACHE` gives `"0"`), `cycle` (true for `CYCLE`, false for `NOCYCLE`, null when not written), `options` (table options such as `ENGINE`, as for a table) |
+
+### A view's `reads`
+
+`reads` lists what the view's query reads, as `[{kind, schema, name}]`:
+
+| `kind` | What counts |
+| --- | --- |
+| `table_or_view` | every table or view named in `FROM`, `JOIN`, `TABLE t`, in subqueries and scalar subqueries anywhere, and in the bodies of common table expressions; not a common table expression's name where it is in scope (an element of a `WITH` without `RECURSIVE` sees only the elements before it), not an alias, not a column's qualifier |
+| `function` | a call of a function that is qualified (`crm.f(x)`), or not qualified and not the name of a built-in function (`f(x)`); calls with grammar of their own (`CONCAT`, `CAST`, ...) and unqualified built-in names are not reads |
+| `sequence` | the sequence of `NEXTVAL(s)`, `NEXT VALUE FOR s`, `LASTVAL(s)`, `PREVIOUS VALUE FOR s`, `SETVAL(s, ...)`; not a `table_or_view` |
+
+`schema` is the qualifier as written, or null when the name is not qualified; `name` is
+unquoted, its case as written. Entries are unique by `(kind, schema, name)`, in text order;
+`[]` for a view that reads nothing. `reads` is an array on every view read from SQL (only a
+statement that parses makes a view); a reader can take its presence as the feature:
+binaries before it have no `reads` member.
 
 ## REST objects
 

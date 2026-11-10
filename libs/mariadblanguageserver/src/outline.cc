@@ -433,6 +433,20 @@ class Json_outline {
       str_or_null("security", v.security);
       str_or_null("definer", v.definer);
       str_or_null("check_option", v.check_option);
+      w_.Key("reads");
+      if (!v.reads) {
+        w_.Null();
+      } else {
+        w_.StartArray();
+        for (const auto &r : *v.reads) {
+          w_.StartObject();
+          str("kind", r.kind);
+          str_or_null("schema", r.schema);
+          str("name", r.name);
+          w_.EndObject();
+        }
+        w_.EndArray();
+      }
       origin(v.origin);
       w_.EndObject();
     }
