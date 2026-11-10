@@ -671,6 +671,55 @@ TEST(Catalog, view_routine_trigger_event_sequence_details) {
   EXPECT_EQ("", s2.start);
 }
 
+// A view's reads: tables and views, stored functions and sequences, without
+// the common table expressions in scope, aliases or built-in functions.
+TEST(Catalog, view_reads) {
+  const std::string text =
+      "CREATE VIEW v AS WITH c AS (SELECT 1 FROM base) SELECT crm.f(x), g(1), CONCAT(a), crm.concat(a),\n"
+      "  NEXTVAL(s), NEXT VALUE FOR crm.s2, LASTVAL(s3), PREVIOUS VALUE FOR s4, customer.*, shop.t.id\n"
+      "  FROM c, t AS customer, crm.note JOIN (SELECT 1 FROM d) dd ON 1\n"
+      "  WHERE a IN (SELECT b FROM u) AND EXISTS (SELECT 1 FROM t) AND crm.f(1);\n"
+      // Without RECURSIVE an element sees only those before it: `a` reads
+      // the table b.
+      "CREATE VIEW w AS WITH a AS (SELECT * FROM b), b AS (SELECT * FROM a) SELECT * FROM b;\n"
+      "CREATE VIEW r AS WITH RECURSIVE a AS (SELECT 1 n UNION SELECT n + 1 FROM a WHERE n < 3)\n"
+      "  SELECT * FROM a;\n"
+      // A CTE of a subquery is not in scope in the next one.
+      "CREATE VIEW n AS SELECT (WITH x AS (SELECT 1) SELECT * FROM x) AS q, (SELECT 1 FROM x) AS z;\n"
+      // INFORMATION_SCHEMA.VIEWS writes names quoted and qualified.
+      "CREATE VIEW `vv` AS select `shop`.`T`.`id` AS `id`,`shop`.`f`(1) AS `y` from `shop`.`T`;\n"
+      "CREATE VIEW e AS SELECT 1;\n"
+      // A qualified call of a keyword's name; a CTE name in any case.
+      "CREATE VIEW k AS WITH C AS (SELECT 1) SELECT crm.replace(a, 'x', 'y'), crm.trim(a) FROM c;\n";
+  const auto o = outline_of(text);
+  const Schema *sc = schema(o, "");
+  ASSERT_NE(nullptr, sc);
+  ASSERT_EQ(7u, sc->views.size());
+  auto reads = [&](size_t i) {
+    std::vector<std::string> out;
+    for (const auto &r : sc->views[i].reads.value()) {
+      out.push_back(r.kind + " " + (r.schema.empty() ? "" : r.schema + ".") + r.name);
+    }
+    return out;
+  };
+  EXPECT_EQ((std::vector<std::string>{"table_or_view base", "function crm.f", "function g",
+                                      "function crm.concat", "sequence s", "sequence crm.s2",
+                                      "sequence s3", "sequence s4", "table_or_view t",
+                                      "table_or_view crm.note", "table_or_view d", "table_or_view u"}),
+            reads(0));
+  EXPECT_EQ((std::vector<std::string>{"table_or_view b"}), reads(1));
+  EXPECT_EQ((std::vector<std::string>{}), reads(2));
+  EXPECT_EQ((std::vector<std::string>{"table_or_view x"}), reads(3));
+  EXPECT_EQ((std::vector<std::string>{"function shop.f", "table_or_view shop.T"}), reads(4));
+  EXPECT_EQ((std::vector<std::string>{}), reads(5));
+  EXPECT_EQ((std::vector<std::string>{"function crm.replace", "function crm.trim"}), reads(6));
+
+  const auto json = outline_json(o, text, Line_map(text));
+  EXPECT_NE(std::string::npos,
+            json.find("\"reads\":[{\"kind\":\"function\",\"schema\":\"shop\",\"name\":\"f\"},"
+                      "{\"kind\":\"table_or_view\",\"schema\":\"shop\",\"name\":\"T\"}]"));
+}
+
 // Every member of format 1 is written, null when the SQL does not state it.
 TEST(Catalog, outline_json_has_the_new_members) {
   const std::string text =
@@ -692,7 +741,7 @@ TEST(Catalog, outline_json_has_the_new_members) {
         "\"using\":null", "\"ignored\":false", "\"without_overlaps\":null",
         "\"name\":\"f\",", "\"index_name\":\"fi\"", "\"match\":null", "\"partitioning\":null",
         "\"system_versioning\":false", "\"periods\":[]", "\"algorithm\":null",
-        "\"check_option\":null", "\"body\":\"SELECT 1\"", "\"deterministic\":null",
+        "\"check_option\":null", "\"reads\":[]", "\"body\":\"SELECT 1\"", "\"deterministic\":null",
         "\"data_access\":null", "\"order\":null", "\"update_columns\":[]",
         "\"schedule\":\"AT '2030-01-01'\"", "\"on_completion_preserve\":null", "\"status\":null",
         "\"start\":null", "\"cycle\":null"}) {

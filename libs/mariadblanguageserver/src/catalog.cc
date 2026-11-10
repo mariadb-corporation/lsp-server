@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <utility>
 
+#include "mdbls/keywords.h"
 #include "text_util.h"
 
 namespace mdbls {
@@ -362,12 +363,17 @@ class Catalog_fold {
   // A charset or collation name: unquoted, lower-cased.
   std::string charset_name(uint32_t n) const { return lower(unquote_any(text(n))); }
 
-  // schema.name of a table_ident / sp_name (ident '.' ident | ident | '.' ident)
-  std::pair<std::string, uint32_t> qualified(uint32_t n) const {
+  // The ident children of a table_ident / sp_name: [schema,] name.
+  std::vector<uint32_t> idents_of(uint32_t n) const {
     std::vector<uint32_t> ids;
     for (const uint32_t c : t_.children(n)) {
       if (t_.node(c).symbol == s_.ident) ids.push_back(c);
     }
+    return ids;
+  }
+  // schema.name of a table_ident / sp_name (ident '.' ident | ident | '.' ident)
+  std::pair<std::string, uint32_t> qualified(uint32_t n) const {
+    const auto ids = idents_of(n);
     if (ids.size() >= 2) return {name_of(ids[0]), ids[1]};
     if (ids.size() == 1) return {c_.m_current, ids[0]};
     return {c_.m_current, n};
@@ -384,6 +390,17 @@ class Catalog_fold {
 
   // --- parts
   View make_view(uint32_t n, uint32_t id) const;
+  // A WITH clause of a view's query: whether RECURSIVE, its elements and
+  // their names in order.
+  struct With_scope {
+    uint32_t node;
+    bool recursive;
+    std::vector<std::pair<uint32_t, std::string>> elements;
+  };
+  std::vector<View_read> view_reads(uint32_t query) const;
+  bool names_cte(uint32_t table_ident, const std::string &name, uint32_t query,
+                 const std::vector<With_scope> &withs) const;
+  std::pair<std::string, std::string> written_name(const std::vector<uint32_t> &parts) const;
   std::string text_without(uint32_t n, const std::vector<uint32_t> &cut) const;
   std::string definer_of(uint32_t n) const;
   std::string body_of(uint32_t n) const;
@@ -568,7 +585,9 @@ View Catalog_fold::make_view(uint32_t n, uint32_t id) const {
   View v;
   v.name = name_of(id);
   for (const uint32_t c : find_all(child(n, s_.view_list_opt), s_.ident)) v.columns.push_back(name_of(c));
-  v.definition = text(child(n, s_.view_select));
+  const uint32_t query = child(n, s_.view_select);
+  v.definition = text(query);
+  v.reads = view_reads(query);
   v.origin = origin(id);
   if (const uint32_t a = child(n, s_.view_algorithm); a != npos) v.algorithm = upper(text(t_.children(a).back()));
   v.definer = definer_of(n);
@@ -579,6 +598,93 @@ View Catalog_fold::make_view(uint32_t n, uint32_t id) const {
     v.check_option = has_child(co, s_.LOCAL_SYM) ? "LOCAL" : "CASCADED";
   }
   return v;
+}
+
+// [schema.]name from the name parts of a table_ident or a function call:
+// the qualifier ("" when none) and the name, unquoted.
+std::pair<std::string, std::string> Catalog_fold::written_name(const std::vector<uint32_t> &parts) const {
+  if (parts.empty()) return {};
+  if (parts.size() >= 2) return {name_of(parts[0]), name_of(parts[1])};
+  return {"", name_of(parts[0])};
+}
+
+// Whether `name` at `table_ident` (unqualified) is a common table expression
+// in scope: one of a WITH clause (`withs`, those of `query`) of a query
+// around it, the innermost first.
+bool Catalog_fold::names_cte(uint32_t ti, const std::string &name, uint32_t query,
+                             const std::vector<With_scope> &withs) const {
+  for (uint32_t c = ti; c != query;) {
+    const uint32_t a = t_.node(c).parent;
+    if (a == npos) break;
+    for (const auto &w : withs) {
+      if (t_.node(w.node).parent != a) continue;
+      for (const auto &[e, e_name] : w.elements) {
+        // Without RECURSIVE an element sees only the elements before it.
+        if (!w.recursive && c == w.node && t_.begin(e) <= t_.begin(ti) && t_.end(ti) <= t_.end(e)) break;
+        if (iequals(e_name, name)) return true;  // CTE names are case-insensitive
+      }
+    }
+    c = a;
+  }
+  return false;
+}
+
+// What a view's query reads (docs/outline-format.md, "reads"), in text order.
+std::vector<View_read> Catalog_fold::view_reads(uint32_t query) const {
+  std::vector<View_read> out;
+  auto add = [&](const char *kind, std::pair<std::string, std::string> sn) {
+    for (const auto &r : out) {
+      if (r.kind == kind && r.schema == sn.first && r.name == sn.second) return;
+    }
+    out.push_back({kind, std::move(sn.first), std::move(sn.second)});
+  };
+  auto sequence_call = [&](uint32_t n) {
+    return has_child(n, s_.NEXTVAL_SYM) || has_child(n, s_.NEXT_SYM) || has_child(n, s_.PREVIOUS_SYM) ||
+           has_child(n, s_.LASTVAL_SYM) || has_child(n, s_.SETVAL_SYM);
+  };
+  // The WITH clauses met so far: the walk is in text order, so a clause is
+  // met before every name in its scope.
+  std::vector<With_scope> withs;
+  std::vector<uint32_t> stack;
+  if (query != npos) stack.push_back(query);
+  while (!stack.empty()) {
+    const uint32_t n = stack.back();
+    stack.pop_back();
+    const int sym = t_.node(n).symbol;
+    if (sym == s_.with_clause) {
+      With_scope w{n, has_child(child(n, s_.opt_recursive), s_.RECURSIVE_SYM), {}};
+      for (const uint32_t e : find_all(child(n, s_.with_list), s_.with_list_element)) {
+        w.elements.emplace_back(e, name_of(find(child(e, s_.with_element_head), s_.ident)));
+      }
+      withs.push_back(std::move(w));
+    } else if (sym == s_.table_ident) {
+      auto sn = written_name(idents_of(n));
+      if (sn.second.empty()) continue;
+      if (sequence_call(t_.node(n).parent)) {
+        add("sequence", std::move(sn));
+      } else if (!sn.first.empty() || withs.empty() || !names_cte(n, sn.second, query, withs)) {
+        add("table_or_view", std::move(sn));
+      }
+      continue;
+    } else if (sym == s_.function_call_generic) {
+      // ident_cli ['.' ident_cli] '(' ...: the names before the parenthesis;
+      // after a qualifier also a keyword (db.REPLACE, db.SUBSTRING, db.TRIM).
+      std::vector<uint32_t> parts;
+      for (const uint32_t c : t_.children(n)) {
+        const int cs = t_.node(c).symbol;
+        if (is_left_paren(cs)) break;
+        if (t_.node(c).token_count == 0) continue;
+        if (!grammar::is_terminal(cs) || (!parts.empty() && text(c) != ".")) parts.push_back(c);
+      }
+      auto sn = written_name(parts);
+      if (!sn.second.empty() && (!sn.first.empty() || builtin_function(sn.second) == nullptr)) {
+        add("function", std::move(sn));
+      }
+    }
+    const auto ch = t_.children(n);
+    for (size_t k = ch.size(); k-- > 0;) stack.push_back(ch[k]);
+  }
+  return out;
 }
 
 // The text of `n` without the nodes `cut`, blanks collapsed.

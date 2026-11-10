@@ -176,6 +176,16 @@ struct Table {
   const Column *column(std::string_view name) const;
 };
 
+// An object a view's query reads: a table or view (FROM, JOIN, subqueries;
+// not a common table expression in scope, not an alias), a stored function
+// (a call that is qualified or not a built-in's name), or a sequence
+// (NEXTVAL, NEXT VALUE FOR, LASTVAL, PREVIOUS VALUE FOR, SETVAL).
+struct View_read {
+  std::string kind;                    // table_or_view, function, sequence
+  std::string schema;                  // the qualifier as written, "" when none
+  std::string name;                    // unquoted, case as written
+};
+
 struct View {
   std::string name;
   std::vector<std::string> columns;    // the explicit column list, if any
@@ -186,6 +196,9 @@ struct View {
   std::string security;                // DEFINER, INVOKER, or ""
   std::string definer;                 // user@host, CURRENT_USER, or ""
   std::string check_option;            // CASCADED, LOCAL, or ""
+  // Unique by (kind, schema, name), in text order; nullopt when the query
+  // was not read (a live catalog's view).
+  std::optional<std::vector<View_read>> reads;
 };
 
 struct Parameter {

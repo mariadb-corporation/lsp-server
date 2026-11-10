@@ -292,6 +292,9 @@ TEST(Schema_edit, request_errors) {
   // Outline objects come back with their positions, which are ignored.
   EXPECT_EQ("ok",
             kind(request("s", R"j({"op": "add_column", "table": "t", "column": {"name": "c", "type": "INT", "range": {}, "selection_range": {}}})j")));
+  // A view's `reads` too: the definition says what it reads.
+  EXPECT_EQ("ok",
+            kind(request("s", R"j({"op": "add_view", "view": {"name": "v2", "definition": "SELECT 1", "reads": [{"kind": "table_or_view", "schema": null, "name": "t"}]}})j")));
 }
 
 TEST(Schema_edit, supported_ops) {
