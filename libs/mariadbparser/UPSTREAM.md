@@ -161,8 +161,8 @@ Library sources (behaviour unchanged, as the replay above shows):
 Each entry: file, what was changed, why, and the upstream commit it tracks.
 
 - `generated/yy_stub.yy`, `mrs_drop_rest_schema_statement`: an optional last clause
-  `FOR DATABASE <db>` (`mrs_opt_for_database`; `FOR SCHEMA` too, since `SCHEMA` lexes as
-  `DATABASE`), the conditional drop msm writes when a release moves a REST schema to
+  `FOR SCHEMA <db>` (`mrs_opt_for_database`; `FOR DATABASE` is the same, since `SCHEMA`
+  lexes as `DATABASE`), the conditional drop msm writes when a release moves a REST schema to
   another database. Taken ahead of the shell pin from mariadb-shell commit `815391122`
   (PR #137, not on the shell's `main` yet), whose `parser.yy` rule
   `opt_for_database: %empty | FOR_SYMBOL DATABASE_SYMBOL schema_name` this mirrors. The
