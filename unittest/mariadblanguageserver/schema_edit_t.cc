@@ -302,7 +302,7 @@ TEST(Schema_edit, supported_ops) {
       "rename_table rename_column rename_view rename_routine add_table drop_table add_column modify_column "
       "drop_column add_index drop_index add_foreign_key drop_foreign_key set_table_options add_view drop_view "
       "add_routine drop_routine set_primary_key add_trigger drop_trigger rename_trigger add_event drop_event rename_event add_sequence "
-      "drop_sequence rename_sequence",
+      "drop_sequence rename_sequence rename_schema",
       supported_edit_ops());
 }
 
@@ -570,6 +570,141 @@ TEST(Schema_edit, names_in_the_request_schema_and_before_use) {
   EXPECT_EQ("x", table(ok(edit(script, {}, request("s", rename_table("early", "x")))), "", "x")->name);
   EXPECT_EQ("x", table(ok(edit(script, {}, request("s", rename_table("t", "x")))), "s", "x")->name);
   EXPECT_EQ("unknown-object", failed(edit(script, {}, request("s", rename_table("o", "x")))).kind);
+}
+
+std::string rename_schema(const std::string &from, const std::string &to, bool comments = false) {
+  return R"({"op": "rename_schema", "schema": ")" + from + R"(", "new_name": ")" + to + "\"" +
+         (comments ? R"(, "comments": true)" : "") + "}";
+}
+
+TEST(Schema_edit, rename_schema) {
+  const std::string script =
+      "-- `shop`\n"
+      "DROP SCHEMA IF EXISTS shop;\n"
+      "CREATE SCHEMA IF NOT EXISTS shop;\n"
+      "ALTER DATABASE shop CHARACTER SET utf8mb4;\n"
+      "USE shop;\n"
+      "-- TABLE `shop`.`t`\n"
+      "DROP TABLE IF EXISTS shop.t;\n"
+      "CREATE TABLE shop.t (id INT PRIMARY KEY, x INT);\n"
+      "CREATE TABLE `shop`.u (id INT PRIMARY KEY, t_id INT, FOREIGN KEY (t_id) REFERENCES shop.t (id));\n"
+      "CREATE INDEX ix ON shop.u (t_id);\n"
+      "RENAME TABLE shop.u TO shop.u2;\n"
+      "CREATE SEQUENCE shop.sq;\n"
+      "CREATE VIEW shop.v AS SELECT shop.t.id, NEXTVAL(shop.sq) FROM shop.t;\n"
+      "-- Create the `shop`.`msm_schema_version` VIEW; not `x`.`shop`\n"
+      "SELECT shop.x FROM t AS shop;\n"
+      "DELIMITER $$\n"
+      "CREATE PROCEDURE shop.p() BEGIN\n"
+      "  INSERT INTO shop.t (id) SELECT id FROM shop.u2; -- `shop` in a body\n"
+      "  SET @q = 'SELECT * FROM shop.t';\n"
+      "END$$\n"
+      "DELIMITER ;\n"
+      "CREATE FUNCTION shop.f() RETURNS INT RETURN (SELECT COUNT(*) FROM shop.t);\n"
+      "CREATE TRIGGER shop.tr BEFORE INSERT ON shop.t FOR EACH ROW SET NEW.x = shop.f();\n"
+      "CREATE EVENT shop.ev ON SCHEDULE EVERY 1 DAY DO DELETE FROM shop.t;\n"
+      "CALL shop.p();\n"
+      "GRANT SELECT ON shop.* TO u;\n"
+      "REVOKE ALL ON shop.t FROM u;\n"
+      "/*!50001 CREATE VIEW shop.v2 AS SELECT 1 */;\n";
+  auto renamed = [](std::string s, bool comments) {
+    for (const char *from : {"IF EXISTS shop;", "EXISTS shop;\nALTER", "BASE shop ", "USE shop", "EXISTS shop.t",
+                             "TABLE shop.t", "`shop`.u", "REFERENCES shop", "ON shop.u", "TABLE shop.u",
+                             "TO shop.u2", "SEQUENCE shop", "VIEW shop.v", "SELECT shop.t", "NEXTVAL(shop",
+                             "FROM shop.t;\n--", "PROCEDURE shop", "INTO shop", "FROM shop.u2", "FUNCTION shop",
+                             "FROM shop.t);", "TRIGGER shop", "ON shop.t FOR", "= shop.f", "EVENT shop",
+                             "FROM shop.t;\nCALL", "CALL shop", "ON shop.*", "ON shop.t FROM", "VIEW shop.v2"}) {
+      const size_t at = s.find(from);
+      EXPECT_NE(std::string::npos, at) << from;
+      if (at == std::string::npos) continue;
+      const size_t name = s.find("shop", at);
+      s.replace(name, 4, "store");
+    }
+    if (comments) {
+      for (const char *from : {"-- `shop`", "-- TABLE `shop`", "the `shop`", "-- `shop` in"}) {
+        const size_t at = s.find(from);
+        EXPECT_NE(std::string::npos, at) << from;
+        if (at != std::string::npos) s.replace(s.find("shop", at), 4, "store");
+      }
+    }
+    return s;
+  };
+  // Not the alias spelt like the schema, nor the string, nor `x`.`shop`.
+  const auto r = ok(edit(script, {}, request("shop", rename_schema("shop", "store"))));
+  EXPECT_EQ(renamed(script, false), text(r, ""));
+  EXPECT_TRUE(r.migration.empty());
+  EXPECT_EQ(std::vector<std::string>{"name-in-string"}, note_kinds(r));
+  EXPECT_NE(nullptr, r.outline.catalog.find("store"));
+  EXPECT_EQ(nullptr, r.outline.catalog.find("shop"));
+  const auto c = ok(edit(script, {}, request("shop", rename_schema("shop", "store", true))));
+  EXPECT_EQ(renamed(script, true), text(c, ""));
+}
+
+TEST(Schema_edit, rename_schema_quoting_and_errors) {
+  const std::string script = "CREATE SCHEMA `shop`;\nUSE shop;\nCREATE TABLE \"shop\".t (a INT);\nCREATE SCHEMA other;\n";
+  auto ansi = [&](const std::string &req) -> std::variant<Edit_result, Edit_error> {
+    auto parsed = parse_edit_request(req);
+    if (auto *bad = std::get_if<Edit_error>(&parsed)) return *bad;
+    Edit_options o;
+    o.index.sql_mode = "ANSI_QUOTES";
+    return apply_schema_edits(script, std::get<Edit_request>(parsed), pool(), o);
+  };
+  EXPECT_EQ("CREATE SCHEMA `my shop`;\nUSE `my shop`;\nCREATE TABLE \"my shop\".t (a INT);\nCREATE SCHEMA other;\n",
+            text(ok(ansi(request("", rename_schema("SHOP", "my shop")))), ""));
+  EXPECT_EQ("name-taken", failed(ansi(request("", rename_schema("shop", "Other")))).kind);
+  EXPECT_EQ("unknown-object", failed(ansi(request("", rename_schema("none", "x")))).kind);
+  EXPECT_EQ("bad-request", failed(ansi(request("", rename_schema("/*<msm:p>*/", "x")))).kind);
+  EXPECT_EQ("bad-request", failed(ansi(request("", rename_schema("shop", "/*<msm:p>*/a b")))).kind);
+  EXPECT_EQ("bad-request", failed(ansi(request("", rename_schema("shop", "a/*<msm:p>*/b")))).kind);
+  EXPECT_EQ("bad-request",
+            failed(ansi(R"({"format": 1, "edits": [{"op": "rename_schema", "schema": "shop", "new_name": "x", "comment": true}]})"))
+                .kind);
+}
+
+// msm's schemaName may hold placeholders written against the identifier:
+// one name, matched only with the same placeholders.
+TEST(Schema_edit, rename_schema_with_msm_placeholders) {
+  const std::string script =
+      "-- `/*<msm:schema_prefix>*/shop`\n"
+      "CREATE SCHEMA IF NOT EXISTS /*<msm:schema_prefix>*/shop;\n"
+      "USE /*<msm:schema_prefix>*/shop;\n"
+      "CREATE TABLE /*<msm:schema_prefix>*/shop.t (id INT PRIMARY KEY);\n"
+      "SELECT * FROM shop.t;\n"
+      "SELECT * FROM /*<msm:schema_prefix>*/shop/*<msm:schema_postfix>*/.t;\n"
+      "SOURCE 'a.sql';\n";
+  const std::string a =
+      "-- TABLE `/*<msm:schema_prefix>*/shop`.`u`, in `shop`\n"
+      "CREATE TABLE /*<msm:schema_prefix>*/shop.u (id INT, FOREIGN KEY (id) REFERENCES /*<msm:schema_prefix>*/shop.t (id));\n";
+  const Files files{{"a.sql", a}};
+  const std::string from = "/*<msm:schema_prefix>*/shop";
+  auto with = [](std::string s, const std::string &to) {
+    for (size_t p = 0; (p = s.find("/*<msm:schema_prefix>*/shop", p)) != std::string::npos; p += to.size()) {
+      const size_t end = p + std::string("/*<msm:schema_prefix>*/shop").size();
+      if (s.compare(end, 2, "/*") == 0) continue;  // the one with a postfix: another schema
+      s.replace(p, end - p, to);
+    }
+    return s;
+  };
+  for (const std::string to : {"/*<msm:schema_prefix>*/store", "store"}) {
+    const auto r = ok(edit(script, files, request("shop", rename_schema(from, to, true))));
+    EXPECT_EQ(with(script, to), text(r, "")) << to;
+    std::string a_to = with(a, to);
+    a_to.replace(a_to.find("`shop`"), 6, "`store`");  // bare in a comment: the bare new name
+    EXPECT_EQ(a_to, text(r, "a.sql")) << to;
+  }
+  // Placeholders, then a postfix.
+  const auto p = ok(edit(script, files,
+                         request("shop", rename_schema("/*<msm:schema_prefix>*/shop/*<msm:schema_postfix>*/",
+                                                       "/*<msm:schema_prefix>*/x/*<msm:schema_postfix>*/"))));
+  EXPECT_EQ(1u, edit_count(p, ""));
+  EXPECT_EQ(0u, edit_count(p, "a.sql"));
+}
+
+// Later edits name the request's schema by its new name.
+TEST(Schema_edit, rename_schema_then_its_table) {
+  const std::string script = "USE shop;\nCREATE TABLE t (a INT);\n";
+  const auto r = ok(edit(script, {}, request("shop", rename_schema("shop", "store") + "," + rename_table("t", "u"))));
+  EXPECT_EQ("USE store;\nCREATE TABLE u (a INT);\n", text(r, ""));
 }
 
 TEST(Schema_edit, notes) {

@@ -234,6 +234,22 @@ TEST(Navigation, references_to_a_routine_skip_an_event_rename) {
   EXPECT_EQ(d.references(), (std::vector<std::string>{"refresh_all*", "refresh_all"}));
 }
 
+// Every place a schema is named, and not a table alias spelt like it.
+TEST(Navigation, references_to_a_schema) {
+  Doc d(
+      "SELECT * FROM saki|la.film;\n"
+      "ALTER DATABASE sakila CHARACTER SET utf8mb4;\n"
+      "GRANT SELECT ON sakila.* TO u;\n"
+      "REVOKE ALL ON sakila.film FROM u;\n"
+      "SELECT sakila.x FROM film AS sakila;\n"
+      "CREATE REST SERVICE /svc;\n"
+      "CREATE REST SCHEMA /s ON SERVICE /svc FROM sakila;\n"
+      "ALTER REST SCHEMA /s ON SERVICE /svc FROM `sakila`;\n"
+      "CREATE REST VIEW /f ON SERVICE /svc SCHEMA /s AS sakila.film;\n");
+  EXPECT_EQ(d.references(), (std::vector<std::string>{"sakila*", "sakila", "sakila", "sakila", "sakila", "sakila",
+                                                      "sakila", "`sakila`", "sakila"}));
+}
+
 TEST(Navigation, references_to_an_alias_stay_in_the_statement) {
   Doc d("SELECT a.actor_id FROM actor a| WHERE a.first_name = 'x';\nSELECT a.film_id FROM film a;");
   EXPECT_EQ(d.references(), (std::vector<std::string>{"a", "a*", "a"}));
