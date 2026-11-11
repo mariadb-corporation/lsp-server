@@ -208,22 +208,19 @@ struct Options {
   bool list_features = false;  // outline: --features
 };
 
-// The usage text, with the `edit ops:` line: the ops this binary does,
-// which msm and the VS Code extension read to tell what they may send.
+// The usage text, with the `edit ops:` line (the ops this binary does) and
+// the `outline features:` line, which msm and the VS Code extension read to
+// tell what they may send and expect.
 std::string usage() {
   std::string u = k_usage;
-  const std::string marker = "@EDIT_OPS@";
-  const size_t at = u.find(marker);
-  if (at != std::string::npos) {
-    u.replace(at, marker.size(), "           edit ops: " + mdbls::supported_edit_ops() + "\n");
-  }
-  const std::string features_marker = "@OUTLINE_FEATURES@";
-  const size_t fat = u.find(features_marker);
-  if (fat != std::string::npos) {
-    std::string line = "           outline features:";
-    for (const char *f : mdbls::outline_features()) line += std::string(" ") + f;
-    u.replace(fat, features_marker.size(), line + "\n");
-  }
+  auto fill = [&u](const std::string &marker, const std::string &line) {
+    const size_t at = u.find(marker);
+    if (at != std::string::npos) u.replace(at, marker.size(), "           " + line + "\n");
+  };
+  fill("@EDIT_OPS@", "edit ops: " + mdbls::supported_edit_ops());
+  std::string features;
+  for (const char *f : mdbls::outline_features()) features += std::string(" ") + f;
+  fill("@OUTLINE_FEATURES@", "outline features:" + features);
   return u;
 }
 

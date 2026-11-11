@@ -84,6 +84,25 @@ void upsert_named(std::vector<T> &v, T x, bool keep_existing = false) {
   }
 }
 
+// Removes the elements of v named `name`.
+template <typename T>
+void erase_named(std::vector<T> &v, std::string_view name) {
+  std::erase_if(v, [&](const T &x) { return iequals(x.name, name); });
+}
+
+// Removes the elements of v (REST services or schemas) with request path `path`.
+template <typename T>
+void erase_by_path(std::vector<T> &v, std::string_view path) {
+  std::erase_if(v, [&](const T &x) { return iequals(x.path, path); });
+}
+
+// The REST schema of `svc` with request path `path`, or nullptr.
+Rest_schema *find_rest_schema(Rest_service &svc, std::string_view path) {
+  auto it = std::find_if(svc.schemas.begin(), svc.schemas.end(),
+                         [&](const Rest_schema &s) { return iequals(s.path, path); });
+  return it == svc.schemas.end() ? nullptr : &*it;
+}
+
 // The grammar symbols the fold looks for, resolved once.
 struct Syms {
 #define SYM(x) int x = grammar::symbol(#x);
@@ -1630,18 +1649,20 @@ bool Catalog_fold::rest(uint32_t n) {
   const uint32_t st = ch[0];
   const int sym = t_.node(st).symbol;
   const std::string service_path = text(find(st, s_.mrs_service_request_path));
-  const std::string schema_path = text(find(st, s_.mrs_schema_request_path));
-  // The statement's first words, up to its request path, for notes.
+  const uint32_t schema_node = find(st, s_.mrs_schema_request_path);
+  const std::string schema_path = text(schema_node);
+  // The statement up to the first path or name it writes, for notes:
+  // "CREATE REST VIEW /v".
   auto what = [&]() {
-    const std::string t = text(st);
-    size_t at = 0;
-    for (int words = 0; words < 6; ++words) {
-      const size_t sp = t.find(' ', at);
-      if (sp == std::string::npos) return t;
-      if (t[at] == '/' || t.find('@', at) < sp) return t.substr(0, sp);
-      at = sp + 1;
+    uint32_t first = npos;
+    for (const int sym : {s_.mrs_service_request_path, s_.mrs_schema_request_path,
+                          s_.mrs_view_request_path, s_.mrs_procedure_request_path,
+                          s_.mrs_function_request_path, s_.mrs_content_set_request_path,
+                          s_.mrs_identifier}) {
+      const uint32_t p = find(st, sym);
+      if (p != npos && (first == npos || t_.begin(p) < t_.begin(first))) first = p;
     }
-    return t.substr(0, at - 1);
+    return first == npos ? text(st) : text_span(t_.begin(st), first);
   };
   auto none_in_use = [&](const char *which) {
     note(Note_kind::rest_none_in_use, false,
@@ -1657,26 +1678,20 @@ bool Catalog_fold::rest(uint32_t n) {
   };
   // The service and schema of a REST object: ON [SERVICE ...] SCHEMA, else
   // the current schema.
+  // (The grammar names a service only together with a schema.)
   auto object_place = [&]() -> std::optional<std::pair<std::string, std::string>> {
-    if (!schema_path.empty()) {
-      auto svc = service_named();
-      if (!svc) return std::nullopt;
-      return std::pair{*svc, schema_path};
-    }
-    if (c_.m_current_service.empty()) { none_in_use("SERVICE"); return std::nullopt; }
+    auto svc = service_named();
+    if (!svc) return std::nullopt;
+    if (!schema_path.empty()) return std::pair{*svc, schema_path};
     if (c_.m_current_rest_schema.empty()) { none_in_use("SCHEMA"); return std::nullopt; }
-    return std::pair{c_.m_current_service, c_.m_current_rest_schema};
+    return std::pair{*svc, c_.m_current_rest_schema};
   };
   auto object = [&](const char *kind, int path_sym) {
     const auto place = object_place();
     if (!place) return false;
     Rest_service &svc = c_.service(place->first);
-    auto it = std::find_if(svc.schemas.begin(), svc.schemas.end(),
-                           [&](const Rest_schema &s) { return iequals(s.path, place->second); });
-    if (it == svc.schemas.end()) {
-      svc.schemas.push_back(Rest_schema{place->second, "", {}, {stmt_, stmt_}});
-      it = svc.schemas.end() - 1;
-    }
+    Rest_schema *it = find_rest_schema(svc, place->second);
+    if (it == nullptr) it = &svc.schemas.emplace_back(Rest_schema{place->second, "", {}, {stmt_, stmt_}});
     const uint32_t p = find(st, path_sym);
     Rest_object o{kind, text(p), text(find(st, s_.mrs_qualified_identifier)), origin(p)};
     auto ex = std::find_if(it->objects.begin(), it->objects.end(), [&](const Rest_object &x) {
@@ -1685,14 +1700,10 @@ bool Catalog_fold::rest(uint32_t n) {
     if (ex != it->objects.end()) *ex = std::move(o); else it->objects.push_back(std::move(o));
     return true;
   };
-  auto name_at = [&](uint32_t p) { return unquote_string(unquote_identifier(text(p))); };
+  auto name_at = [&](uint32_t p) { return unquote_any(text(p)); };
   auto named = [&](std::vector<Named_object> &v, int name_sym) {
     const uint32_t p = find(st, name_sym);
     upsert_named(v, Named_object{name_at(p), origin(p)});
-  };
-  auto unnamed = [&](std::vector<Named_object> &v, int name_sym) {
-    const std::string name = name_at(find(st, name_sym));
-    std::erase_if(v, [&](const Named_object &x) { return iequals(x.name, name); });
   };
   // ADD AUTH APP links (a linked app stays linked, its range moves to this
   // statement), then REMOVE AUTH APP unlinks, as the shell does.
@@ -1702,8 +1713,7 @@ bool Catalog_fold::rest(uint32_t n) {
       upsert_named(svc.auth_apps, Named_object{name_at(p), origin(p)});
     }
     for (const uint32_t r : find_all(st, s_.mrs_remove_auth_app)) {
-      const std::string name = name_at(find(r, s_.mrs_auth_app_name));
-      std::erase_if(svc.auth_apps, [&](const Named_object &x) { return iequals(x.name, name); });
+      erase_named(svc.auth_apps, name_at(find(r, s_.mrs_auth_app_name)));
     }
   };
 
@@ -1755,15 +1765,12 @@ bool Catalog_fold::rest(uint32_t n) {
     const auto svc_path = service_named();
     if (!svc_path) return false;
     Rest_service &svc = c_.service(*svc_path);
-    const uint32_t p = find(st, s_.mrs_schema_request_path);
     Rest_schema rs;
     rs.schema = name_of(child(st, s_.mrs_identifier));
     // Without a request path the shell takes /<database schema>.
-    rs.path = p != npos ? text(p) : "/" + rs.schema;
-    rs.origin = origin(p != npos ? p : child(st, s_.mrs_identifier));
-    auto it = std::find_if(svc.schemas.begin(), svc.schemas.end(),
-                           [&](const Rest_schema &s) { return iequals(s.path, rs.path); });
-    if (it != svc.schemas.end()) {
+    rs.path = schema_node != npos ? schema_path : "/" + rs.schema;
+    rs.origin = origin(schema_node != npos ? schema_node : child(st, s_.mrs_identifier));
+    if (Rest_schema *it = find_rest_schema(svc, rs.path)) {
       rs.objects = std::move(it->objects);
       *it = std::move(rs);
     } else {
@@ -1794,7 +1801,7 @@ bool Catalog_fold::rest(uint32_t n) {
     return true;
   }
   if (sym == s_.mrs_drop_rest_service_statement) {
-    std::erase_if(c_.m_services, [&](const Rest_service &s) { return iequals(s.path, service_path); });
+    erase_by_path(c_.m_services, service_path);
     if (iequals(c_.m_current_service, service_path)) {
       c_.m_current_service.clear();
       c_.m_current_rest_schema.clear();
@@ -1806,9 +1813,7 @@ bool Catalog_fold::rest(uint32_t n) {
   if (sym == s_.mrs_drop_rest_schema_statement) {
     const auto svc_path = service_named();
     if (!svc_path) return false;
-    if (Rest_service *svc = c_.find_service(*svc_path)) {
-      std::erase_if(svc->schemas, [&](const Rest_schema &s) { return iequals(s.path, schema_path); });
-    }
+    if (Rest_service *svc = c_.find_service(*svc_path)) erase_by_path(svc->schemas, schema_path);
     if (iequals(*svc_path, c_.m_current_service) && iequals(schema_path, c_.m_current_rest_schema))
       c_.m_current_rest_schema.clear();
     return true;
@@ -1817,14 +1822,10 @@ bool Catalog_fold::rest(uint32_t n) {
     const auto place = object_place();
     if (!place) return false;
     Rest_service *svc = c_.find_service(place->first);
-    if (svc == nullptr) return true;
+    Rest_schema *sch = svc != nullptr ? find_rest_schema(*svc, place->second) : nullptr;
+    if (sch == nullptr) return true;
     const std::string path = text(find(st, path_sym));
-    for (auto &sch : svc->schemas) {
-      if (!iequals(sch.path, place->second)) continue;
-      std::erase_if(sch.objects, [&](const Rest_object &o) {
-        return o.kind == kind && iequals(o.path, path);
-      });
-    }
+    std::erase_if(sch->objects, [&](const Rest_object &o) { return o.kind == kind && iequals(o.path, path); });
     return true;
   };
   if (sym == s_.mrs_drop_rest_view_statement) return drop_object("view", s_.mrs_view_request_path);
@@ -1834,23 +1835,21 @@ bool Catalog_fold::rest(uint32_t n) {
     const auto svc_path = service_named();
     if (!svc_path) return false;
     if (Rest_service *svc = c_.find_service(*svc_path)) {
-      const std::string path = text(find(st, s_.mrs_content_set_request_path));
-      std::erase_if(svc->content_sets, [&](const Named_object &o) { return iequals(o.name, path); });
+      erase_named(svc->content_sets, text(find(st, s_.mrs_content_set_request_path)));
     }
     return true;
   }
   if (sym == s_.mrs_drop_rest_auth_app_statement) {
     // Dropping an app drops its links.
     const std::string name = name_at(find(st, s_.mrs_auth_app_name));
-    for (auto &svc : c_.m_services)
-      std::erase_if(svc.auth_apps, [&](const Named_object &x) { return iequals(x.name, name); });
-    unnamed(c_.m_auth_apps, s_.mrs_auth_app_name);
+    for (auto &svc : c_.m_services) erase_named(svc.auth_apps, name);
+    erase_named(c_.m_auth_apps, name);
     return true;
   }
-  if (sym == s_.mrs_drop_rest_role_statement) { unnamed(c_.m_roles, s_.mrs_role_name); return true; }
+  if (sym == s_.mrs_drop_rest_role_statement) { erase_named(c_.m_roles, name_at(find(st, s_.mrs_role_name))); return true; }
   if (sym == s_.mrs_drop_rest_user_statement) {
     const std::string name = name_at(find(st, s_.mrs_user_name)) + "@" + name_at(find(st, s_.mrs_auth_app_name));
-    std::erase_if(c_.m_users, [&](const Named_object &o) { return iequals(o.name, name); });
+    erase_named(c_.m_users, name);
     return true;
   }
   return false;
