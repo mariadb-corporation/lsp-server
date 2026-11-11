@@ -40,7 +40,7 @@ creates the table. So are a REST statement that names no service or schema when 
 `SERVER`, `CREATE PACKAGE`, an `ALTER` of anything but a database, view, table, procedure,
 function, event or sequence, an `ALTER PROCEDURE`, `FUNCTION`, `EVENT` or `SEQUENCE` of an
 object the file does not create, a `RENAME` of a table, view or sequence the file does not
-create, `USE REST`) is not applied and gets no note. `RENAME TABLE` renames or moves a
+create, a `USE REST` that names its service or follows one) is not applied and gets no note. `RENAME TABLE` renames or moves a
 table, a view or a sequence, as MariaDB does; a statement that would move a view to another
 schema renames nothing (MariaDB refuses it). `ALTER PROCEDURE`/`FUNCTION` changes the
 characteristics it writes, `ALTER EVENT` what it writes (schedule, completion, status, comment,

@@ -336,6 +336,58 @@ TEST(Catalog, rest_current_service_and_schema) {
   EXPECT_NE(std::string::npos, o.notes[4].message.find("names no REST SCHEMA")) << o.notes[4].message;
 }
 
+// The current service follows an ALTER REST SERVICE ... NEW REQUEST PATH
+// (its schema stays current); DROP REST SCHEMA / SERVICE of the current one
+// clears it, as MariaDB Shell does.
+TEST(Catalog, rest_current_follows_rename_and_drop) {
+  const auto o = outline_of(
+      "CREATE REST SERVICE /a;\n"
+      "USE REST SERVICE /a;\n"
+      "CREATE REST SCHEMA /s FROM sakila;\n"                       // current
+      "ALTER REST SERVICE /a NEW REQUEST PATH /b;\n"
+      "CREATE REST VIEW /v1 AS sakila.actor;\n"                    // /b, /s
+      "DROP REST SCHEMA /s;\n"
+      "CREATE REST VIEW /v2 AS sakila.actor;\n"                    // no schema in use
+      "DROP REST SERVICE /b;\n"
+      "CREATE REST CONTENT SET /cs;\n");                           // no service in use
+  EXPECT_TRUE(o.catalog.rest_services().empty());
+  ASSERT_EQ(2u, o.notes.size());
+  EXPECT_EQ(Note_kind::rest_none_in_use, o.notes[0].kind);
+  EXPECT_NE(std::string::npos, o.notes[0].message.find("names no REST SCHEMA")) << o.notes[0].message;
+  EXPECT_EQ(Note_kind::rest_none_in_use, o.notes[1].kind);
+  EXPECT_NE(std::string::npos, o.notes[1].message.find("names no REST SERVICE")) << o.notes[1].message;
+}
+
+TEST(Catalog, rest_current_schema_survives_rename) {
+  const auto o = outline_of(
+      "CREATE REST SERVICE /a;\n"
+      "USE REST SERVICE /a;\n"
+      "CREATE REST SCHEMA /s FROM sakila;\n"
+      "ALTER REST SERVICE /a NEW REQUEST PATH /b;\n"
+      "CREATE REST VIEW /v AS sakila.actor;\n");
+  EXPECT_TRUE(o.notes.empty());
+  const auto &svcs = o.catalog.rest_services();
+  ASSERT_EQ(1u, svcs.size());
+  EXPECT_EQ("/b", svcs[0].path);
+  ASSERT_EQ(1u, svcs[0].schemas.size());
+  ASSERT_EQ(1u, svcs[0].schemas[0].objects.size());
+  EXPECT_EQ("/v", svcs[0].schemas[0].objects[0].path);
+}
+
+// What `mariadb-lsp outline --features` prints: every feature, in the
+// format msm reads.
+TEST(Catalog, outline_features_json) {
+  std::string expected = "{\"format\":1,\"features\":[";
+  bool first = true;
+  for (const char *f : outline_features()) {
+    expected += (first ? "\"" : ",\"") + std::string(f) + "\"";
+    first = false;
+  }
+  expected += "]}";
+  EXPECT_EQ(expected, outline_features_json());
+  EXPECT_NE(std::string::npos, expected.find("\"rest_declared\""));
+}
+
 // CREATE REST SCHEMA IF NOT EXISTS keeps a schema the file has; DROP REST
 // CONTENT SET matches the unquoted path; a CREATE of a new service ignores
 // REMOVE AUTH APP, as MariaDB Shell does.
