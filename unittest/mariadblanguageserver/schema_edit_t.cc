@@ -681,6 +681,18 @@ TEST(Schema_edit, rename_schema_with_msm_placeholders) {
                                                        "/*<msm:schema_prefix>*/x/*<msm:schema_postfix>*/"))));
   EXPECT_EQ(1u, edit_count(p, ""));
   EXPECT_EQ(0u, edit_count(p, "a.sql"));
+  // Dropping the placeholders would merge it with the bare `shop`.
+  EXPECT_EQ("name-taken", failed(edit(with(script, from, ""), files, request("shop", rename_schema(from, "shop")))).kind);
+}
+
+// Renaming the bare name leaves the request's schema, which has
+// placeholders, for the edits after it.
+TEST(Schema_edit, rename_bare_schema_keeps_the_request_schema) {
+  const std::string script =
+      "CREATE SCHEMA /*<msm:p>*/shop;\nUSE /*<msm:p>*/shop;\nCREATE TABLE t (a INT);\nGRANT SELECT ON shop.* TO u;\n";
+  const auto r = ok(edit(script, {}, request("shop", rename_schema("shop", "ro") + "," + rename_table("t", "u"))));
+  EXPECT_EQ("CREATE SCHEMA /*<msm:p>*/shop;\nUSE /*<msm:p>*/shop;\nCREATE TABLE u (a INT);\nGRANT SELECT ON ro.* TO u;\n",
+            text(r, ""));
 }
 
 // Later edits name the request's schema by its new name.

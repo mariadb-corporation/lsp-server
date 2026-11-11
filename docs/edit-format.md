@@ -138,7 +138,8 @@ the placeholders written against it are exactly those of `schema` (none when `sc
 none): `/*<msm:schema_prefix>*/shop` and a bare `shop` are different schemas once msm has
 substituted them. The match is rewritten as a whole, with `new_name`'s placeholders as
 given and its identifier never quoted; a `new_name` with placeholders whose identifier
-would need quotes is `bad-request`.
+would need quotes is `bad-request`. A `new_name` with the identifier of `schema` but other
+placeholders is `name-taken` when the script already names it.
 
 **Comments**, with `"comments": true`: the name in backticks in a comment, by itself or as a
 qualifier (`` `shop` ``, `` `shop`.`t` ``, not `` `t`.`shop` ``), as MSM's banners write it.
@@ -150,7 +151,8 @@ in the text the directives include. Without `comments` no comment is changed.
 String literals holding the name get `name-in-string` notes. The migration is empty: a
 schema cannot be renamed in place, so renaming a deployed one is the caller's to build
 (`CREATE DATABASE`, `RENAME TABLE` per table, the routines, ...). The request's `schema`
-names the renamed schema by its new name for the edits after it.
+names the renamed schema by its new name for the edits after it, once the outline has no
+schema of the old name left (renaming a bare `shop` leaves the one with placeholders).
 
 ### Adding and removing
 

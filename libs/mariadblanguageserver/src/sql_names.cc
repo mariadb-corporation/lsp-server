@@ -54,7 +54,7 @@ struct Name_syms {
   S(query_specification_start) S(from_clause) S(table_reference_list) S(DUAL_SYM)
   S(verb_clause) S(sp_proc_stmt) S(sp_decl)
   // tokens
-  S(TABLE_SYM) S(VIEW_SYM) S(SEQUENCE_SYM) S(INDEX_SYM) S(DATABASE) S(TRIGGER_SYM) S(EVENT_SYM) S(FROM)
+  S(TABLE_SYM) S(VIEW_SYM) S(SEQUENCE_SYM) S(INDEX_SYM) S(DATABASE) S(TRIGGER_SYM) S(EVENT_SYM)
 #undef S
   int delete_ = grammar::symbol("delete");
   int dot = grammar::symbol("'.'");
@@ -535,8 +535,7 @@ Name_ref Statement_names::classify(uint32_t token) const {
     return ref;
   }
   // REST SQL: CREATE|ALTER REST SCHEMA ... FROM s; a REST object's AS s.o.
-  if ((sym == s.mrs_create_rest_schema_statement || sym == s.mrs_opt_from_schema_name) &&
-      m_tree.child(a, s.FROM) != npos) {
+  if (sym == s.mrs_create_rest_schema_statement || sym == s.mrs_opt_from_schema_name) {
     ref.kind = Name_kind::schema;
     return ref;
   }

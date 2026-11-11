@@ -2078,6 +2078,13 @@ class Editor {
     if (!iequals(from.core, to.core) && outline().catalog.find(to.core) != nullptr) {
       return error(i, "name-taken", "a schema `" + to.core + "` exists");
     }
+    // The same identifier with other placeholders is another schema once
+    // msm substitutes them: renaming to it would merge the two.
+    if (iequals(from.core, to.core) && (from.prefix != to.prefix || from.suffix != to.suffix)) {
+      const auto taken = schema_references(to);
+      const auto *v = std::get_if<std::vector<Spelled>>(&taken);
+      if (v == nullptr || !v->empty()) return error(i, "name-taken", "the script names a schema `" + e.new_name + "`");
+    }
     auto refs = schema_references(from);
     if (auto *bad = std::get_if<std::string>(&refs)) {
       return error(i, "self-check", "a reference to `" + from.core + "` does not spell it: " + *bad);
@@ -2092,7 +2099,6 @@ class Editor {
     m_count = found.size();
     string_notes(i, {from.core}, "schema `" + from.core + "`");
     if (e.comments) rename_in_comments(from, to, changes);
-    if (iequals(m_schema, from.core)) m_schema = to.core;
     return std::nullopt;
   }
 
@@ -4633,6 +4639,13 @@ class Editor {
         const auto *found = std::get_if<std::vector<Spelled>>(&refs);
         if (found == nullptr || found->size() < m_count) {
           return fail("the edited script does not name schema `" + e.new_name + "` where it named `" + e.schema + "`");
+        }
+        // The request's schema follows the rename once nothing names it by
+        // the old name: renaming a bare `shop` leaves the one with
+        // placeholders, which the outline also calls `shop`.
+        const Msm_name from = *msm_name(e.schema);
+        if (iequals(m_schema, from.core) && outline().catalog.find(from.core) == nullptr) {
+          m_schema = msm_name(e.new_name)->core;
         }
         break;
       }
