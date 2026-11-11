@@ -599,6 +599,7 @@ const std::vector<const char *> &outline_features() {
       "rest_auth_app_links",  // rest.services[].auth_apps, ALTER REST SERVICE
       "rest_current_schema",  // USE REST SCHEMA, the shell's current service and schema
       "rest_declared",        // rest.services[].declared, rest.services[].schemas[].declared
+      "rest_drop_for_database",  // DROP REST SCHEMA ... FOR DATABASE db
   };
   return features;
 }

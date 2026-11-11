@@ -433,6 +433,46 @@ TEST(Catalog, rest_declared) {
   EXPECT_NE(std::string::npos, json.find("{\"path\":\"/q\",\"schema\":\"a\",\"declared\":true,")) << json;
 }
 
+// DROP REST SCHEMA ... FOR DATABASE db drops the REST schema only when it
+// exposes database schema db (msm's drop of a moved REST schema).
+TEST(Catalog, rest_drop_for_database) {
+  const auto o = outline_of(
+      "CREATE REST SERVICE /s;\n"
+      "CREATE REST SCHEMA /app ON SERVICE /s FROM b;\n"
+      "CREATE REST SCHEMA /old ON SERVICE /s FROM `A`;\n"
+      "DROP REST SCHEMA IF EXISTS /app FROM SERVICE /s FOR DATABASE a;\n"
+      "DROP REST DATABASE IF EXISTS /old FROM SERVICE /s FOR SCHEMA a;\n"
+      "DROP REST SCHEMA IF EXISTS /none FROM SERVICE /s FOR DATABASE a;\n"
+      "DROP REST SCHEMA IF EXISTS /app FROM /s FOR DATABASE c;\n");  // the shell's grammar_test form
+  EXPECT_TRUE(o.notes.empty());
+  EXPECT_EQ(7u, o.applied);
+  const auto &svcs = o.catalog.rest_services();
+  ASSERT_EQ(1u, svcs.size());
+  ASSERT_EQ(1u, svcs[0].schemas.size());  // /app is on b: kept; /old on `A`: dropped
+  EXPECT_EQ("/app", svcs[0].schemas[0].path);
+  EXPECT_EQ("b", svcs[0].schemas[0].schema);
+}
+
+// A REST schema only named (no database known) is dropped as without FOR
+// DATABASE; a FOR DATABASE that names another database keeps the current one.
+TEST(Catalog, rest_drop_for_database_unknown_and_current) {
+  const auto o = outline_of(
+      "CREATE REST SERVICE /s;\n"
+      "USE REST SERVICE /s;\n"
+      "CREATE REST VIEW /v ON SCHEMA /p AS a.t;\n"
+      "DROP REST SCHEMA /p FOR DATABASE a;\n"
+      "CREATE REST SCHEMA /q FROM b;\n"
+      "DROP REST SCHEMA /q FOR DATABASE c;\n"
+      "CREATE REST VIEW /w AS b.t;\n");
+  EXPECT_TRUE(o.notes.empty());
+  const auto &svcs = o.catalog.rest_services();
+  ASSERT_EQ(1u, svcs.size());
+  ASSERT_EQ(1u, svcs[0].schemas.size());
+  EXPECT_EQ("/q", svcs[0].schemas[0].path);
+  ASSERT_EQ(1u, svcs[0].schemas[0].objects.size());  // /q stayed current
+  EXPECT_EQ("/w", svcs[0].schemas[0].objects[0].path);
+}
+
 TEST(Catalog, named_key_replaces_its_namesake) {
   const auto o = outline_of(
       "CREATE TABLE t (a INT, b INT, KEY k (a), KEY k (b), UNIQUE (a), UNIQUE (b));\n");

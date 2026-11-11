@@ -1824,7 +1824,16 @@ bool Catalog_fold::rest(uint32_t n) {
   if (sym == s_.mrs_drop_rest_schema_statement) {
     const auto svc_path = service_named();
     if (!svc_path) return false;
-    if (Rest_service *svc = c_.find_service(*svc_path)) erase_by_path(svc->schemas, schema_path);
+    // FOR DATABASE db drops it only when it exposes database schema db
+    // (msm's drop of a REST schema a release moved to another database).
+    // One only named (no CREATE REST SCHEMA, so no database known) is
+    // dropped, as without FOR DATABASE.
+    const std::string for_db = name_of(child(child(st, s_.mrs_opt_for_database), s_.mrs_identifier));
+    Rest_service *svc = c_.find_service(*svc_path);
+    if (const Rest_schema *rs = svc != nullptr ? find_rest_schema(*svc, schema_path) : nullptr;
+        rs != nullptr && !for_db.empty() && !rs->schema.empty() && !iequals(rs->schema, for_db))
+      return true;  // FOR DATABASE names another database: nothing changes
+    if (svc != nullptr) erase_by_path(svc->schemas, schema_path);
     if (iequals(*svc_path, c_.m_current_service) && iequals(schema_path, c_.m_current_rest_schema))
       c_.m_current_rest_schema.clear();
     return true;
