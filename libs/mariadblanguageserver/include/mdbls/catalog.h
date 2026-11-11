@@ -55,10 +55,14 @@ enum class Note_kind {
                          // (applied) of a table the file does not create
   include_unreadable,    // not applied: a SOURCE file that cannot be read
   include_nested,        // not applied: a SOURCE directive in an included text
+  rest_none_in_use,      // not applied: a REST statement that names no service or schema
+                         // when none is in use, where MariaDB Shell fails
+  unknown_rest_service,  // not applied: ALTER REST SERVICE of a service the file does not create
 };
 constexpr Note_kind k_note_kinds[] = {Note_kind::syntax_error, Note_kind::unsupported_sql_mode,
                                       Note_kind::unknown_table, Note_kind::include_unreadable,
-                                      Note_kind::include_nested};
+                                      Note_kind::include_nested, Note_kind::rest_none_in_use,
+                                      Note_kind::unknown_rest_service};
 const char *to_string(Note_kind kind);
 
 // A remark on one statement: what the fold could not read, or applied with
@@ -321,6 +325,7 @@ struct Rest_service {
   std::string path;
   std::vector<Rest_schema> schemas;
   std::vector<Named_object> content_sets;
+  std::vector<Named_object> auth_apps;  // the linked auth apps (ADD AUTH APP)
   Origin origin;
 };
 
@@ -368,7 +373,10 @@ class Catalog {
   std::vector<Schema> m_schemas;
   std::string m_current;
   std::vector<Rest_service> m_services;
+  // What USE REST SERVICE / SCHEMA set, as MariaDB Shell keeps it: the
+  // current service's path, and the request path of its current schema.
   std::string m_current_service;
+  std::string m_current_rest_schema;
   std::vector<Named_object> m_auth_apps;
   std::vector<Named_object> m_roles;
   std::vector<Named_object> m_users;

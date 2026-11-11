@@ -100,6 +100,13 @@ void fold_outline(Outline &outline, const Source_expansion &expansion, Parser_po
 std::string outline_json(const Outline &outline, std::string_view text, const Line_map &lines,
                          std::string_view file = {});
 
+// What this binary's outlines hold beyond format 1 as first published, for
+// programs to check (msm's prepare_release): the `outline features:` line of
+// `mariadb-lsp --help`, and {"format": 1, "features": [...]}, what
+// `mariadb-lsp outline --features` prints.  docs/outline-format.md lists them.
+const std::vector<const char *> &outline_features();
+std::string outline_features_json();
+
 }  // namespace mdbls
 
 #endif  // MDBLS_OUTLINE_H_
