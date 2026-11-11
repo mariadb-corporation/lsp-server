@@ -99,6 +99,7 @@ unknown members.
 | `add_sequence` | `sequence` (Sequence: `name`; `type`, `start`, `increment`, `minvalue`, `maxvalue`, `cache`, `cycle`, `options` optional) | done | a `CREATE SEQUENCE` after the schema's last sequence, else before its first table (below) |
 | `drop_sequence` | `sequence` | done | its `CREATE`, `ALTER` and `DROP SEQUENCE` statements |
 | `rename_sequence` | `sequence`, `new_name` | done | the definition and every reference (`NEXT VALUE FOR`, `NEXTVAL()`, `LASTVAL()`, `SETVAL()`, `PREVIOUS VALUE FOR`, `FROM s`, `RENAME TABLE`), as `rename_table` finds them |
+| `rename_schema` | `schema`, `new_name` (both may hold MSM placeholders), `comments` (optional boolean) | done | every name that resolves to the schema (below); no migration |
 
 An op this binary does not do, or does not know (one added after it was built), is refused
 with `unsupported`. `mariadb-lsp edit --ops` lists the ops the binary does as JSON (see
@@ -114,6 +115,44 @@ covers DDL (foreign keys, indexes, `ALTER TABLE`, `CREATE INDEX`, `RENAME TABLE`
 comments, in the script and in every included file (a file included twice is edited once).
 Each reference is written as it was: in backticks or double quotes when it was, else with
 quotes only when the new name needs them.
+
+### Renaming the schema
+
+`rename_schema` finds the schema's names as the other renames find theirs, through the
+parser and the resolver: the name of `CREATE`, `ALTER` and `DROP DATABASE` or `SCHEMA`
+(`IF [NOT] EXISTS` too), `USE`, every schema qualifier (DDL and its foreign keys, `CREATE
+INDEX`, `RENAME TABLE`, the `DROP ... IF EXISTS` before a `CREATE`, the names of routines,
+triggers, events and sequences, DML, views, routine, trigger and event bodies), `GRANT` and
+`REVOKE ... ON s.*` and `ON s.t`, REST SQL's `CREATE`/`ALTER REST SCHEMA ... FROM s` and a
+REST object's `AS s.o`, and statements in versioned comments, in the script and every
+included file. A table, column or alias of the same spelling is left alone: in `SELECT
+shop.x FROM t AS shop`, `shop` is the alias. Each name is written as it was, quoted only when
+the new name needs it. The edit is refused with `unknown-object` when nothing names the
+schema, and with `name-taken` when the outline has a schema of the new name.
+
+**MSM placeholders.** A project's schema name may hold placeholders that msm substitutes,
+`/*<msm:NAME>*/` with NAME matching `[A-Za-z_][A-Za-z0-9_]*`, written against the identifier
+with nothing between (`/*<msm:schema_prefix>*/shop/*<msm:schema_postfix>*/`). `schema` and
+`new_name` may hold them before and after the identifier. A name in the script matches when
+the placeholders written against it are exactly those of `schema` (none when `schema` has
+none): `/*<msm:schema_prefix>*/shop` and a bare `shop` are different schemas once msm has
+substituted them. The match is rewritten as a whole, with `new_name`'s placeholders as
+given and its identifier never quoted; a `new_name` with placeholders whose identifier
+would need quotes is `bad-request`. A `new_name` with the identifier of `schema` but other
+placeholders is `name-taken` when the script already names it.
+
+**Comments**, with `"comments": true`: the name in backticks in a comment, by itself or as a
+qualifier (`` `shop` ``, `` `shop`.`t` ``, not `` `t`.`shop` ``), as MSM's banners write it.
+In backticks with placeholders, they must be those of `schema`, and the new name keeps
+`new_name`'s; in backticks without placeholders, the new identifier is written without them
+too. Comments are what lies between the tokens of the statements and between the statements,
+in the text the directives include. Without `comments` no comment is changed.
+
+String literals holding the name get `name-in-string` notes. The migration is empty: a
+schema cannot be renamed in place, so renaming a deployed one is the caller's to build
+(`CREATE DATABASE`, `RENAME TABLE` per table, the routines, ...). The request's `schema`
+names the renamed schema by its new name for the edits after it, once the outline has no
+schema of the old name left (renaming a bare `shop` leaves the one with placeholders).
 
 ### Adding and removing
 
@@ -296,6 +335,7 @@ Each statement says what it does, so a program need not read its SQL:
 | `add_sequence` | the `CREATE SEQUENCE` as written | `create` `sequence` |
 | `drop_sequence` | `DROP SEQUENCE s` | `drop` `sequence` |
 | `rename_sequence` | `RENAME TABLE a TO b`, then for each column whose default takes values from it (in its definition, or set by `ALTER COLUMN c SET DEFAULT`) `ALTER TABLE t ALTER COLUMN c SET DEFAULT ...` with the default as the edited script writes it: a deployed default still names the old sequence after `RENAME TABLE` | `rename` `sequence`, then `alter` `column` for each such column |
+| `rename_schema` | none | |
 
 ### Merged ALTER TABLE statements
 

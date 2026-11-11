@@ -45,6 +45,8 @@ struct Name_syms {
   S(ident_sys_alloc) S(option_value_no_option_type) S(trigger_tail) S(event_tail)
   S(optionally_qualified_column_ident) S(key_or_index) S(FOREIGN) S(CONSTRAINT) S(opt_ident)
   S(sp_handler) S(PROCEDURE_SYM) S(FUNCTION_SYM) S(create_routine) S(show_param) S(opt_ev_rename_to)
+  S(grant_ident) S(ident_or_empty) S(mrs_qualified_identifier) S(mrs_create_rest_schema_statement)
+  S(mrs_opt_from_schema_name)
   // scopes and tables
   S(query_specification) S(query_expression_body_ext) S(update) S(insert) S(replace)
   S(table_primary_ident) S(table_primary_derived) S(table_name_with_opt_use_partition)
@@ -308,7 +310,8 @@ Name_ref Statement_names::classify(uint32_t token) const {
   // Up through the wrappers of the one token.
   uint32_t child = leaf_node;
   uint32_t a = m_tree.node(leaf_node).parent;
-  while (a != npos && is_name_wrapper(m_tree.node(a).symbol)) {
+  // ALTER DATABASE's name is optional: ident_or_empty (used nowhere else).
+  while (a != npos && (is_name_wrapper(m_tree.node(a).symbol) || m_tree.node(a).symbol == s.ident_or_empty)) {
     child = a;
     a = m_tree.node(a).parent;
   }
@@ -526,7 +529,17 @@ Name_ref Statement_names::classify(uint32_t token) const {
     ref.routine_kind = routine_kind_at(a);
     return ref;
   }
-  if (sym == s.use) {
+  // USE s; GRANT ... ON s.* (ON s.t is a table_ident).
+  if (sym == s.use || sym == s.grant_ident) {
+    ref.kind = Name_kind::schema;
+    return ref;
+  }
+  // REST SQL: CREATE|ALTER REST SCHEMA ... FROM s; a REST object's AS s.o.
+  if (sym == s.mrs_create_rest_schema_statement || sym == s.mrs_opt_from_schema_name) {
+    ref.kind = Name_kind::schema;
+    return ref;
+  }
+  if (sym == s.mrs_qualified_identifier && schema_part) {
     ref.kind = Name_kind::schema;
     return ref;
   }

@@ -37,6 +37,7 @@
 #include "mdbls/keywords.h"
 #include "mdbls/lsp/json_position.h"
 #include "mdbls/navigation.h"
+#include "mdbls/semantic_tokens.h"
 #include "mdbls/sql_names.h"
 #include "mdbls/syntax_tree.h"
 #include "mdbls/workspace_catalog.h"
@@ -82,6 +83,7 @@ constexpr Op_name k_ops[] = {
     {Edit_op::add_sequence, "add_sequence"},
     {Edit_op::drop_sequence, "drop_sequence"},
     {Edit_op::rename_sequence, "rename_sequence"},
+    {Edit_op::rename_schema, "rename_schema"},
 };
 
 // The longest name the server takes for a table, column or routine.
@@ -104,6 +106,71 @@ std::string spell_like(std::string_view token, std::string_view name) {
     return out + '"';
   }
   return quote_identifier(name);
+}
+
+// MSM placeholders, /*<msm:name>*/, that msm substitutes in a project's
+// schema name: the length of the one starting at `p`, 0 for none.
+constexpr std::string_view k_placeholder_open = "/*<msm:", k_placeholder_close = ">*/";
+
+bool placeholder_char(char c, bool first) {
+  const auto u = static_cast<unsigned char>(c);
+  return std::isalpha(u) || c == '_' || (!first && std::isdigit(u));
+}
+
+size_t placeholder_at(std::string_view s, size_t p) {
+  if (s.substr(p, k_placeholder_open.size()) != k_placeholder_open) return 0;
+  size_t q = p + k_placeholder_open.size();
+  if (q >= s.size() || !placeholder_char(s[q], true)) return 0;
+  while (q < s.size() && placeholder_char(s[q], false)) ++q;
+  if (s.substr(q, k_placeholder_close.size()) != k_placeholder_close) return 0;
+  return q + k_placeholder_close.size() - p;
+}
+
+// The same, for one ending at `e`: its length, 0 for none.
+size_t placeholder_before(std::string_view s, size_t e) {
+  if (e < k_placeholder_close.size() || s.substr(e - k_placeholder_close.size(), k_placeholder_close.size()) != k_placeholder_close) {
+    return 0;
+  }
+  size_t q = e - k_placeholder_close.size();
+  while (q > 0 && placeholder_char(s[q - 1], false)) --q;
+  if (q < k_placeholder_open.size()) return 0;
+  const size_t b = q - k_placeholder_open.size();
+  return placeholder_at(s, b) == e - b ? e - b : 0;
+}
+
+// A schema name as an MSM project writes it: placeholders written against
+// the identifier, before and after it.
+struct Msm_name {
+  std::string prefix;  // the placeholders before the identifier, as written
+  std::string core;    // the identifier, unquoted
+  std::string suffix;  // the placeholders after it
+
+  bool placeholders() const { return !prefix.empty() || !suffix.empty(); }
+};
+
+// `name` read as one; nullopt when no identifier is left between the
+// placeholders, or a placeholder sits inside it.
+std::optional<Msm_name> msm_name(std::string_view name) {
+  Msm_name out;
+  size_t p = 0;
+  while (const size_t n = placeholder_at(name, p)) p += n;
+  out.prefix = std::string(name.substr(0, p));
+  size_t e = name.find(k_placeholder_open, p);
+  if (e == std::string_view::npos) e = name.size();
+  size_t q = e;
+  while (const size_t n = placeholder_at(name, q)) q += n;
+  if (q != name.size()) return std::nullopt;
+  out.core = std::string(name.substr(p, e - p));
+  out.suffix = std::string(name.substr(e));
+  if (out.core.empty()) return std::nullopt;
+  return out;
+}
+
+// The range of the placeholders written against [b, e) in `text`, with it.
+Range with_placeholders(std::string_view text, Range r) {
+  while (const size_t n = placeholder_before(text, r.begin)) r.begin -= static_cast<uint32_t>(n);
+  while (const size_t n = placeholder_at(text, r.end)) r.end += static_cast<uint32_t>(n);
+  return r;
 }
 
 bool is_word_char(char c) {
@@ -1159,11 +1226,30 @@ std::variant<Edit_request, Edit_error> parse_edit_request(std::string_view json)
         name("sequence", &se.sequence);
         name("new_name", &se.new_name);
         break;
+      case Edit_op::rename_schema: {
+        members({"op", "schema", "new_name", "comments"});
+        name("schema", &se.schema);
+        name("new_name", &se.new_name);
+        r.boolean(e, "comments", &se.comments, what);
+        if (r.bad()) return *r.bad();
+        const auto from = msm_name(se.schema);
+        const auto to = msm_name(se.new_name);
+        if (!from) return error(i, "bad-request", "\"schema\" of " + what + " is no schema name: " + se.schema);
+        if (!to) return error(i, "bad-request", "\"new_name\" of " + what + " is no schema name: " + se.new_name);
+        // Substituted, a placeholder joins the identifier: it must be one
+        // that needs no quotes.
+        if (to->placeholders() && quote_identifier(to->core) != to->core) {
+          return error(i, "bad-request",
+                       "the name `" + to->core + "` needs quotes, which a name with MSM placeholders cannot have");
+        }
+        names_to_check.push_back(to->core);
+        break;
+      }
       default:
         break;
     }
     if (r.bad()) return *r.bad();
-    if (!se.new_name.empty()) names_to_check.push_back(se.new_name);
+    if (!se.new_name.empty() && *op != Edit_op::rename_schema) names_to_check.push_back(se.new_name);
     for (const auto &n : names_to_check) {
       if (auto m = bad_name(n)) return error(i, "bad-request", *m);
     }
@@ -1614,7 +1700,7 @@ bool own_line(std::string_view text, Range r) {
 class Editor {
  public:
   Editor(Session &s, const Edit_request &request, Edit_result &result)
-      : m_s(s), m_request(request), m_result(result) {}
+      : m_s(s), m_request(request), m_result(result), m_schema(request.schema) {}
 
   std::optional<Edit_error> run(size_t i) {
     // The op and its self-check see the names the new keys are given.
@@ -1650,6 +1736,7 @@ class Editor {
       case Edit_op::add_sequence: err = add_sequence(i, e, changes); break;
       case Edit_op::drop_sequence: err = drop_sequence(i, e, changes); break;
       case Edit_op::rename_sequence: err = rename_sequence(i, e, changes); break;
+      case Edit_op::rename_schema: err = rename_schema(i, e, changes); break;
       default:
         return error(i, "unsupported", std::string("this binary does not do ") + to_string(e.op) + " yet");
     }
@@ -1663,7 +1750,7 @@ class Editor {
 
  private:
   const Outline &outline() const { return m_s.outline(); }
-  Lookup lookup() const { return Lookup(outline(), m_request.schema); }
+  Lookup lookup() const { return Lookup(outline(), m_schema); }
 
   // The object a definition's name stands for, resolved as rename does.
   std::optional<Object_id> resolve(const Origin &o, Target_kind expected) {
@@ -1689,32 +1776,50 @@ class Editor {
     return r.id;
   }
 
+  // A name that refers to an object, in the current text of a file.
+  struct Spelled {
+    size_t file = 0;
+    Range range;
+    std::string token;  // as written
+  };
+
+  // Every name referring to `id`, once per place in a file (one a file
+  // included twice gives twice); nullopt with the token when one does not
+  // spell `id`'s name.
+  std::variant<std::vector<Spelled>, std::string> spelled_references(const Object_id &id) {
+    std::vector<Spelled> out;
+    std::set<std::tuple<size_t, uint32_t, uint32_t>> seen;
+    for (const auto &r : references_in_text(id)) {
+      const auto m = outline().map(r.range);
+      const auto file = m_s.file_of(m.source);
+      if (!file) continue;
+      if (!seen.insert({*file, m.range.begin, m.range.end}).second) continue;
+      const std::string_view text = m_s.files()[*file].log.text();
+      if (m.range.end > text.size()) continue;
+      const std::string_view token = text.substr(m.range.begin, m.range.end - m.range.begin);
+      if (!iequals(unquote_name(token), id.name)) return std::string(token);
+      out.push_back({*file, m.range, std::string(token)});
+    }
+    return out;
+  }
+
   // Every name referring to `id`, by file, each rewritten to `new_name`;
   // `definition` must be among them.
   std::optional<Edit_error> rewrite_references(size_t edit, const Object_id &id,
                                                const Origin &definition, const std::string &new_name,
                                                Changes &changes) {
-    const auto refs = references_in_text(id);
-    std::set<std::tuple<size_t, uint32_t, uint32_t>> seen;
+    auto refs = spelled_references(id);
+    if (auto *bad = std::get_if<std::string>(&refs)) {
+      return error(edit, "self-check", "a reference to `" + id.name + "` does not spell it: " + *bad);
+    }
     bool definition_found = false;
     const auto def_file = m_s.file_of(definition.source);
-    for (const auto &r : refs) {
-      const auto m = outline().map(r.range);
-      const auto file = m_s.file_of(m.source);
-      if (!file) continue;
-      if (!seen.insert({*file, m.range.begin, m.range.end}).second) continue;
-      const std::string &text = m_s.files()[*file].log.text();
-      if (m.range.end > text.size()) continue;
-      const std::string_view token = std::string_view(text).substr(m.range.begin, m.range.end - m.range.begin);
-      if (!iequals(unquote_name(token), id.name)) {
-        return error(edit, "self-check",
-                     "a reference to `" + id.name + "` does not spell it: " + std::string(token));
-      }
-      if (def_file && *file == *def_file && m.range.begin <= definition.name.end &&
-          m.range.end >= definition.name.begin) {
+    for (const auto &r : std::get<std::vector<Spelled>>(refs)) {
+      if (def_file && r.file == *def_file && r.range.begin <= definition.name.end &&
+          r.range.end >= definition.name.begin) {
         definition_found = true;
       }
-      changes[*file].push_back({m.range.begin, m.range.end, spell_like(token, new_name)});
+      changes[r.file].push_back({r.range.begin, r.range.end, spell_like(r.token, new_name)});
     }
     if (!definition_found) {
       return error(edit, "self-check", "the definition of `" + id.name + "` was not found among its references");
@@ -1961,6 +2066,99 @@ class Editor {
     m_old_name = old_name;
     m_routine_kind = routine->kind;
     return std::nullopt;
+  }
+
+  // Every name that resolves to the schema, as the other renames find
+  // theirs: USE, CREATE|ALTER|DROP DATABASE, qualifiers, GRANT ... ON s.*,
+  // REST SQL.  A name written with MSM placeholders against it matches
+  // when they are the request's, and is rewritten with them.
+  std::optional<Edit_error> rename_schema(size_t i, const Schema_edit &e, Changes &changes) {
+    const Msm_name from = *msm_name(e.schema);  // checked by parse_edit_request
+    const Msm_name to = *msm_name(e.new_name);
+    if (!iequals(from.core, to.core) && outline().catalog.find(to.core) != nullptr) {
+      return error(i, "name-taken", "a schema `" + to.core + "` exists");
+    }
+    // The same identifier with other placeholders is another schema once
+    // msm substitutes them: renaming to it would merge the two.
+    if (iequals(from.core, to.core) && (from.prefix != to.prefix || from.suffix != to.suffix)) {
+      const auto taken = schema_references(to);
+      const auto *v = std::get_if<std::vector<Spelled>>(&taken);
+      if (v == nullptr || !v->empty()) return error(i, "name-taken", "the script names a schema `" + e.new_name + "`");
+    }
+    auto refs = schema_references(from);
+    if (auto *bad = std::get_if<std::string>(&refs)) {
+      return error(i, "self-check", "a reference to `" + from.core + "` does not spell it: " + *bad);
+    }
+    const auto &found = std::get<std::vector<Spelled>>(refs);
+    if (found.empty()) return error(i, "unknown-object", "the script does not name a schema `" + e.schema + "`");
+    for (const auto &r : found) {
+      changes[r.file].push_back(
+          {r.range.begin, r.range.end,
+           to.prefix + (to.placeholders() ? to.core : spell_like(r.token, to.core)) + to.suffix});
+    }
+    m_count = found.size();
+    string_notes(i, {from.core}, "schema `" + from.core + "`");
+    if (e.comments) rename_in_comments(from, to, changes);
+    return std::nullopt;
+  }
+
+  // The names that resolve to schema `name` written with exactly its
+  // placeholders, each range taking them in; or the token that does not
+  // spell it.
+  std::variant<std::vector<Spelled>, std::string> schema_references(const Msm_name &name) {
+    auto refs = spelled_references({Target_kind::schema, name.core, "", name.core});
+    auto *all = std::get_if<std::vector<Spelled>>(&refs);
+    if (all == nullptr) return refs;
+    std::vector<Spelled> out;
+    for (auto &r : *all) {
+      // Other placeholders make it another schema once msm substitutes them.
+      const std::string_view text = m_s.files()[r.file].log.text();
+      const Range w = with_placeholders(text, r.range);
+      if (text.substr(w.begin, r.range.begin - w.begin) != name.prefix ||
+          text.substr(r.range.end, w.end - r.range.end) != name.suffix) {
+        continue;
+      }
+      r.range = w;
+      out.push_back(std::move(r));
+    }
+    return out;
+  }
+
+  // The schema's name in backticks in a comment, alone or as a qualifier
+  // (`s`, `s`.`t`, not `t`.`s`): MSM's banners.  With placeholders there,
+  // they must be the request's; a name without them is renamed to the new
+  // name without them.  The comments are those semantic tokens finds, in
+  // the statements that hold the name and a backtick.
+  void rename_in_comments(const Msm_name &from, const Msm_name &to, Changes &changes) {
+    const std::string_view all = text();
+    std::vector<Semantic_token> tokens;
+    for (size_t k = 0; k < index().statements().size(); ++k) {
+      const std::string_view st = index().text_of(all, statement(k));
+      if (st.find('`') == std::string_view::npos || !icontains(st, from.core)) continue;
+      tokens.clear();
+      statement_semantic_tokens(all, index(), k, m_s.cache(), m_s.options().index.version_id, &tokens);
+      for (const auto &t : tokens) {
+        const std::string_view c = all.substr(t.begin, t.end - t.begin);
+        if (t.type != Token_type::comment || c.starts_with("/*+")) continue;  // not an optimizer hint
+        const bool block = c.starts_with("/*");
+        for (size_t b = t.begin; b < t.end; ++b) {
+          if (all[b] != '`') continue;
+          size_t q = b + 1;  // past the closing backtick, `` doubled
+          while (q < t.end && (all[q] != '`' || (q + 1 < t.end && all[q + 1] == '`'))) q += all[q] == '`' ? 2 : 1;
+          if (q >= t.end) break;
+          const auto n = msm_name(unquote_name(all.substr(b, q + 1 - b)));
+          const bool bare = n && !n->placeholders();
+          const bool same = n && iequals(n->core, from.core) &&
+                            (bare || (n->prefix == from.prefix && n->suffix == from.suffix));
+          const std::string quoted = backtick_quote(bare ? to.core : to.prefix + to.core + to.suffix);
+          const bool qualified = b > t.begin && all[b - 1] == '.';
+          if (same && !qualified && !(block && quoted.find("*/") != std::string::npos)) {
+            change(changes, static_cast<uint32_t>(b), static_cast<uint32_t>(q + 1), quoted);
+          }
+          b = q;
+        }
+      }
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -4435,6 +4633,22 @@ class Editor {
       case Edit_op::drop_sequence:
         if (l.sequence(old_name).second != nullptr) return fail("the edited script still has sequence `" + old_name + "`");
         break;
+      case Edit_op::rename_schema: {
+        // Each name renamed now resolves to the new one.
+        const auto refs = schema_references(*msm_name(e.new_name));
+        const auto *found = std::get_if<std::vector<Spelled>>(&refs);
+        if (found == nullptr || found->size() < m_count) {
+          return fail("the edited script does not name schema `" + e.new_name + "` where it named `" + e.schema + "`");
+        }
+        // The request's schema follows the rename once nothing names it by
+        // the old name: renaming a bare `shop` leaves the one with
+        // placeholders, which the outline also calls `shop`.
+        const Msm_name from = *msm_name(e.schema);
+        if (iequals(m_schema, from.core) && outline().catalog.find(from.core) == nullptr) {
+          m_schema = msm_name(e.new_name)->core;
+        }
+        break;
+      }
       case Edit_op::rename_sequence: {
         const Sequence *q = l.sequence(e.new_name).second;
         if (q == nullptr || q->name != e.new_name) return fail("the edited script has no sequence `" + e.new_name + "`");
@@ -4468,13 +4682,15 @@ class Editor {
   Session &m_s;
   const Edit_request &m_request;
   Edit_result &m_result;
+  // The request's schema, under its new name once rename_schema renamed it.
+  std::string m_schema;
   // Of the edit being run, for verify().
   std::string m_old_name;
   std::string m_routine_kind;
   std::vector<std::pair<std::string, std::string>> m_default_columns;  // rename_sequence: (table, column)
   size_t m_position = 0;     // add_column: where the column goes
   size_t m_columns = 0;      // add_column, drop_column: the table's columns before
-  size_t m_count = 0;        // add_/drop_index, add_/drop_foreign_key: the table's keys before
+  size_t m_count = 0;        // add_/drop_index, add_/drop_foreign_key: the table's keys before; rename_schema: names renamed
   bool m_in_primary = false; // modify_column: the column is in the primary key
 };
 

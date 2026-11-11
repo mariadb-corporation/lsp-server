@@ -133,7 +133,7 @@ class Edit_fixture(unittest.TestCase):
         self.assertIn("drop_routine", ops)
         self.assertIn("set_primary_key", ops)
         for op in ("add_trigger", "drop_trigger", "rename_trigger", "add_event", "drop_event", "rename_event",
-                   "add_sequence", "drop_sequence", "rename_sequence"):
+                   "add_sequence", "drop_sequence", "rename_sequence", "rename_schema"):
             self.assertIn(op, ops)
 
     def test_ops_as_json(self):
@@ -172,6 +172,26 @@ class Edit_fixture(unittest.TestCase):
         self.assertIn("CREATE TABLE client (", tables)
         self.assertIn("  full_name VARCHAR(40)", tables)
         self.assertIn("REFERENCES client (id)", tables)
+
+    def test_rename_schema(self):
+        # The script writes the schema with MSM placeholders; 170_roles.sql
+        # names a bare `shop`, which is another schema once msm substitutes
+        # them.  Each rename takes only its own.
+        code, result = self.p.edit([{"op": "rename_schema", "schema": "shop", "new_name": "shop_ro"}], "shop")
+        self.assertEqual(code, 0, result)
+        self.assertEqual([f["file"] for f in result["files"] if f["edits"]], ["sections/170_roles.sql"])
+        self.p.apply(result)
+        self.assertIn("GRANT SELECT ON shop_ro.customer TO shop_reader;",
+                      (self.p.dev / "sections" / "170_roles.sql").read_text())
+        old = "/*<msm:schema_prefix>*/shop/*<msm:schema_postfix>*/"
+        new = "/*<msm:schema_prefix>*/store/*<msm:schema_postfix>*/"
+        code, result = self.p.edit([{"op": "rename_schema", "schema": old, "new_name": new}], "shop")
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["migration"], [])
+        self.assertEqual([f["file"] for f in result["files"] if f["edits"]], ["-"])
+        self.p.apply(result)
+        self.assertIn("USE " + new + ";", self.p.script)
+        self.assertEqual(self.p.outline(), result["outline"])
 
     def test_all_or_nothing(self):
         code, result = self.p.edit([
@@ -517,6 +537,24 @@ class Edit_mrs_project(unittest.TestCase):
                  if fk["references"]["table"] == "url_hosts"]), len(fks))
         self.assertNotIn("url_host", table_names(after))
         # The edited project still checks.
+        check = self.p.run("check", "--source-dir", str(self.p.dev), "-")
+        self.assertEqual(check.returncode, 0, check.stdout.decode())
+
+    def test_rename_the_schema(self):
+        old = "/*<msm:schema_prefix>*/mariadb_rest_service/*<msm:schema_postfix>*/"
+        new = "/*<msm:schema_prefix>*/mrs_renamed/*<msm:schema_postfix>*/"
+        code, result = self.p.edit([{"op": "rename_schema", "schema": old, "new_name": new, "comments": True}],
+                                   "mariadb_rest_service")
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["migration"], [])
+        self.p.apply(result)
+        after = self.p.outline()
+        self.assertEqual(after, result["outline"])
+        self.assertEqual([s["name"] for s in after["schemas"] if s["name"]], ["mrs_renamed"])
+        # The banner, CREATE SCHEMA and USE: nothing names the old one.
+        self.assertIn("-- `mrs_renamed`", self.p.script)
+        self.assertNotIn("mariadb_rest_service`", self.p.script)
+        self.assertNotIn("mariadb_rest_service/", self.p.script)
         check = self.p.run("check", "--source-dir", str(self.p.dev), "-")
         self.assertEqual(check.returncode, 0, check.stdout.decode())
 

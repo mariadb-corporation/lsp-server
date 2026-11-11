@@ -558,3 +558,20 @@ Only the foreign key re-add broke that; an index or primary key dropped and adde
 foreign key then its index dropped, and `DROP FOREIGN KEY` merged with the column's change all
 hold. Around `modify_column` the key's `ADD CONSTRAINT` is now its own statement after the
 merged drop and change.
+
+**Renaming the schema, 2026-11-11 (asked for by mariadb-shell-plugins for `msm.rename_schema`,
+which renames a project's schema before its first release):** `rename_schema` with `schema`,
+`new_name` and an optional `comments`. The references come from `find_references` with a
+schema `Object_id`, as for the other renames; `sql_names` now also classifies `GRANT ... ON
+s.*` (`grant_ident`), `ALTER DATABASE s` (`ident_or_empty`), REST SQL's `FROM s` of `CREATE`
+and `ALTER REST SCHEMA` and the `s` of a REST object's `AS s.o`, which the language server's
+references and rename get too. A project's schema name may hold msm's placeholders
+(`/*<msm:schema_prefix>*/shop/*<msm:schema_postfix>*/`): the lexer reads them as comments
+before and after the identifier, so the op matches a hit only when the placeholders written
+against it are the request's, and rewrites them with the identifier (`Msm_name`,
+`with_placeholders`). With `comments`, backtick-quoted names in comments (the gaps between
+the lexer's tokens) are renamed, bare or with the request's placeholders, alone or as a
+qualifier, for msm's banners; off by default, since nothing else here edits comments. No
+migration: msm builds one for released projects if it needs it. The self-check counts the
+references to the new name with its placeholders.
+

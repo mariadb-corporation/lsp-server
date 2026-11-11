@@ -68,6 +68,7 @@ enum class Edit_op {
   add_sequence,
   drop_sequence,
   rename_sequence,
+  rename_schema,
 };
 
 // The request's `op` spelling; nullopt for an unknown one.
@@ -91,6 +92,8 @@ struct Schema_edit {
   std::string trigger;       // drop_trigger, rename_trigger
   std::string event;         // drop_event, rename_event
   std::string sequence;      // drop_sequence, rename_sequence
+  std::string schema;        // rename_schema, MSM placeholders included
+  bool comments = false;     // rename_schema: also `schema` in comments
   std::string new_name;
   // add_table: the table; its columns, keys, checks, options.
   std::optional<Table> new_table;
