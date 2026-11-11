@@ -110,7 +110,7 @@ an included statement where its directive stands):
 | `unknown-table` | `false` for `ALTER TABLE` and `CREATE INDEX`, `true` for `CREATE TABLE ... LIKE` | the statement names a table the file does not create; the `LIKE` still creates its table, empty |
 | `include-unreadable` | `false` | a `SOURCE` file cannot be read; the note is on the directive |
 | `include-nested` | `false` | a `SOURCE` directive in an included text, which msm does not expand; the note is on that directive, in its file |
-| `rest-none-in-use` | `false` | a REST statement names no service (or no schema) and none is in use, where MariaDB Shell fails with "No REST SERVICE specified" (or "No REST schema given"); see [REST objects](#rest-objects) |
+| `rest-none-in-use` | `false` | a REST statement names no service (or no schema) and none is in use, where MariaDB Shell fails ("No REST SERVICE specified.", "No REST schema given."); see [REST objects](#rest-objects) |
 | `unknown-rest-service` | `false` | an `ALTER REST SERVICE` names a service the file does not create |
 
 A kind is never removed or renamed within format 1; new kinds may be added, so a consumer that
@@ -240,7 +240,7 @@ in MariaDB Shell. Paths and names compare without regard to case, as on the serv
 `CREATE` and `ALTER REST SERVICE`. A `CREATE OR REPLACE REST SERVICE` of a service the file has
 updates it in place, as MariaDB Shell does: its schemas, content sets and the links the
 statement does not name stay. `CREATE REST SERVICE IF NOT EXISTS` of such a service changes
-nothing. `ALTER REST SERVICE ... NEW REQUEST PATH` renames the service. `DROP REST AUTH APP`
+nothing, as does `CREATE REST SCHEMA IF NOT EXISTS` of a schema it has. `ALTER REST SERVICE ... NEW REQUEST PATH` renames the service. `DROP REST AUTH APP`
 also unlinks the app from every service.
 
 The service and schema a statement does not name are resolved as MariaDB Shell's MRS DDL

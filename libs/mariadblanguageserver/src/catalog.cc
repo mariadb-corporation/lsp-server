@@ -1655,11 +1655,11 @@ bool Catalog_fold::rest(uint32_t n) {
   // "CREATE REST VIEW /v".
   auto what = [&]() {
     uint32_t first = npos;
-    for (const int sym : {s_.mrs_service_request_path, s_.mrs_schema_request_path,
-                          s_.mrs_view_request_path, s_.mrs_procedure_request_path,
-                          s_.mrs_function_request_path, s_.mrs_content_set_request_path,
-                          s_.mrs_identifier}) {
-      const uint32_t p = find(st, sym);
+    for (const int path_sym : {s_.mrs_service_request_path, s_.mrs_schema_request_path,
+                               s_.mrs_view_request_path, s_.mrs_procedure_request_path,
+                               s_.mrs_function_request_path, s_.mrs_content_set_request_path,
+                               s_.mrs_identifier}) {
+      const uint32_t p = find(st, path_sym);
       if (p != npos && (first == npos || t_.begin(p) < t_.begin(first))) first = p;
     }
     return first == npos ? text(st) : text_span(t_.begin(st), first);
@@ -1706,12 +1706,14 @@ bool Catalog_fold::rest(uint32_t n) {
     upsert_named(v, Named_object{name_at(p), origin(p)});
   };
   // ADD AUTH APP links (a linked app stays linked, its range moves to this
-  // statement), then REMOVE AUTH APP unlinks, as the shell does.
-  auto link_auth_apps = [&](Rest_service &svc) {
+  // statement), then REMOVE AUTH APP unlinks, as the shell does; a CREATE
+  // of a new service ignores REMOVE (`removes` false), as the shell does.
+  auto link_auth_apps = [&](Rest_service &svc, bool removes = true) {
     for (const uint32_t a : find_all(st, s_.mrs_add_auth_app)) {
       const uint32_t p = find(a, s_.mrs_auth_app_name);
       upsert_named(svc.auth_apps, Named_object{name_at(p), origin(p)});
     }
+    if (!removes) return;
     for (const uint32_t r : find_all(st, s_.mrs_remove_auth_app)) {
       erase_named(svc.auth_apps, name_at(find(r, s_.mrs_auth_app_name)));
     }
@@ -1722,10 +1724,11 @@ bool Catalog_fold::rest(uint32_t n) {
     // service in place: its schemas, content sets and the links the
     // statement does not name stay.  IF NOT EXISTS keeps it as it is.
     const uint32_t prefix = child(st, s_.mrs_create_rest_service_prefix);
-    if (c_.find_service(service_path) != nullptr && find(prefix, s_.IF_SYM) != npos) return true;
+    const bool existed = c_.find_service(service_path) != nullptr;
+    if (existed && find(prefix, s_.IF_SYM) != npos) return true;
     Rest_service &svc = c_.service(service_path);
     svc.origin = origin(find(st, s_.mrs_service_request_path));
-    link_auth_apps(svc);
+    link_auth_apps(svc, existed);
     return true;
   }
   if (sym == s_.mrs_alter_rest_service_statement) {
@@ -1771,6 +1774,8 @@ bool Catalog_fold::rest(uint32_t n) {
     rs.path = schema_node != npos ? schema_path : "/" + rs.schema;
     rs.origin = origin(schema_node != npos ? schema_node : child(st, s_.mrs_identifier));
     if (Rest_schema *it = find_rest_schema(svc, rs.path)) {
+      // IF NOT EXISTS keeps the schema as it is, as the shell does.
+      if (find(child(st, s_.mrs_create_rest_schema_prefix), s_.IF_SYM) != npos) return true;
       rs.objects = std::move(it->objects);
       *it = std::move(rs);
     } else {
@@ -1835,7 +1840,7 @@ bool Catalog_fold::rest(uint32_t n) {
     const auto svc_path = service_named();
     if (!svc_path) return false;
     if (Rest_service *svc = c_.find_service(*svc_path)) {
-      erase_named(svc->content_sets, text(find(st, s_.mrs_content_set_request_path)));
+      erase_named(svc->content_sets, name_at(find(st, s_.mrs_content_set_request_path)));
     }
     return true;
   }

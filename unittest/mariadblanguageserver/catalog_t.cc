@@ -336,6 +336,26 @@ TEST(Catalog, rest_current_service_and_schema) {
   EXPECT_NE(std::string::npos, o.notes[4].message.find("names no REST SCHEMA")) << o.notes[4].message;
 }
 
+// CREATE REST SCHEMA IF NOT EXISTS keeps a schema the file has; DROP REST
+// CONTENT SET matches the unquoted path; a CREATE of a new service ignores
+// REMOVE AUTH APP, as MariaDB Shell does.
+TEST(Catalog, rest_if_not_exists_and_quoted_paths) {
+  const auto o = outline_of(
+      "CREATE REST SERVICE /n ADD AUTH APP a REMOVE AUTH APP a;\n"
+      "CREATE REST SCHEMA /s ON SERVICE /n FROM sakila;\n"
+      "CREATE REST SCHEMA IF NOT EXISTS /s ON SERVICE /n FROM world;\n"
+      "CREATE REST CONTENT SET '/cs' ON SERVICE /n;\n"
+      "DROP REST CONTENT SET '/cs' FROM SERVICE /n;\n");
+  EXPECT_TRUE(o.notes.empty());
+  const auto &svcs = o.catalog.rest_services();
+  ASSERT_EQ(1u, svcs.size());
+  ASSERT_EQ(1u, svcs[0].schemas.size());
+  EXPECT_EQ("sakila", svcs[0].schemas[0].schema);
+  EXPECT_TRUE(svcs[0].content_sets.empty());
+  ASSERT_EQ(1u, svcs[0].auth_apps.size());
+  EXPECT_EQ("a", svcs[0].auth_apps[0].name);
+}
+
 TEST(Catalog, named_key_replaces_its_namesake) {
   const auto o = outline_of(
       "CREATE TABLE t (a INT, b INT, KEY k (a), KEY k (b), UNIQUE (a), UNIQUE (b));\n");
