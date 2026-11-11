@@ -37,6 +37,7 @@
 #include "mdbls/keywords.h"
 #include "mdbls/lsp/json_position.h"
 #include "mdbls/navigation.h"
+#include "mdbls/semantic_tokens.h"
 #include "mdbls/sql_names.h"
 #include "mdbls/syntax_tree.h"
 #include "mdbls/workspace_catalog.h"
@@ -109,15 +110,32 @@ std::string spell_like(std::string_view token, std::string_view name) {
 
 // MSM placeholders, /*<msm:name>*/, that msm substitutes in a project's
 // schema name: the length of the one starting at `p`, 0 for none.
+constexpr std::string_view k_placeholder_open = "/*<msm:", k_placeholder_close = ">*/";
+
+bool placeholder_char(char c, bool first) {
+  const auto u = static_cast<unsigned char>(c);
+  return std::isalpha(u) || c == '_' || (!first && std::isdigit(u));
+}
+
 size_t placeholder_at(std::string_view s, size_t p) {
-  constexpr std::string_view open = "/*<msm:", close = ">*/";
-  if (s.substr(p, open.size()) != open) return 0;
-  size_t q = p + open.size();
-  auto alpha = [](char c) { return std::isalpha(static_cast<unsigned char>(c)) || c == '_'; };
-  if (q >= s.size() || !alpha(s[q])) return 0;
-  while (q < s.size() && (alpha(s[q]) || std::isdigit(static_cast<unsigned char>(s[q])))) ++q;
-  if (s.substr(q, close.size()) != close) return 0;
-  return q + close.size() - p;
+  if (s.substr(p, k_placeholder_open.size()) != k_placeholder_open) return 0;
+  size_t q = p + k_placeholder_open.size();
+  if (q >= s.size() || !placeholder_char(s[q], true)) return 0;
+  while (q < s.size() && placeholder_char(s[q], false)) ++q;
+  if (s.substr(q, k_placeholder_close.size()) != k_placeholder_close) return 0;
+  return q + k_placeholder_close.size() - p;
+}
+
+// The same, for one ending at `e`: its length, 0 for none.
+size_t placeholder_before(std::string_view s, size_t e) {
+  if (e < k_placeholder_close.size() || s.substr(e - k_placeholder_close.size(), k_placeholder_close.size()) != k_placeholder_close) {
+    return 0;
+  }
+  size_t q = e - k_placeholder_close.size();
+  while (q > 0 && placeholder_char(s[q - 1], false)) --q;
+  if (q < k_placeholder_open.size()) return 0;
+  const size_t b = q - k_placeholder_open.size();
+  return placeholder_at(s, b) == e - b ? e - b : 0;
 }
 
 // A schema name as an MSM project writes it: placeholders written against
@@ -128,7 +146,6 @@ struct Msm_name {
   std::string suffix;  // the placeholders after it
 
   bool placeholders() const { return !prefix.empty() || !suffix.empty(); }
-  std::string full() const { return prefix + core + suffix; }
 };
 
 // `name` read as one; nullopt when no identifier is left between the
@@ -138,13 +155,11 @@ std::optional<Msm_name> msm_name(std::string_view name) {
   size_t p = 0;
   while (const size_t n = placeholder_at(name, p)) p += n;
   out.prefix = std::string(name.substr(0, p));
-  size_t e = name.find("/*<msm:", p);
+  size_t e = name.find(k_placeholder_open, p);
   if (e == std::string_view::npos) e = name.size();
-  for (size_t q = e; q < name.size();) {
-    const size_t n = placeholder_at(name, q);
-    if (n == 0) return std::nullopt;
-    q += n;
-  }
+  size_t q = e;
+  while (const size_t n = placeholder_at(name, q)) q += n;
+  if (q != name.size()) return std::nullopt;
   out.core = std::string(name.substr(p, e - p));
   out.suffix = std::string(name.substr(e));
   if (out.core.empty()) return std::nullopt;
@@ -153,14 +168,7 @@ std::optional<Msm_name> msm_name(std::string_view name) {
 
 // The range of the placeholders written against [b, e) in `text`, with it.
 Range with_placeholders(std::string_view text, Range r) {
-  for (bool more = true; more;) {
-    more = false;
-    const size_t q = r.begin < 3 ? std::string_view::npos : text.rfind("/*<msm:", r.begin - 3);
-    if (q != std::string_view::npos && placeholder_at(text, q) == r.begin - q) {
-      r.begin = static_cast<uint32_t>(q);
-      more = true;
-    }
-  }
+  while (const size_t n = placeholder_before(text, r.begin)) r.begin -= static_cast<uint32_t>(n);
   while (const size_t n = placeholder_at(text, r.end)) r.end += static_cast<uint32_t>(n);
   return r;
 }
@@ -1768,32 +1776,50 @@ class Editor {
     return r.id;
   }
 
+  // A name that refers to an object, in the current text of a file.
+  struct Spelled {
+    size_t file = 0;
+    Range range;
+    std::string token;  // as written
+  };
+
+  // Every name referring to `id`, once per place in a file (one a file
+  // included twice gives twice); nullopt with the token when one does not
+  // spell `id`'s name.
+  std::variant<std::vector<Spelled>, std::string> spelled_references(const Object_id &id) {
+    std::vector<Spelled> out;
+    std::set<std::tuple<size_t, uint32_t, uint32_t>> seen;
+    for (const auto &r : references_in_text(id)) {
+      const auto m = outline().map(r.range);
+      const auto file = m_s.file_of(m.source);
+      if (!file) continue;
+      if (!seen.insert({*file, m.range.begin, m.range.end}).second) continue;
+      const std::string_view text = m_s.files()[*file].log.text();
+      if (m.range.end > text.size()) continue;
+      const std::string_view token = text.substr(m.range.begin, m.range.end - m.range.begin);
+      if (!iequals(unquote_name(token), id.name)) return std::string(token);
+      out.push_back({*file, m.range, std::string(token)});
+    }
+    return out;
+  }
+
   // Every name referring to `id`, by file, each rewritten to `new_name`;
   // `definition` must be among them.
   std::optional<Edit_error> rewrite_references(size_t edit, const Object_id &id,
                                                const Origin &definition, const std::string &new_name,
                                                Changes &changes) {
-    const auto refs = references_in_text(id);
-    std::set<std::tuple<size_t, uint32_t, uint32_t>> seen;
+    auto refs = spelled_references(id);
+    if (auto *bad = std::get_if<std::string>(&refs)) {
+      return error(edit, "self-check", "a reference to `" + id.name + "` does not spell it: " + *bad);
+    }
     bool definition_found = false;
     const auto def_file = m_s.file_of(definition.source);
-    for (const auto &r : refs) {
-      const auto m = outline().map(r.range);
-      const auto file = m_s.file_of(m.source);
-      if (!file) continue;
-      if (!seen.insert({*file, m.range.begin, m.range.end}).second) continue;
-      const std::string &text = m_s.files()[*file].log.text();
-      if (m.range.end > text.size()) continue;
-      const std::string_view token = std::string_view(text).substr(m.range.begin, m.range.end - m.range.begin);
-      if (!iequals(unquote_name(token), id.name)) {
-        return error(edit, "self-check",
-                     "a reference to `" + id.name + "` does not spell it: " + std::string(token));
-      }
-      if (def_file && *file == *def_file && m.range.begin <= definition.name.end &&
-          m.range.end >= definition.name.begin) {
+    for (const auto &r : std::get<std::vector<Spelled>>(refs)) {
+      if (def_file && r.file == *def_file && r.range.begin <= definition.name.end &&
+          r.range.end >= definition.name.begin) {
         definition_found = true;
       }
-      changes[*file].push_back({m.range.begin, m.range.end, spell_like(token, new_name)});
+      changes[r.file].push_back({r.range.begin, r.range.end, spell_like(r.token, new_name)});
     }
     if (!definition_found) {
       return error(edit, "self-check", "the definition of `" + id.name + "` was not found among its references");
@@ -2049,49 +2075,45 @@ class Editor {
   std::optional<Edit_error> rename_schema(size_t i, const Schema_edit &e, Changes &changes) {
     const Msm_name from = *msm_name(e.schema);  // checked by parse_edit_request
     const Msm_name to = *msm_name(e.new_name);
-    auto known = [&](const std::string &name) {
-      const auto &all = outline().catalog.schemas();
-      return std::any_of(all.begin(), all.end(), [&](const Schema &x) { return iequals(x.name, name); });
-    };
-    if (!iequals(from.core, to.core) && known(to.core)) {
+    if (!iequals(from.core, to.core) && outline().catalog.find(to.core) != nullptr) {
       return error(i, "name-taken", "a schema `" + to.core + "` exists");
     }
-    const auto refs = schema_references(from);
-    if (!refs) return error(i, "self-check", "a reference to `" + from.core + "` does not spell it");
-    for (const auto &[file, w, token] : *refs) {
-      changes[file].push_back(
-          {w.begin, w.end, to.prefix + (to.placeholders() ? to.core : spell_like(token, to.core)) + to.suffix});
+    auto refs = schema_references(from);
+    if (auto *bad = std::get_if<std::string>(&refs)) {
+      return error(i, "self-check", "a reference to `" + from.core + "` does not spell it: " + *bad);
     }
-    const size_t renamed = refs->size();
-    if (renamed == 0) return error(i, "unknown-object", "the script does not name a schema `" + e.schema + "`");
-    m_count = renamed;
+    const auto &found = std::get<std::vector<Spelled>>(refs);
+    if (found.empty()) return error(i, "unknown-object", "the script does not name a schema `" + e.schema + "`");
+    for (const auto &r : found) {
+      changes[r.file].push_back(
+          {r.range.begin, r.range.end,
+           to.prefix + (to.placeholders() ? to.core : spell_like(r.token, to.core)) + to.suffix});
+    }
+    m_count = found.size();
     string_notes(i, {from.core}, "schema `" + from.core + "`");
     if (e.comments) rename_in_comments(from, to, changes);
-    m_old_name = from.core;
     if (iequals(m_schema, from.core)) m_schema = to.core;
     return std::nullopt;
   }
 
-  // The names that resolve to schema `name`, written with its placeholders:
-  // (file, range with the placeholders, the identifier's token) in the
-  // current texts; nullopt when one does not spell it.
-  std::optional<std::vector<std::tuple<size_t, Range, std::string>>> schema_references(const Msm_name &name) {
-    std::vector<std::tuple<size_t, Range, std::string>> out;
-    for (const auto &r : references_in_text({Target_kind::schema, name.core, "", name.core})) {
-      const auto m = outline().map(r.range);
-      const auto file = m_s.file_of(m.source);
-      if (!file) continue;
-      const std::string_view text = m_s.files()[*file].log.text();
-      if (m.range.end > text.size()) continue;
-      const std::string_view token = text.substr(m.range.begin, m.range.end - m.range.begin);
-      if (!iequals(unquote_name(token), name.core)) return std::nullopt;
+  // The names that resolve to schema `name` written with exactly its
+  // placeholders, each range taking them in; or the token that does not
+  // spell it.
+  std::variant<std::vector<Spelled>, std::string> schema_references(const Msm_name &name) {
+    auto refs = spelled_references({Target_kind::schema, name.core, "", name.core});
+    auto *all = std::get_if<std::vector<Spelled>>(&refs);
+    if (all == nullptr) return refs;
+    std::vector<Spelled> out;
+    for (auto &r : *all) {
       // Other placeholders make it another schema once msm substitutes them.
-      const Range w = with_placeholders(text, m.range);
-      if (text.substr(w.begin, m.range.begin - w.begin) != name.prefix ||
-          text.substr(m.range.end, w.end - m.range.end) != name.suffix) {
+      const std::string_view text = m_s.files()[r.file].log.text();
+      const Range w = with_placeholders(text, r.range);
+      if (text.substr(w.begin, r.range.begin - w.begin) != name.prefix ||
+          text.substr(r.range.end, w.end - r.range.end) != name.suffix) {
         continue;
       }
-      out.emplace_back(*file, w, std::string(token));
+      r.range = w;
+      out.push_back(std::move(r));
     }
     return out;
   }
@@ -2099,83 +2121,38 @@ class Editor {
   // The schema's name in backticks in a comment, alone or as a qualifier
   // (`s`, `s`.`t`, not `t`.`s`): MSM's banners.  With placeholders there,
   // they must be the request's; a name without them is renamed to the new
-  // name without them.  Comments are what lies
-  // between the tokens of the searched text.
+  // name without them.  The comments are those semantic tokens finds, in
+  // the statements that hold the name and a backtick.
   void rename_in_comments(const Msm_name &from, const Msm_name &to, Changes &changes) {
     const std::string_view all = text();
-    std::vector<Range> code;
-    for (const auto &st : index().statements()) {
-      if (st.kind != Statement_kind::sql) continue;
-      const std::string_view sql = index().text_of(all, st);
-      mdbp_parser *p = m_s.cache().get(index().modes()[st.mode].mode, m_s.options().index.version_id, false);
-      mdbp_result r;
-      if (p == nullptr || mdbp_lex_sql(p, sql.data(), sql.size(), &r) != MDBP_OK || r.tokens == nullptr) {
-        code.push_back({st.begin, st.begin + static_cast<uint32_t>(sql.size())});  // not read: left alone
-        continue;
-      }
-      for (size_t k = 0; k < r.ntokens; ++k) {
-        const auto &t = r.tokens[k];
-        if (t.byte_start < 0 || t.byte_end <= t.byte_start) continue;
-        code.push_back({st.begin + static_cast<uint32_t>(t.byte_start), st.begin + static_cast<uint32_t>(t.byte_end)});
-      }
-    }
-    std::sort(code.begin(), code.end(), [](const Range &a, const Range &b) { return a.begin < b.begin; });
-    // The names in the comment [b, e).
-    auto in_comment = [&](size_t b, size_t e, bool block) {
-      for (size_t k = b; k < e; ++k) {
-        if (all[k] != '`') continue;
-        std::string name;
-        size_t j = k + 1;
-        for (; j < e; ++j) {
-          if (all[j] != '`') {
-            name += all[j];
-          } else if (j + 1 < e && all[j + 1] == '`') {
-            name += '`';
-            ++j;
-          } else {
-            break;
+    std::vector<Semantic_token> tokens;
+    for (size_t k = 0; k < index().statements().size(); ++k) {
+      const std::string_view st = index().text_of(all, statement(k));
+      if (st.find('`') == std::string_view::npos || !icontains(st, from.core)) continue;
+      tokens.clear();
+      statement_semantic_tokens(all, index(), k, m_s.cache(), m_s.options().index.version_id, &tokens);
+      for (const auto &t : tokens) {
+        const std::string_view c = all.substr(t.begin, t.end - t.begin);
+        if (t.type != Token_type::comment || c.starts_with("/*+")) continue;  // not an optimizer hint
+        const bool block = c.starts_with("/*");
+        for (size_t b = t.begin; b < t.end; ++b) {
+          if (all[b] != '`') continue;
+          size_t q = b + 1;  // past the closing backtick, `` doubled
+          while (q < t.end && (all[q] != '`' || (q + 1 < t.end && all[q + 1] == '`'))) q += all[q] == '`' ? 2 : 1;
+          if (q >= t.end) break;
+          const auto n = msm_name(unquote_name(all.substr(b, q + 1 - b)));
+          const bool bare = n && !n->placeholders();
+          const bool same = n && iequals(n->core, from.core) &&
+                            (bare || (n->prefix == from.prefix && n->suffix == from.suffix));
+          const std::string quoted = backtick_quote(bare ? to.core : to.prefix + to.core + to.suffix);
+          const bool qualified = b > t.begin && all[b - 1] == '.';
+          if (same && !qualified && !(block && quoted.find("*/") != std::string::npos)) {
+            change(changes, static_cast<uint32_t>(b), static_cast<uint32_t>(q + 1), quoted);
           }
-        }
-        if (j >= e) return;
-        // With the request's placeholders, or with none (MSM's banners).
-        const auto n = msm_name(name);
-        const bool qualified = k > b && all[k - 1] == '.';
-        const bool bare = n && !n->placeholders();
-        const bool same = n && iequals(n->core, from.core) &&
-                          (bare || (n->prefix == from.prefix && n->suffix == from.suffix));
-        const std::string quoted = backtick_quote(bare ? to.core : to.full());
-        if (same && !qualified && !(block && quoted.find("*/") != std::string::npos)) {
-          change(changes, static_cast<uint32_t>(k), static_cast<uint32_t>(j + 1), quoted);
-        }
-        k = j;
-      }
-    };
-    // The comments in the gap [b, e).
-    auto in_gap = [&](size_t b, size_t e) {
-      for (size_t q = b; q < e;) {
-        const auto rest = all.substr(q, e - q);
-        const bool dashes = rest.starts_with("--") && (rest.size() == 2 || static_cast<unsigned char>(rest[2]) <= ' ');
-        if (dashes || rest[0] == '#') {
-          size_t end = all.find('\n', q);
-          end = end == std::string_view::npos ? e : std::min(end, e);
-          in_comment(q, end, false);
-          q = end;
-        } else if (rest.starts_with("/*")) {
-          size_t end = all.find("*/", q + 2);
-          end = end == std::string_view::npos ? e : std::min(end + 2, e);
-          in_comment(q, end, true);
-          q = end;
-        } else {
-          ++q;
+          b = q;
         }
       }
-    };
-    size_t p = 0;
-    for (const auto &c : code) {
-      if (c.begin > p) in_gap(p, c.begin);
-      p = std::max<size_t>(p, c.end);
     }
-    if (p < all.size()) in_gap(p, all.size());
   }
 
   // ---------------------------------------------------------------------
@@ -4653,7 +4630,8 @@ class Editor {
       case Edit_op::rename_schema: {
         // Each name renamed now resolves to the new one.
         const auto refs = schema_references(*msm_name(e.new_name));
-        if (!refs || refs->size() < m_count) {
+        const auto *found = std::get_if<std::vector<Spelled>>(&refs);
+        if (found == nullptr || found->size() < m_count) {
           return fail("the edited script does not name schema `" + e.new_name + "` where it named `" + e.schema + "`");
         }
         break;

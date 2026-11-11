@@ -577,67 +577,56 @@ std::string rename_schema(const std::string &from, const std::string &to, bool c
          (comments ? R"(, "comments": true)" : "") + "}";
 }
 
+// `with` for every `marker` in `text`.
+std::string fill(std::string text, const std::string &marker, const std::string &with) {
+  for (size_t p = 0; (p = text.find(marker, p)) != std::string::npos; p += with.size()) {
+    text.replace(p, marker.size(), with);
+  }
+  return text;
+}
+
 TEST(Schema_edit, rename_schema) {
+  // {S}: a name the rename takes; {C}: one in a comment, with "comments".
+  // Not the alias spelt like the schema, the string, nor `x`.`shop`.
   const std::string script =
-      "-- `shop`\n"
-      "DROP SCHEMA IF EXISTS shop;\n"
-      "CREATE SCHEMA IF NOT EXISTS shop;\n"
-      "ALTER DATABASE shop CHARACTER SET utf8mb4;\n"
-      "USE shop;\n"
-      "-- TABLE `shop`.`t`\n"
-      "DROP TABLE IF EXISTS shop.t;\n"
-      "CREATE TABLE shop.t (id INT PRIMARY KEY, x INT);\n"
-      "CREATE TABLE `shop`.u (id INT PRIMARY KEY, t_id INT, FOREIGN KEY (t_id) REFERENCES shop.t (id));\n"
-      "CREATE INDEX ix ON shop.u (t_id);\n"
-      "RENAME TABLE shop.u TO shop.u2;\n"
-      "CREATE SEQUENCE shop.sq;\n"
-      "CREATE VIEW shop.v AS SELECT shop.t.id, NEXTVAL(shop.sq) FROM shop.t;\n"
-      "-- Create the `shop`.`msm_schema_version` VIEW; not `x`.`shop`\n"
+      "-- `{C}`\n"
+      "DROP SCHEMA IF EXISTS {S};\n"
+      "CREATE SCHEMA IF NOT EXISTS {S};\n"
+      "ALTER DATABASE {S} CHARACTER SET utf8mb4;\n"
+      "USE {S};\n"
+      "-- TABLE `{C}`.`t`\n"
+      "DROP TABLE IF EXISTS {S}.t;\n"
+      "CREATE TABLE {S}.t (id INT PRIMARY KEY, x INT);\n"
+      "CREATE TABLE `{S}`.u (id INT PRIMARY KEY, t_id INT, FOREIGN KEY (t_id) REFERENCES {S}.t (id));\n"
+      "CREATE INDEX ix ON {S}.u (t_id);\n"
+      "RENAME TABLE {S}.u TO {S}.u2;\n"
+      "CREATE SEQUENCE {S}.sq;\n"
+      "CREATE VIEW {S}.v AS SELECT {S}.t.id, NEXTVAL({S}.sq) FROM {S}.t;\n"
+      "-- Create the `{C}`.`msm_schema_version` VIEW; not `x`.`shop`\n"
       "SELECT shop.x FROM t AS shop;\n"
       "DELIMITER $$\n"
-      "CREATE PROCEDURE shop.p() BEGIN\n"
-      "  INSERT INTO shop.t (id) SELECT id FROM shop.u2; -- `shop` in a body\n"
+      "CREATE PROCEDURE {S}.p() BEGIN\n"
+      "  INSERT INTO {S}.t (id) SELECT id FROM {S}.u2; -- `{C}` in a body\n"
       "  SET @q = 'SELECT * FROM shop.t';\n"
       "END$$\n"
       "DELIMITER ;\n"
-      "CREATE FUNCTION shop.f() RETURNS INT RETURN (SELECT COUNT(*) FROM shop.t);\n"
-      "CREATE TRIGGER shop.tr BEFORE INSERT ON shop.t FOR EACH ROW SET NEW.x = shop.f();\n"
-      "CREATE EVENT shop.ev ON SCHEDULE EVERY 1 DAY DO DELETE FROM shop.t;\n"
-      "CALL shop.p();\n"
-      "GRANT SELECT ON shop.* TO u;\n"
-      "REVOKE ALL ON shop.t FROM u;\n"
-      "/*!50001 CREATE VIEW shop.v2 AS SELECT 1 */;\n";
-  auto renamed = [](std::string s, bool comments) {
-    for (const char *from : {"IF EXISTS shop;", "EXISTS shop;\nALTER", "BASE shop ", "USE shop", "EXISTS shop.t",
-                             "TABLE shop.t", "`shop`.u", "REFERENCES shop", "ON shop.u", "TABLE shop.u",
-                             "TO shop.u2", "SEQUENCE shop", "VIEW shop.v", "SELECT shop.t", "NEXTVAL(shop",
-                             "FROM shop.t;\n--", "PROCEDURE shop", "INTO shop", "FROM shop.u2", "FUNCTION shop",
-                             "FROM shop.t);", "TRIGGER shop", "ON shop.t FOR", "= shop.f", "EVENT shop",
-                             "FROM shop.t;\nCALL", "CALL shop", "ON shop.*", "ON shop.t FROM", "VIEW shop.v2"}) {
-      const size_t at = s.find(from);
-      EXPECT_NE(std::string::npos, at) << from;
-      if (at == std::string::npos) continue;
-      const size_t name = s.find("shop", at);
-      s.replace(name, 4, "store");
-    }
-    if (comments) {
-      for (const char *from : {"-- `shop`", "-- TABLE `shop`", "the `shop`", "-- `shop` in"}) {
-        const size_t at = s.find(from);
-        EXPECT_NE(std::string::npos, at) << from;
-        if (at != std::string::npos) s.replace(s.find("shop", at), 4, "store");
-      }
-    }
-    return s;
-  };
-  // Not the alias spelt like the schema, nor the string, nor `x`.`shop`.
-  const auto r = ok(edit(script, {}, request("shop", rename_schema("shop", "store"))));
-  EXPECT_EQ(renamed(script, false), text(r, ""));
+      "CREATE FUNCTION {S}.f() RETURNS INT RETURN (SELECT COUNT(*) FROM {S}.t);\n"
+      "CREATE TRIGGER {S}.tr BEFORE INSERT ON {S}.t FOR EACH ROW SET NEW.x = {S}.f();\n"
+      "CREATE EVENT {S}.ev ON SCHEDULE EVERY 1 DAY DO DELETE FROM {S}.t;\n"
+      "CALL {S}.p();\n"
+      "GRANT SELECT ON {S}.* TO u;\n"
+      "REVOKE ALL ON {S}.t FROM u;\n"
+      "/*!50001 CREATE VIEW {S}.v2 AS SELECT 1 */;\n";
+  auto with = [&](const std::string &s, const std::string &c) { return fill(fill(script, "{S}", s), "{C}", c); };
+  const std::string original = with("shop", "shop");
+  const auto r = ok(edit(original, {}, request("shop", rename_schema("shop", "store"))));
+  EXPECT_EQ(with("store", "shop"), text(r, ""));
   EXPECT_TRUE(r.migration.empty());
   EXPECT_EQ(std::vector<std::string>{"name-in-string"}, note_kinds(r));
   EXPECT_NE(nullptr, r.outline.catalog.find("store"));
   EXPECT_EQ(nullptr, r.outline.catalog.find("shop"));
-  const auto c = ok(edit(script, {}, request("shop", rename_schema("shop", "store", true))));
-  EXPECT_EQ(renamed(script, true), text(c, ""));
+  const auto c = ok(edit(original, {}, request("shop", rename_schema("shop", "store", true))));
+  EXPECT_EQ(with("store", "store"), text(c, ""));
 }
 
 TEST(Schema_edit, rename_schema_quoting_and_errors) {
@@ -662,38 +651,32 @@ TEST(Schema_edit, rename_schema_quoting_and_errors) {
 }
 
 // msm's schemaName may hold placeholders written against the identifier:
-// one name, matched only with the same placeholders.
+// one name, matched only with the same placeholders.  {S}: the name the
+// rename takes; {B}: the bare name in a comment, renamed to the bare one.
 TEST(Schema_edit, rename_schema_with_msm_placeholders) {
   const std::string script =
-      "-- `/*<msm:schema_prefix>*/shop`\n"
-      "CREATE SCHEMA IF NOT EXISTS /*<msm:schema_prefix>*/shop;\n"
-      "USE /*<msm:schema_prefix>*/shop;\n"
-      "CREATE TABLE /*<msm:schema_prefix>*/shop.t (id INT PRIMARY KEY);\n"
+      "-- `{S}`\n"
+      "CREATE SCHEMA IF NOT EXISTS {S};\n"
+      "USE {S};\n"
+      "CREATE TABLE {S}.t (id INT PRIMARY KEY);\n"
       "SELECT * FROM shop.t;\n"
       "SELECT * FROM /*<msm:schema_prefix>*/shop/*<msm:schema_postfix>*/.t;\n"
       "SOURCE 'a.sql';\n";
   const std::string a =
-      "-- TABLE `/*<msm:schema_prefix>*/shop`.`u`, in `shop`\n"
-      "CREATE TABLE /*<msm:schema_prefix>*/shop.u (id INT, FOREIGN KEY (id) REFERENCES /*<msm:schema_prefix>*/shop.t (id));\n";
-  const Files files{{"a.sql", a}};
+      "-- TABLE `{S}`.`u`, in `{B}`\n"
+      "CREATE TABLE {S}.u (id INT, FOREIGN KEY (id) REFERENCES {S}.t (id));\n";
   const std::string from = "/*<msm:schema_prefix>*/shop";
-  auto with = [](std::string s, const std::string &to) {
-    for (size_t p = 0; (p = s.find("/*<msm:schema_prefix>*/shop", p)) != std::string::npos; p += to.size()) {
-      const size_t end = p + std::string("/*<msm:schema_prefix>*/shop").size();
-      if (s.compare(end, 2, "/*") == 0) continue;  // the one with a postfix: another schema
-      s.replace(p, end - p, to);
-    }
-    return s;
+  auto with = [](const std::string &text, const std::string &s, const std::string &bare) {
+    return fill(fill(text, "{S}", s), "{B}", bare);
   };
+  const Files files{{"a.sql", with(a, from, "shop")}};
   for (const std::string to : {"/*<msm:schema_prefix>*/store", "store"}) {
-    const auto r = ok(edit(script, files, request("shop", rename_schema(from, to, true))));
-    EXPECT_EQ(with(script, to), text(r, "")) << to;
-    std::string a_to = with(a, to);
-    a_to.replace(a_to.find("`shop`"), 6, "`store`");  // bare in a comment: the bare new name
-    EXPECT_EQ(a_to, text(r, "a.sql")) << to;
+    const auto r = ok(edit(with(script, from, ""), files, request("shop", rename_schema(from, to, true))));
+    EXPECT_EQ(with(script, to, ""), text(r, "")) << to;
+    EXPECT_EQ(with(a, to, "store"), text(r, "a.sql")) << to;
   }
   // Placeholders, then a postfix.
-  const auto p = ok(edit(script, files,
+  const auto p = ok(edit(with(script, from, ""), files,
                          request("shop", rename_schema("/*<msm:schema_prefix>*/shop/*<msm:schema_postfix>*/",
                                                        "/*<msm:schema_prefix>*/x/*<msm:schema_postfix>*/"))));
   EXPECT_EQ(1u, edit_count(p, ""));
