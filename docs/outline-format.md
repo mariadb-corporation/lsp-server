@@ -18,7 +18,7 @@ Members added within format 1 are listed as features: `mariadb-lsp outline --fea
 | `view_reads` | `views[].reads` |
 | `rest_auth_app_links` | `rest.services[].auth_apps`; `ALTER REST SERVICE` is applied |
 | `rest_declared` | `declared` on REST services and REST schemas |
-| `rest_drop_for_database` | `DROP REST SCHEMA ... FOR DATABASE db` parses, and drops the REST schema only when its `schema` is `db` |
+| `rest_drop_for_database` | `DROP REST SCHEMA ... FOR SCHEMA db` parses, and drops the REST schema only when its `schema` is `db` |
 | `rest_current_schema` | `USE REST SCHEMA` is followed, and the service and schema a REST statement does not name are resolved as MariaDB Shell does, with a note where the shell fails |
 
 ## How the outline is built
@@ -260,7 +260,7 @@ current service when it names only a schema; a `CREATE`/`DROP REST VIEW`, `PROCE
 fails, and the statement is not applied and gets a `rest-none-in-use` note. A `DROP` removes
 the object of that kind and path from that one schema; a `DROP` of something the file never
 created, or on a service it never created, changes nothing. `DROP REST SCHEMA p [FROM SERVICE
-s] FOR DATABASE db` (also `FOR SCHEMA`) removes `p` only when its `schema` is `db`, names
+s] FOR SCHEMA db` (`FOR DATABASE` is the same) removes `p` only when its `schema` is `db`, names
 compared without regard to case, or when the file only named `p` (its `schema` is null);
 otherwise it changes nothing, and is still applied, with no note. `DROP REST SERVICE` or `SCHEMA` of
 the current one clears it.
