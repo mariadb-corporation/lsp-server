@@ -9,13 +9,25 @@ projects store it as a schema snapshot. One change of meaning within format 1 (2
 column's `type` no longer holds `CHARACTER SET`/`CHARSET` and `COLLATE`; they are `charset` and
 `collation`.
 
+Members added within format 1 are listed as features: `mariadb-lsp outline --features` prints
+`{"format": 1, "features": [...]}`, and `mariadb-lsp --help` has the same names on its
+`outline features:` line. A binary before the list has no `--features` (it exits 2).
+
+| Feature | What it adds |
+| --- | --- |
+| `view_reads` | `views[].reads` |
+| `rest_auth_app_links` | `rest.services[].auth_apps`; `ALTER REST SERVICE` is applied |
+| `rest_declared` | `declared` on REST services and REST schemas |
+| `rest_drop_for_database` | `DROP REST SCHEMA ... FOR DATABASE db` parses, and drops the REST schema only when its `schema` is `db` |
+| `rest_current_schema` | `USE REST SCHEMA` is followed, and the service and schema a REST statement does not name are resolved as MariaDB Shell does, with a note where the shell fails |
+
 ## How the outline is built
 
 The statements that can change the schema, those whose first word after any leading comments
 is `CREATE`, `ALTER`, `DROP`, `RENAME` or `USE` (also inside a versioned comment), are parsed
 and applied in file order: `CREATE` adds an object, `ALTER` changes it, `DROP` removes it,
 `RENAME` renames or moves it, `USE` sets the schema that unqualified names belong to. REST
-statements (`CREATE`/`DROP REST ...`, `USE REST SERVICE`) go the same way. Other statements,
+statements (`CREATE`/`DROP REST ...`, `ALTER REST SERVICE`, `USE REST`) go the same way. Other statements,
 and comment-only statements, are not parsed. A `CREATE` of a name that exists replaces the
 earlier object; `IF NOT EXISTS` keeps an existing database, table, view or sequence.
 
@@ -23,11 +35,13 @@ A statement with a syntax error, or in an sql_mode the parser does not support, 
 and is listed under `notes` (kind `syntax-error` or `unsupported-sql-mode`, see [Notes](#notes)).
 So are an `ALTER TABLE` or `CREATE INDEX` on a table the file does not create and a `CREATE
 TABLE ... LIKE t` of such a table (`unknown-table`); the `LIKE` statement is still applied and
-creates the table. A statement that parses but changes nothing (`CREATE`/`DROP USER`, `ROLE` or
+creates the table. So are a REST statement that names no service or schema when none is in use
+(`rest-none-in-use`) and an `ALTER REST SERVICE` of a service the file does not create
+(`unknown-rest-service`), see [REST objects](#rest-objects). A statement that parses but changes nothing (`CREATE`/`DROP USER`, `ROLE` or
 `SERVER`, `CREATE PACKAGE`, an `ALTER` of anything but a database, view, table, procedure,
 function, event or sequence, an `ALTER PROCEDURE`, `FUNCTION`, `EVENT` or `SEQUENCE` of an
 object the file does not create, a `RENAME` of a table, view or sequence the file does not
-create, `USE REST SERVICE`) is not applied and gets no note. `RENAME TABLE` renames or moves a
+create, a `USE REST` that names its service or follows one) is not applied and gets no note. `RENAME TABLE` renames or moves a
 table, a view or a sequence, as MariaDB does; a statement that would move a view to another
 schema renames nothing (MariaDB refuses it). `ALTER PROCEDURE`/`FUNCTION` changes the
 characteristics it writes, `ALTER EVENT` what it writes (schedule, completion, status, comment,
@@ -62,7 +76,7 @@ removed (`` `root`@`localhost` `` and `root@'localhost'` give `root@localhost`),
 | `schemas` | array of schema | in order of first mention (a statement naming a schema, such as `ALTER TABLE s.t`, `CREATE INDEX ... ON s.t` or `CREATE TABLE ... LIKE s.t`, makes its entry); an undeclared schema holding no objects is left out, whatever its options |
 | `rest` | object | MariaDB REST Service objects |
 | `includes` | array | only when the file has SOURCE directives: one `{file, range, slice, error?}` per directive, in order; `file` is the path as resolved (absolute, `/` separators), `range` the directive, `slice` its `[...]` as written or null, `error` why nothing was included |
-| `statements` | object | `ddl`: statements that may change the schema; `applied`: those the fold took (a `USE`, or a `DROP` of an object the file never created, counts; a `CREATE USER` or `USE REST SERVICE` does not) |
+| `statements` | object | `ddl`: statements that may change the schema; `applied`: those the fold took (a `USE`, or a `DROP` of an object the file never created, counts; a `CREATE USER` or `USE REST` does not) |
 | `notes` | array | `{kind, applied, source?, start: {line, character}, message}` for statements that were not read, or that refer to a table the file does not create: see [Notes](#notes) |
 
 Objects carry `range` and `selection_range`, each `{start: {line, character}, end: {...}}`:
@@ -98,6 +112,8 @@ an included statement where its directive stands):
 | `unknown-table` | `false` for `ALTER TABLE` and `CREATE INDEX`, `true` for `CREATE TABLE ... LIKE` | the statement names a table the file does not create; the `LIKE` still creates its table, empty |
 | `include-unreadable` | `false` | a `SOURCE` file cannot be read; the note is on the directive |
 | `include-nested` | `false` | a `SOURCE` directive in an included text, which msm does not expand; the note is on that directive, in its file |
+| `rest-none-in-use` | `false` | a REST statement names no service (or no schema) and none is in use, where MariaDB Shell fails ("No REST SERVICE specified.", "No REST schema given."); see [REST objects](#rest-objects) |
+| `unknown-rest-service` | `false` | an `ALTER REST SERVICE` names a service the file does not create |
 
 A kind is never removed or renamed within format 1; new kinds may be added, so a consumer that
 does not know a kind should go by `applied`.
@@ -210,14 +226,41 @@ binaries before it have no `reads` member.
 
 ## REST objects
 
-`rest` is `{services, auth_apps, roles, users}`. A service is `{path, range, selection_range,
-schemas, content_sets}`; a schema is `{path, schema, range, selection_range, objects}` where
-`schema` is the database schema it exposes, null when the file has no `CREATE REST SCHEMA` for
-that path; an object is `{kind, path, object, range, selection_range}` with `kind` one of
-`view`, `procedure`, `function` and `object` the qualified database object as written, quotes
-kept, blanks collapsed. `content_sets`, `auth_apps`, `roles` and `users` are arrays of
+`rest` is `{services, auth_apps, roles, users}`. A service is `{path, declared, range,
+selection_range, schemas, content_sets, auth_apps}`; a schema is `{path, schema, declared,
+range, selection_range, objects}` where `schema` is the database schema it exposes, null when
+the file has no `CREATE REST SCHEMA` for that path; `declared` is true when the file has a
+`CREATE REST SERVICE` (`CREATE REST SCHEMA`/`DATABASE`) for it, false for one a statement only
+names (`ON SERVICE /shared`), which a release must not drop. An object is `{kind, path,
+object, range, selection_range}` with `kind` one of `view`, `procedure`, `function` and `object` the qualified database object as written,
+quotes kept, blanks collapsed. `content_sets`, `auth_apps`, `roles` and `users` are arrays of
 `{name, range, selection_range}`; a content set's name is its request path, a user's is
-`user@app`. A statement that names no service uses the one set by `USE REST SERVICE`. A
-`DROP REST VIEW`, `PROCEDURE` or `FUNCTION` removes the object of that kind and path from the
-schema named by `FROM [SERVICE ...] DATABASE`, or from every schema of the service when
-none is named; a `DROP` on a service the file never created changes nothing.
+`user@app`. A service's `auth_apps` are the names of the auth apps linked to it, unquoted, its
+case as in the `ADD AUTH APP` that linked it, its range that of the last statement that linked
+it. A `CREATE REST SCHEMA` without a request path has `/` and the database schema's name, as
+in MariaDB Shell. Paths and names compare without regard to case, as on the server.
+
+`ADD AUTH APP` links an app, `REMOVE AUTH APP` (with or without `IF EXISTS`) unlinks it, in
+`CREATE` and `ALTER REST SERVICE`. A `CREATE OR REPLACE REST SERVICE` of a service the file has
+updates it in place, as MariaDB Shell does: its schemas, content sets and the links the
+statement does not name stay. `CREATE REST SERVICE IF NOT EXISTS` of a service
+the file creates changes nothing, as does `CREATE REST SCHEMA IF NOT EXISTS` of such a schema;
+of one a statement only named, it creates it. `ALTER REST SERVICE ... NEW REQUEST PATH` renames
+the service. `DROP REST AUTH APP`
+also unlinks the app from every service.
+
+The service and schema a statement does not name are resolved as MariaDB Shell's MRS DDL
+executor does (`mysqlshdk/libs/mrs/ddl_executor*.cc`): only `USE REST SERVICE` sets the
+current service, and it clears the current schema; `USE REST SCHEMA` (or `USE REST SERVICE s
+SCHEMA p`) sets the current schema; the first schema a `CREATE REST SCHEMA` makes on the
+current service becomes the current schema. Creating a service does not make it current. A
+statement with `ON SERVICE` or `ON SCHEMA` (`FROM ...` for a `DROP`) uses what it names, the
+current service when it names only a schema; a `CREATE`/`DROP REST VIEW`, `PROCEDURE` or
+`FUNCTION` without one uses the current service and schema. Where there is none, the shell
+fails, and the statement is not applied and gets a `rest-none-in-use` note. A `DROP` removes
+the object of that kind and path from that one schema; a `DROP` of something the file never
+created, or on a service it never created, changes nothing. `DROP REST SCHEMA p [FROM SERVICE
+s] FOR DATABASE db` (also `FOR SCHEMA`) removes `p` only when its `schema` is `db`, names
+compared without regard to case, or when the file only named `p` (its `schema` is null);
+otherwise it changes nothing, and is still applied, with no note. `DROP REST SERVICE` or `SCHEMA` of
+the current one clears it.

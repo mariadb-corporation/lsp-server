@@ -21907,7 +21907,12 @@ mrs_drop_rest_service_statement:
         ;
 
 mrs_drop_rest_schema_statement:
-          DROP REST_SYM DATABASE mrs_opt_if_exists mrs_schema_request_path mrs_opt_from_service { MDBP_R(4183); }
+          DROP REST_SYM DATABASE mrs_opt_if_exists mrs_schema_request_path mrs_opt_from_service mrs_opt_for_database { MDBP_R(4183); }
+        ;
+
+mrs_opt_for_database:
+          /* empty */ { MDBP_R(5947); }
+        | FOR_SYM DATABASE mrs_identifier { MDBP_R(5948); }
         ;
 
 mrs_drop_rest_view_statement:

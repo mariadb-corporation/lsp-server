@@ -547,6 +547,8 @@ class Json_outline {
     for (const auto &svc : c.rest_services()) {
       w_.StartObject();
       str("path", svc.path);
+      w_.Key("declared");
+      w_.Bool(svc.declared);
       origin(svc.origin);
       w_.Key("schemas");
       w_.StartArray();
@@ -554,6 +556,8 @@ class Json_outline {
         w_.StartObject();
         str("path", sch.path);
         str_or_null("schema", sch.schema);
+        w_.Key("declared");
+        w_.Bool(sch.declared);
         origin(sch.origin);
         w_.Key("objects");
         w_.StartArray();
@@ -570,6 +574,7 @@ class Json_outline {
       }
       w_.EndArray();
       named("content_sets", svc.content_sets);
+      named("auth_apps", svc.auth_apps);
       w_.EndObject();
     }
     w_.EndArray();
@@ -587,6 +592,31 @@ class Json_outline {
 };
 
 }  // namespace
+
+const std::vector<const char *> &outline_features() {
+  static const std::vector<const char *> features = {
+      "view_reads",           // views[].reads
+      "rest_auth_app_links",  // rest.services[].auth_apps, ALTER REST SERVICE
+      "rest_current_schema",  // USE REST SCHEMA, the shell's current service and schema
+      "rest_declared",        // rest.services[].declared, rest.services[].schemas[].declared
+      "rest_drop_for_database",  // DROP REST SCHEMA ... FOR DATABASE db
+  };
+  return features;
+}
+
+std::string outline_features_json() {
+  rapidjson::StringBuffer buf;
+  rapidjson::Writer<rapidjson::StringBuffer> w(buf);
+  w.StartObject();
+  w.Key("format");
+  w.Int(1);
+  w.Key("features");
+  w.StartArray();
+  for (const char *f : outline_features()) w.String(f);
+  w.EndArray();
+  w.EndObject();
+  return buf.GetString();
+}
 
 std::string outline_json(const Outline &outline, std::string_view text, const Line_map &lines,
                          std::string_view file) {

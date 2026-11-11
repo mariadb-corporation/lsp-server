@@ -96,6 +96,7 @@ const char *const k_usage =
     "           (with --format json, a summary); exit 0 when there are none,\n"
     "           1 when there are\n"
     "  outline  the schema objects a SQL file defines, as JSON\n"
+    "@OUTLINE_FEATURES@"
     "  edit     apply schema edits (--edits FILE) to a SQL file and the files its\n"
     "           SOURCE directives include: prints the text edits, the migration\n"
     "           DDL and the edited outline as JSON; writes no file; exit 1 when\n"
@@ -129,6 +130,9 @@ const char *const k_usage =
     "  --edits FILE       edit: the schema edits, JSON (docs/edit-format.md)\n"
     "  --ops              edit: print the ops this binary does, as JSON\n"
     "                     ({\"format\": 1, \"ops\": [...]}), and exit\n"
+    "  --features         outline: print what this binary's outlines hold beyond\n"
+    "                     format 1 as first published, as JSON ({\"format\": 1,\n"
+    "                     \"features\": [...]}), and exit\n"
     "  --line-width N     format, edit: the width lines are kept within (default 80,\n"
     "                     0 = no limit)\n"
     "  --keyword-case upper|lower\n"
@@ -201,17 +205,22 @@ struct Options {
   std::string source_dir;  // --source-dir, absolute; "": the file's folder
   std::string edits;       // edit: --edits FILE
   bool list_ops = false;   // edit: --ops
+  bool list_features = false;  // outline: --features
 };
 
-// The usage text, with the `edit ops:` line: the ops this binary does,
-// which msm and the VS Code extension read to tell what they may send.
+// The usage text, with the `edit ops:` line (the ops this binary does) and
+// the `outline features:` line, which msm and the VS Code extension read to
+// tell what they may send and expect.
 std::string usage() {
   std::string u = k_usage;
-  const std::string marker = "@EDIT_OPS@";
-  const size_t at = u.find(marker);
-  if (at != std::string::npos) {
-    u.replace(at, marker.size(), "           edit ops: " + mdbls::supported_edit_ops() + "\n");
-  }
+  auto fill = [&u](const std::string &marker, const std::string &line) {
+    const size_t at = u.find(marker);
+    if (at != std::string::npos) u.replace(at, marker.size(), "           " + line + "\n");
+  };
+  fill("@EDIT_OPS@", "edit ops: " + mdbls::supported_edit_ops());
+  std::string features;
+  for (const char *f : mdbls::outline_features()) features += std::string(" ") + f;
+  fill("@OUTLINE_FEATURES@", "outline features:" + features);
   return u;
 }
 
@@ -798,6 +807,8 @@ std::optional<Options> parse_args(int argc, char **argv) {
       std::exit(k_exit_ok);
     } else if (arg == "--ops") {
       o.list_ops = true;
+    } else if (arg == "--features") {
+      o.list_features = true;
     } else if (arg == "--sql-mode") {
       const auto v = value();
       if (!v) return std::nullopt;
@@ -952,6 +963,14 @@ std::optional<Options> parse_args(int argc, char **argv) {
     // The ops alone: no file, no --edits.
     if (o.command != "edit" || !o.files.empty() || !o.edits.empty()) {
       std::cerr << "mariadb-lsp: --ops goes with edit alone\n";
+      return std::nullopt;
+    }
+    return o;
+  }
+  if (o.list_features) {
+    // The features alone: no file.
+    if (o.command != "outline" || !o.files.empty()) {
+      std::cerr << "mariadb-lsp: --features goes with outline alone\n";
       return std::nullopt;
     }
     return o;
@@ -1222,6 +1241,10 @@ int main(int argc, char **argv) {
   if (!o) return k_exit_usage;
   if (o->list_ops) {
     std::cout << mdbls::edit_ops_json() << "\n";
+    return k_exit_ok;
+  }
+  if (o->list_features) {
+    std::cout << mdbls::outline_features_json() << "\n";
     return k_exit_ok;
   }
   if (o->command == "lsp") return run_lsp(*o);

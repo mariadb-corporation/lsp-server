@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <optional>
 #include <utility>
 
 #include "mdbls/keywords.h"
@@ -83,6 +84,25 @@ void upsert_named(std::vector<T> &v, T x, bool keep_existing = false) {
   }
 }
 
+// Removes the elements of v named `name`.
+template <typename T>
+void erase_named(std::vector<T> &v, std::string_view name) {
+  std::erase_if(v, [&](const T &x) { return iequals(x.name, name); });
+}
+
+// Removes the elements of v (REST services or schemas) with request path `path`.
+template <typename T>
+void erase_by_path(std::vector<T> &v, std::string_view path) {
+  std::erase_if(v, [&](const T &x) { return iequals(x.path, path); });
+}
+
+// The REST schema of `svc` with request path `path`, or nullptr.
+Rest_schema *find_rest_schema(Rest_service &svc, std::string_view path) {
+  auto it = std::find_if(svc.schemas.begin(), svc.schemas.end(),
+                         [&](const Rest_schema &s) { return iequals(s.path, path); });
+  return it == svc.schemas.end() ? nullptr : &*it;
+}
+
 // The grammar symbols the fold looks for, resolved once.
 struct Syms {
 #define SYM(x) int x = grammar::symbol(#x);
@@ -111,6 +131,8 @@ const char *to_string(Note_kind kind) {
     case Note_kind::unknown_table: return "unknown-table";
     case Note_kind::include_unreadable: return "include-unreadable";
     case Note_kind::include_nested: return "include-nested";
+    case Note_kind::rest_none_in_use: return "rest-none-in-use";
+    case Note_kind::unknown_rest_service: return "unknown-rest-service";
   }
   return "";
 }
@@ -239,6 +261,7 @@ void Catalog::for_each_origin(const std::function<void(Origin &)> &f) {
       for (auto &o : rs.objects) f(o.origin);
     }
     for (auto &c : svc.content_sets) f(c.origin);
+    for (auto &a : svc.auth_apps) f(a.origin);
   }
   for (auto *list : {&m_auth_apps, &m_roles, &m_users})
     for (auto &o : *list) f(o.origin);
@@ -1613,79 +1636,175 @@ bool Catalog_fold::rename(uint32_t n) {
   return changed;
 }
 
+// REST statements resolve the service and schema they do not name as
+// MariaDB Shell's MRS DDL executor (mysqlshdk/libs/mrs/ddl_executor*.cc)
+// does: only USE REST SERVICE sets the current service, and clears the
+// current schema; USE REST SCHEMA sets the current schema of the current
+// service; CREATE REST SCHEMA makes the first schema of the current service
+// the current one.  A statement that needs a service or schema when none is
+// named or in use fails in the shell, and gets a note here.
 bool Catalog_fold::rest(uint32_t n) {
   const auto ch = t_.children(n);
   if (ch.empty()) return false;
   const uint32_t st = ch[0];
   const int sym = t_.node(st).symbol;
   const std::string service_path = text(find(st, s_.mrs_service_request_path));
-  auto target_service = [&]() -> Rest_service & {
-    return c_.service(service_path.empty() ? c_.m_current_service : service_path);
+  const uint32_t schema_node = find(st, s_.mrs_schema_request_path);
+  const std::string schema_path = text(schema_node);
+  // The statement up to the first path or name it writes, for notes:
+  // "CREATE REST VIEW /v".
+  auto what = [&]() {
+    uint32_t first = npos;
+    for (const int path_sym : {s_.mrs_service_request_path, s_.mrs_schema_request_path,
+                               s_.mrs_view_request_path, s_.mrs_procedure_request_path,
+                               s_.mrs_function_request_path, s_.mrs_content_set_request_path,
+                               s_.mrs_identifier}) {
+      const uint32_t p = find(st, path_sym);
+      if (p != npos && (first == npos || t_.begin(p) < t_.begin(first))) first = p;
+    }
+    return first == npos ? text(st) : text_span(t_.begin(st), first);
+  };
+  auto none_in_use = [&](const char *which) {
+    note(Note_kind::rest_none_in_use, false,
+         what() + ": names no REST " + which + ", and none is in use (USE REST " + which + ")");
+  };
+  // The service the statement names, else the current one; nullopt (with a
+  // note) when there is neither.
+  auto service_named = [&]() -> std::optional<std::string> {
+    if (!service_path.empty()) return service_path;
+    if (!c_.m_current_service.empty()) return c_.m_current_service;
+    none_in_use("SERVICE");
+    return std::nullopt;
+  };
+  // The service and schema of a REST object: ON [SERVICE ...] SCHEMA, else
+  // the current schema.
+  // (The grammar names a service only together with a schema.)
+  auto object_place = [&]() -> std::optional<std::pair<std::string, std::string>> {
+    auto svc = service_named();
+    if (!svc) return std::nullopt;
+    if (!schema_path.empty()) return std::pair{*svc, schema_path};
+    if (c_.m_current_rest_schema.empty()) { none_in_use("SCHEMA"); return std::nullopt; }
+    return std::pair{*svc, c_.m_current_rest_schema};
   };
   auto object = [&](const char *kind, int path_sym) {
-    Rest_service &svc = target_service();
-    const std::string schema_path = text(find(st, s_.mrs_schema_request_path));
-    auto it = std::find_if(svc.schemas.begin(), svc.schemas.end(),
-                           [&](const Rest_schema &s) { return iequals(s.path, schema_path); });
-    if (it == svc.schemas.end()) {
-      svc.schemas.push_back(Rest_schema{schema_path, "", {}, {stmt_, stmt_}});
-      it = svc.schemas.end() - 1;
-    }
+    const auto place = object_place();
+    if (!place) return false;
+    Rest_service &svc = c_.service(place->first);
+    Rest_schema *it = find_rest_schema(svc, place->second);
+    if (it == nullptr) it = &svc.schemas.emplace_back(Rest_schema{place->second, "", {}, false, {stmt_, stmt_}});
     const uint32_t p = find(st, path_sym);
     Rest_object o{kind, text(p), text(find(st, s_.mrs_qualified_identifier)), origin(p)};
     auto ex = std::find_if(it->objects.begin(), it->objects.end(), [&](const Rest_object &x) {
       return iequals(x.path, o.path) && x.kind == o.kind;
     });
     if (ex != it->objects.end()) *ex = std::move(o); else it->objects.push_back(std::move(o));
+    return true;
   };
+  auto name_at = [&](uint32_t p) { return unquote_any(text(p)); };
   auto named = [&](std::vector<Named_object> &v, int name_sym) {
     const uint32_t p = find(st, name_sym);
-    const std::string name = unquote_string(unquote_identifier(text(p)));
-    upsert_named(v, Named_object{name, origin(p)});
+    upsert_named(v, Named_object{name_at(p), origin(p)});
   };
-  auto unnamed = [&](std::vector<Named_object> &v, int name_sym) {
-    const std::string name = unquote_string(unquote_identifier(text(find(st, name_sym))));
-    std::erase_if(v, [&](const Named_object &x) { return iequals(x.name, name); });
+  // ADD AUTH APP links (a linked app stays linked, its range moves to this
+  // statement), then REMOVE AUTH APP unlinks, as the shell does; a CREATE
+  // of a new service ignores REMOVE (`removes` false), as the shell does.
+  auto link_auth_apps = [&](Rest_service &svc, bool removes = true) {
+    for (const uint32_t a : find_all(st, s_.mrs_add_auth_app)) {
+      const uint32_t p = find(a, s_.mrs_auth_app_name);
+      upsert_named(svc.auth_apps, Named_object{name_at(p), origin(p)});
+    }
+    if (!removes) return;
+    for (const uint32_t r : find_all(st, s_.mrs_remove_auth_app)) {
+      erase_named(svc.auth_apps, name_at(find(r, s_.mrs_auth_app_name)));
+    }
   };
 
   if (sym == s_.mrs_create_rest_service_statement) {
+    // OR REPLACE (and a CREATE of a service the file has) updates the
+    // service in place: its schemas, content sets and the links the
+    // statement does not name stay.  IF NOT EXISTS keeps it as it is, when
+    // the file created it (not when a statement only named it).
+    const uint32_t prefix = child(st, s_.mrs_create_rest_service_prefix);
+    const Rest_service *had = c_.find_service(service_path);
+    const bool existed = had != nullptr;
+    if (existed && had->declared && find(prefix, s_.IF_SYM) != npos) return true;
     Rest_service &svc = c_.service(service_path);
+    svc.declared = true;
     svc.origin = origin(find(st, s_.mrs_service_request_path));
+    link_auth_apps(svc, existed);
+    return true;
+  }
+  if (sym == s_.mrs_alter_rest_service_statement) {
+    const std::string path = text(child(st, s_.mrs_service_request_path));
+    Rest_service *svc = c_.find_service(path);
+    if (svc == nullptr) {
+      note(Note_kind::unknown_rest_service, false,
+           what() + ": the file does not create this REST service");
+      return false;
+    }
+    const uint32_t renamed = child(st, s_.mrs_new_service_request_path);
+    if (renamed != npos) {
+      const std::string to = text(find(renamed, s_.mrs_service_request_path));
+      if (iequals(c_.m_current_service, svc->path)) c_.m_current_service = to;
+      svc->path = to;
+    }
+    link_auth_apps(*svc);
     return true;
   }
   if (sym == s_.mrs_use_statement) {
-    if (!service_path.empty()) c_.m_current_service = service_path;
+    // USE REST SERVICE p, USE REST [SERVICE p] SCHEMA s; USE REST METADATA
+    // names neither.
+    if (!service_path.empty()) {
+      c_.m_current_service = service_path;
+      c_.m_current_rest_schema.clear();
+    }
+    if (!schema_path.empty()) {
+      if (c_.m_current_service.empty()) {
+        none_in_use("SERVICE");
+        return false;
+      }
+      c_.m_current_rest_schema = schema_path;
+    }
     return false;
   }
   if (sym == s_.mrs_create_rest_schema_statement) {
-    Rest_service &svc = target_service();
-    const uint32_t p = find(st, s_.mrs_schema_request_path);
+    const auto svc_path = service_named();
+    if (!svc_path) return false;
+    Rest_service &svc = c_.service(*svc_path);
     Rest_schema rs;
-    rs.path = text(p);
     rs.schema = name_of(child(st, s_.mrs_identifier));
-    rs.origin = origin(p);
-    auto it = std::find_if(svc.schemas.begin(), svc.schemas.end(),
-                           [&](const Rest_schema &s) { return iequals(s.path, rs.path); });
-    if (it != svc.schemas.end()) {
+    // Without a request path the shell takes /<database schema>.
+    rs.path = schema_node != npos ? schema_path : "/" + rs.schema;
+    rs.origin = origin(schema_node != npos ? schema_node : child(st, s_.mrs_identifier));
+    rs.declared = true;
+    if (Rest_schema *it = find_rest_schema(svc, rs.path)) {
+      // IF NOT EXISTS keeps a schema the file created as it is, as the
+      // shell does.
+      if (it->declared && find(child(st, s_.mrs_create_rest_schema_prefix), s_.IF_SYM) != npos)
+        return true;
       rs.objects = std::move(it->objects);
       *it = std::move(rs);
     } else {
       svc.schemas.push_back(std::move(rs));
+      if (svc.schemas.size() == 1 && iequals(svc.path, c_.m_current_service))
+        c_.m_current_rest_schema = svc.schemas[0].path;
     }
     return true;
   }
-  if (sym == s_.mrs_create_rest_view_statement) { object("view", s_.mrs_view_request_path); return true; }
-  if (sym == s_.mrs_create_rest_procedure_statement) { object("procedure", s_.mrs_procedure_request_path); return true; }
-  if (sym == s_.mrs_create_rest_function_statement) { object("function", s_.mrs_function_request_path); return true; }
+  if (sym == s_.mrs_create_rest_view_statement) return object("view", s_.mrs_view_request_path);
+  if (sym == s_.mrs_create_rest_procedure_statement) return object("procedure", s_.mrs_procedure_request_path);
+  if (sym == s_.mrs_create_rest_function_statement) return object("function", s_.mrs_function_request_path);
   if (sym == s_.mrs_create_rest_content_set_statement) {
-    named(target_service().content_sets, s_.mrs_content_set_request_path);
+    const auto svc_path = service_named();
+    if (!svc_path) return false;
+    named(c_.service(*svc_path).content_sets, s_.mrs_content_set_request_path);
     return true;
   }
   if (sym == s_.mrs_create_rest_auth_app_statement) { named(c_.m_auth_apps, s_.mrs_auth_app_name); return true; }
   if (sym == s_.mrs_create_rest_role_statement) { named(c_.m_roles, s_.mrs_role_name); return true; }
   if (sym == s_.mrs_create_rest_user_statement) {
-    const std::string user = unquote_string(unquote_identifier(text(find(st, s_.mrs_user_name))));
-    const std::string app = unquote_string(unquote_identifier(text(find(st, s_.mrs_auth_app_name))));
+    const std::string user = name_at(find(st, s_.mrs_user_name));
+    const std::string app = name_at(find(st, s_.mrs_auth_app_name));
     const std::string name = user + "@" + app;
     auto it = find_named(c_.m_users, name);
     const Origin o = origin(find(st, s_.mrs_user_name));
@@ -1693,50 +1812,64 @@ bool Catalog_fold::rest(uint32_t n) {
     return true;
   }
   if (sym == s_.mrs_drop_rest_service_statement) {
-    std::erase_if(c_.m_services, [&](const Rest_service &s) { return iequals(s.path, service_path); });
+    erase_by_path(c_.m_services, service_path);
+    if (iequals(c_.m_current_service, service_path)) {
+      c_.m_current_service.clear();
+      c_.m_current_rest_schema.clear();
+    }
     return true;
   }
+  // A DROP of an object the file never created changes nothing; a service
+  // the script never created is left alone rather than made.
   if (sym == s_.mrs_drop_rest_schema_statement) {
-    const std::string path = text(find(st, s_.mrs_schema_request_path));
-    std::erase_if(target_service().schemas, [&](const Rest_schema &s) { return iequals(s.path, path); });
+    const auto svc_path = service_named();
+    if (!svc_path) return false;
+    // FOR DATABASE db drops it only when it exposes database schema db
+    // (msm's drop of a REST schema a release moved to another database).
+    // One only named (no CREATE REST SCHEMA, so no database known) is
+    // dropped, as without FOR DATABASE.
+    const std::string for_db = name_of(child(child(st, s_.mrs_opt_for_database), s_.mrs_identifier));
+    Rest_service *svc = c_.find_service(*svc_path);
+    if (const Rest_schema *rs = svc != nullptr ? find_rest_schema(*svc, schema_path) : nullptr;
+        rs != nullptr && !for_db.empty() && !rs->schema.empty() && !iequals(rs->schema, for_db))
+      return true;  // FOR DATABASE names another database: nothing changes
+    if (svc != nullptr) erase_by_path(svc->schemas, schema_path);
+    if (iequals(*svc_path, c_.m_current_service) && iequals(schema_path, c_.m_current_rest_schema))
+      c_.m_current_rest_schema.clear();
     return true;
   }
-  // A DROP names its service with FROM SERVICE, else it is the current one;
-  // an object's schema with FROM [SERVICE ...] DATABASE, else every schema of
-  // the service is searched.  A service the script never created is left
-  // alone rather than made.
-  auto dropped_from = [&]() -> Rest_service * {
-    return c_.find_service(service_path.empty() ? c_.m_current_service : service_path);
-  };
   auto drop_object = [&](const char *kind, int path_sym) {
-    Rest_service *svc = dropped_from();
-    if (svc == nullptr) return;
+    const auto place = object_place();
+    if (!place) return false;
+    Rest_service *svc = c_.find_service(place->first);
+    Rest_schema *sch = svc != nullptr ? find_rest_schema(*svc, place->second) : nullptr;
+    if (sch == nullptr) return true;
     const std::string path = text(find(st, path_sym));
-    const std::string schema_path = text(find(st, s_.mrs_schema_request_path));
-    for (auto &sch : svc->schemas) {
-      if (!schema_path.empty() && !iequals(sch.path, schema_path)) continue;
-      std::erase_if(sch.objects, [&](const Rest_object &o) {
-        return o.kind == kind && iequals(o.path, path);
-      });
-    }
+    std::erase_if(sch->objects, [&](const Rest_object &o) { return o.kind == kind && iequals(o.path, path); });
+    return true;
   };
-  if (sym == s_.mrs_drop_rest_view_statement) { drop_object("view", s_.mrs_view_request_path); return true; }
-  if (sym == s_.mrs_drop_rest_procedure_statement) { drop_object("procedure", s_.mrs_procedure_request_path); return true; }
-  if (sym == s_.mrs_drop_rest_function_statement) { drop_object("function", s_.mrs_function_request_path); return true; }
+  if (sym == s_.mrs_drop_rest_view_statement) return drop_object("view", s_.mrs_view_request_path);
+  if (sym == s_.mrs_drop_rest_procedure_statement) return drop_object("procedure", s_.mrs_procedure_request_path);
+  if (sym == s_.mrs_drop_rest_function_statement) return drop_object("function", s_.mrs_function_request_path);
   if (sym == s_.mrs_drop_rest_content_set_statement) {
-    if (Rest_service *svc = dropped_from()) {
-      const std::string path = text(find(st, s_.mrs_content_set_request_path));
-      std::erase_if(svc->content_sets, [&](const Named_object &o) { return iequals(o.name, path); });
+    const auto svc_path = service_named();
+    if (!svc_path) return false;
+    if (Rest_service *svc = c_.find_service(*svc_path)) {
+      erase_named(svc->content_sets, name_at(find(st, s_.mrs_content_set_request_path)));
     }
     return true;
   }
-  if (sym == s_.mrs_drop_rest_auth_app_statement) { unnamed(c_.m_auth_apps, s_.mrs_auth_app_name); return true; }
-  if (sym == s_.mrs_drop_rest_role_statement) { unnamed(c_.m_roles, s_.mrs_role_name); return true; }
+  if (sym == s_.mrs_drop_rest_auth_app_statement) {
+    // Dropping an app drops its links.
+    const std::string name = name_at(find(st, s_.mrs_auth_app_name));
+    for (auto &svc : c_.m_services) erase_named(svc.auth_apps, name);
+    erase_named(c_.m_auth_apps, name);
+    return true;
+  }
+  if (sym == s_.mrs_drop_rest_role_statement) { erase_named(c_.m_roles, name_at(find(st, s_.mrs_role_name))); return true; }
   if (sym == s_.mrs_drop_rest_user_statement) {
-    const std::string name =
-        unquote_string(unquote_identifier(text(find(st, s_.mrs_user_name)))) + "@" +
-        unquote_string(unquote_identifier(text(find(st, s_.mrs_auth_app_name))));
-    std::erase_if(c_.m_users, [&](const Named_object &o) { return iequals(o.name, name); });
+    const std::string name = name_at(find(st, s_.mrs_user_name)) + "@" + name_at(find(st, s_.mrs_auth_app_name));
+    erase_named(c_.m_users, name);
     return true;
   }
   return false;

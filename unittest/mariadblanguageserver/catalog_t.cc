@@ -237,7 +237,7 @@ TEST(Catalog, rest_objects) {
 }
 
 // DROP REST takes the object's kind, its FROM selector and the current
-// service into account; it never creates a service.
+// service and schema into account; it never creates a service.
 TEST(Catalog, rest_drop_is_scoped) {
   const auto o = outline_of(
       "CREATE REST SERVICE /a;\n"
@@ -249,7 +249,7 @@ TEST(Catalog, rest_drop_is_scoped) {
       "CREATE REST VIEW /x ON SERVICE /b SCHEMA /s AS sakila.actor;\n"
       "CREATE REST CONTENT SET /cs ON SERVICE /a;\n"
       "CREATE REST CONTENT SET /cs ON SERVICE /b;\n"
-      "USE REST SERVICE /a;\n"
+      "USE REST SERVICE /a SCHEMA /S;\n"
       "DROP REST VIEW /x;\n"
       "DROP REST CONTENT SET /cs;\n"
       "DROP REST PROCEDURE /x FROM SERVICE /nowhere DATABASE /s;\n");
@@ -262,6 +262,215 @@ TEST(Catalog, rest_drop_is_scoped) {
   ASSERT_EQ(1u, b.schemas[0].objects.size());  // service /b was not searched
   EXPECT_EQ("view", b.schemas[0].objects[0].kind);
   EXPECT_EQ(1u, b.content_sets.size());
+}
+
+// A service keeps the auth apps linked to it: ADD AUTH APP links, REMOVE
+// AUTH APP unlinks (names compare without regard to case), CREATE OR
+// REPLACE keeps the links it does not name, as MariaDB Shell does.
+TEST(Catalog, rest_auth_app_links) {
+  const auto o = outline_of(
+      "CREATE REST AUTH APP 'MRS' VENDOR MRS;\n"
+      "CREATE REST AUTH APP `Other` VENDOR MRS;\n"
+      "CREATE REST AUTH APP gone VENDOR MRS;\n"
+      "CREATE REST SERVICE mike@/notes ADD AUTH APP 'MRS' ADD AUTH APP `Other` ADD AUTH APP gone;\n"
+      "CREATE REST SERVICE /b ADD AUTH APP 'gone';\n"
+      "DROP REST AUTH APP gone;\n"
+      "ALTER REST SERVICE mike@/notes REMOVE AUTH APP 'mrs' IF EXISTS;\n"
+      "CREATE OR REPLACE REST SERVICE mike@/NOTES ADD AUTH APP 'Third';\n"
+      "CREATE REST SERVICE IF NOT EXISTS mike@/notes REMOVE AUTH APP 'Third';\n"
+      "ALTER REST SERVICE mike@/notes NEW REQUEST PATH /memo ADD AUTH APP 'MRS';\n");
+  EXPECT_TRUE(o.notes.empty());
+  const auto &svcs = o.catalog.rest_services();
+  ASSERT_EQ(2u, svcs.size());
+  EXPECT_EQ("/memo", svcs[0].path);
+  std::vector<std::string> names;
+  for (const auto &a : svcs[0].auth_apps) names.push_back(a.name);
+  EXPECT_EQ((std::vector<std::string>{"Other", "Third", "MRS"}), names);
+  EXPECT_TRUE(svcs[1].auth_apps.empty());  // DROP REST AUTH APP unlinks it
+  EXPECT_EQ(10u, o.applied);
+  const std::string json = outline_json(o, "", Line_map(""));
+  EXPECT_NE(std::string::npos, json.find("\"content_sets\":[],\"auth_apps\":[{\"name\":\"Other\",")) << json;
+}
+
+// A REST statement that names no service or schema takes the ones in use,
+// as MariaDB Shell does: USE REST SERVICE sets the service and clears the
+// schema, USE REST SCHEMA sets the schema, the first schema created on the
+// current service becomes current.  Where the shell fails, a note.
+TEST(Catalog, rest_current_service_and_schema) {
+  const auto o = outline_of(
+      "CREATE REST SERVICE /notes;\n"
+      "CREATE REST VIEW /v1 AS sakila.actor;\n"                    // no service in use
+      "CREATE REST SCHEMA /early FROM sakila;\n"                   // no service in use
+      "USE REST SCHEMA /app;\n"                                    // no service in use
+      "ALTER REST SERVICE /elsewhere ADD AUTH APP 'MRS';\n"        // not created
+      "USE REST SERVICE /notes;\n"
+      "CREATE REST SCHEMA FROM sakila;\n"                          // /sakila, now current
+      "CREATE REST VIEW /v2 AS sakila.actor;\n"
+      "CREATE REST SCHEMA /app FROM world;\n"
+      "USE REST SCHEMA /APP;\n"
+      "CREATE REST FUNCTION /f AS world.f;\n"
+      "USE REST SERVICE /notes;\n"                                 // clears the schema
+      "CREATE REST PROCEDURE /p AS world.p;\n"                     // no schema in use
+      "CREATE REST PROCEDURE /p ON SCHEMA /app AS world.p;\n"
+      "DROP REST SCHEMA /x;\n");
+  const auto &svcs = o.catalog.rest_services();
+  ASSERT_EQ(1u, svcs.size());
+  EXPECT_EQ("/notes", svcs[0].path);
+  ASSERT_EQ(2u, svcs[0].schemas.size());
+  EXPECT_EQ("/sakila", svcs[0].schemas[0].path);
+  ASSERT_EQ(1u, svcs[0].schemas[0].objects.size());
+  EXPECT_EQ("/v2", svcs[0].schemas[0].objects[0].path);
+  EXPECT_EQ("/app", svcs[0].schemas[1].path);
+  ASSERT_EQ(2u, svcs[0].schemas[1].objects.size());
+  EXPECT_EQ("/f", svcs[0].schemas[1].objects[0].path);
+  EXPECT_EQ("/p", svcs[0].schemas[1].objects[1].path);
+  ASSERT_EQ(5u, o.notes.size());
+  for (const auto &n : o.notes) EXPECT_FALSE(n.applied);
+  EXPECT_EQ(Note_kind::rest_none_in_use, o.notes[0].kind);
+  EXPECT_EQ("CREATE REST VIEW /v1: names no REST SERVICE, and none is in use (USE REST SERVICE)",
+            o.notes[0].message);
+  EXPECT_EQ(Note_kind::rest_none_in_use, o.notes[1].kind);
+  EXPECT_EQ(Note_kind::rest_none_in_use, o.notes[2].kind);
+  EXPECT_EQ(Note_kind::unknown_rest_service, o.notes[3].kind);
+  EXPECT_EQ(Note_kind::rest_none_in_use, o.notes[4].kind);
+  EXPECT_NE(std::string::npos, o.notes[4].message.find("names no REST SCHEMA")) << o.notes[4].message;
+}
+
+// The current service follows an ALTER REST SERVICE ... NEW REQUEST PATH
+// (its schema stays current); DROP REST SCHEMA / SERVICE of the current one
+// clears it, as MariaDB Shell does.
+TEST(Catalog, rest_current_follows_rename_and_drop) {
+  const auto o = outline_of(
+      "CREATE REST SERVICE /a;\n"
+      "USE REST SERVICE /a;\n"
+      "CREATE REST SCHEMA /s FROM sakila;\n"                       // current
+      "ALTER REST SERVICE /a NEW REQUEST PATH /b;\n"
+      "CREATE REST VIEW /v1 AS sakila.actor;\n"                    // /b, /s
+      "DROP REST SCHEMA /s;\n"
+      "CREATE REST VIEW /v2 AS sakila.actor;\n"                    // no schema in use
+      "DROP REST SERVICE /b;\n"
+      "CREATE REST CONTENT SET /cs;\n");                           // no service in use
+  EXPECT_TRUE(o.catalog.rest_services().empty());
+  ASSERT_EQ(2u, o.notes.size());
+  EXPECT_EQ(Note_kind::rest_none_in_use, o.notes[0].kind);
+  EXPECT_NE(std::string::npos, o.notes[0].message.find("names no REST SCHEMA")) << o.notes[0].message;
+  EXPECT_EQ(Note_kind::rest_none_in_use, o.notes[1].kind);
+  EXPECT_NE(std::string::npos, o.notes[1].message.find("names no REST SERVICE")) << o.notes[1].message;
+}
+
+TEST(Catalog, rest_current_schema_survives_rename) {
+  const auto o = outline_of(
+      "CREATE REST SERVICE /a;\n"
+      "USE REST SERVICE /a;\n"
+      "CREATE REST SCHEMA /s FROM sakila;\n"
+      "ALTER REST SERVICE /a NEW REQUEST PATH /b;\n"
+      "CREATE REST VIEW /v AS sakila.actor;\n");
+  EXPECT_TRUE(o.notes.empty());
+  const auto &svcs = o.catalog.rest_services();
+  ASSERT_EQ(1u, svcs.size());
+  EXPECT_EQ("/b", svcs[0].path);
+  ASSERT_EQ(1u, svcs[0].schemas.size());
+  ASSERT_EQ(1u, svcs[0].schemas[0].objects.size());
+  EXPECT_EQ("/v", svcs[0].schemas[0].objects[0].path);
+}
+
+// What `mariadb-lsp outline --features` prints: every feature, in the
+// format msm reads.
+TEST(Catalog, outline_features_json) {
+  std::string expected = "{\"format\":1,\"features\":[";
+  bool first = true;
+  for (const char *f : outline_features()) {
+    expected += (first ? "\"" : ",\"") + std::string(f) + "\"";
+    first = false;
+  }
+  expected += "]}";
+  EXPECT_EQ(expected, outline_features_json());
+  EXPECT_NE(std::string::npos, expected.find("\"rest_declared\""));
+}
+
+// CREATE REST SCHEMA IF NOT EXISTS keeps a schema the file has; DROP REST
+// CONTENT SET matches the unquoted path; a CREATE of a new service ignores
+// REMOVE AUTH APP, as MariaDB Shell does.
+TEST(Catalog, rest_if_not_exists_and_quoted_paths) {
+  const auto o = outline_of(
+      "CREATE REST SERVICE /n ADD AUTH APP a REMOVE AUTH APP a;\n"
+      "CREATE REST SCHEMA /s ON SERVICE /n FROM sakila;\n"
+      "CREATE REST SCHEMA IF NOT EXISTS /s ON SERVICE /n FROM world;\n"
+      "CREATE REST CONTENT SET '/cs' ON SERVICE /n;\n"
+      "DROP REST CONTENT SET '/cs' FROM SERVICE /n;\n");
+  EXPECT_TRUE(o.notes.empty());
+  const auto &svcs = o.catalog.rest_services();
+  ASSERT_EQ(1u, svcs.size());
+  ASSERT_EQ(1u, svcs[0].schemas.size());
+  EXPECT_EQ("sakila", svcs[0].schemas[0].schema);
+  EXPECT_TRUE(svcs[0].content_sets.empty());
+  ASSERT_EQ(1u, svcs[0].auth_apps.size());
+  EXPECT_EQ("a", svcs[0].auth_apps[0].name);
+}
+
+// `declared`: the file has a CREATE REST SERVICE / SCHEMA for it, not just a
+// statement naming it (msm never drops a service a release only references).
+TEST(Catalog, rest_declared) {
+  const auto o = outline_of(
+      "CREATE REST SCHEMA /q ON SERVICE /shared FROM a;\n"
+      "CREATE REST VIEW /v ON SERVICE /shared SCHEMA /implicit AS a.t;\n"
+      "CREATE REST SERVICE /own;\n"
+      "CREATE REST VIEW /v ON SERVICE /own SCHEMA /later AS a.t;\n"
+      "CREATE REST SCHEMA IF NOT EXISTS /later ON SERVICE /own FROM a;\n");
+  const auto &svcs = o.catalog.rest_services();
+  ASSERT_EQ(2u, svcs.size());
+  EXPECT_FALSE(svcs[0].declared);
+  ASSERT_EQ(2u, svcs[0].schemas.size());
+  EXPECT_TRUE(svcs[0].schemas[0].declared);
+  EXPECT_FALSE(svcs[0].schemas[1].declared);
+  EXPECT_TRUE(svcs[1].declared);
+  ASSERT_EQ(1u, svcs[1].schemas.size());
+  EXPECT_TRUE(svcs[1].schemas[0].declared);  // IF NOT EXISTS of a schema only named creates it
+  EXPECT_EQ("a", svcs[1].schemas[0].schema);
+  EXPECT_EQ(1u, svcs[1].schemas[0].objects.size());
+  const std::string json = outline_json(o, "", Line_map(""));
+  EXPECT_NE(std::string::npos, json.find("{\"path\":\"/shared\",\"declared\":false,")) << json;
+  EXPECT_NE(std::string::npos, json.find("{\"path\":\"/q\",\"schema\":\"a\",\"declared\":true,")) << json;
+}
+
+// DROP REST SCHEMA ... FOR DATABASE db drops the REST schema only when it
+// exposes database schema db (msm's drop of a moved REST schema).
+TEST(Catalog, rest_drop_for_database) {
+  const auto o = outline_of(
+      "CREATE REST SERVICE /s;\n"
+      "CREATE REST SCHEMA /app ON SERVICE /s FROM b;\n"
+      "CREATE REST SCHEMA /old ON SERVICE /s FROM `A`;\n"
+      "DROP REST SCHEMA IF EXISTS /app FROM SERVICE /s FOR DATABASE a;\n"
+      "DROP REST DATABASE IF EXISTS /old FROM SERVICE /s FOR SCHEMA a;\n"
+      "DROP REST SCHEMA IF EXISTS /none FROM SERVICE /s FOR DATABASE a;\n"
+      "DROP REST SCHEMA IF EXISTS /app FROM /s FOR DATABASE c;\n");  // the shell's grammar_test form
+  EXPECT_TRUE(o.notes.empty());
+  EXPECT_EQ(7u, o.applied);
+  const auto &svcs = o.catalog.rest_services();
+  ASSERT_EQ(1u, svcs.size());
+  ASSERT_EQ(1u, svcs[0].schemas.size());  // /app is on b: kept; /old on `A`: dropped
+  EXPECT_EQ("/app", svcs[0].schemas[0].path);
+  EXPECT_EQ("b", svcs[0].schemas[0].schema);
+}
+
+// A REST schema only named (no database known) is dropped as without FOR
+// DATABASE; a FOR DATABASE that names another database keeps the current one.
+TEST(Catalog, rest_drop_for_database_unknown_and_current) {
+  const auto o = outline_of(
+      "CREATE REST SERVICE /s;\n"
+      "USE REST SERVICE /s;\n"
+      "CREATE REST VIEW /v ON SCHEMA /p AS a.t;\n"
+      "DROP REST SCHEMA /p FOR DATABASE a;\n"
+      "CREATE REST SCHEMA /q FROM b;\n"
+      "DROP REST SCHEMA /q FOR DATABASE c;\n"
+      "CREATE REST VIEW /w AS b.t;\n");
+  EXPECT_TRUE(o.notes.empty());
+  const auto &svcs = o.catalog.rest_services();
+  ASSERT_EQ(1u, svcs.size());
+  ASSERT_EQ(1u, svcs[0].schemas.size());
+  EXPECT_EQ("/q", svcs[0].schemas[0].path);
+  ASSERT_EQ(1u, svcs[0].schemas[0].objects.size());  // /q stayed current
+  EXPECT_EQ("/w", svcs[0].schemas[0].objects[0].path);
 }
 
 TEST(Catalog, named_key_replaces_its_namesake) {
