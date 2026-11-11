@@ -547,6 +547,8 @@ class Json_outline {
     for (const auto &svc : c.rest_services()) {
       w_.StartObject();
       str("path", svc.path);
+      w_.Key("declared");
+      w_.Bool(svc.declared);
       origin(svc.origin);
       w_.Key("schemas");
       w_.StartArray();
@@ -554,6 +556,8 @@ class Json_outline {
         w_.StartObject();
         str("path", sch.path);
         str_or_null("schema", sch.schema);
+        w_.Key("declared");
+        w_.Bool(sch.declared);
         origin(sch.origin);
         w_.Key("objects");
         w_.StartArray();
@@ -594,6 +598,7 @@ const std::vector<const char *> &outline_features() {
       "view_reads",           // views[].reads
       "rest_auth_app_links",  // rest.services[].auth_apps, ALTER REST SERVICE
       "rest_current_schema",  // USE REST SCHEMA, the shell's current service and schema
+      "rest_declared",        // rest.services[].declared, rest.services[].schemas[].declared
   };
   return features;
 }

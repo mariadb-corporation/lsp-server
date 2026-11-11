@@ -318,6 +318,7 @@ struct Rest_schema {
   std::string path;
   std::string schema;                  // the database schema
   std::vector<Rest_object> objects;
+  bool declared = false;               // created by CREATE REST SCHEMA in the file
   Origin origin;
 };
 
@@ -326,6 +327,7 @@ struct Rest_service {
   std::vector<Rest_schema> schemas;
   std::vector<Named_object> content_sets;
   std::vector<Named_object> auth_apps;  // the linked auth apps (ADD AUTH APP)
+  bool declared = false;               // created by CREATE REST SERVICE in the file
   Origin origin;
 };
 

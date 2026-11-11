@@ -17,6 +17,7 @@ Members added within format 1 are listed as features: `mariadb-lsp outline --fea
 | --- | --- |
 | `view_reads` | `views[].reads` |
 | `rest_auth_app_links` | `rest.services[].auth_apps`; `ALTER REST SERVICE` is applied |
+| `rest_declared` | `declared` on REST services and REST schemas |
 | `rest_current_schema` | `USE REST SCHEMA` is followed, and the service and schema a REST statement does not name are resolved as MariaDB Shell does, with a note where the shell fails |
 
 ## How the outline is built
@@ -224,11 +225,13 @@ binaries before it have no `reads` member.
 
 ## REST objects
 
-`rest` is `{services, auth_apps, roles, users}`. A service is `{path, range, selection_range,
-schemas, content_sets, auth_apps}`; a schema is `{path, schema, range, selection_range, objects}`
-where `schema` is the database schema it exposes, null when the file has no `CREATE REST
-SCHEMA` for that path; an object is `{kind, path, object, range, selection_range}` with `kind`
-one of `view`, `procedure`, `function` and `object` the qualified database object as written,
+`rest` is `{services, auth_apps, roles, users}`. A service is `{path, declared, range,
+selection_range, schemas, content_sets, auth_apps}`; a schema is `{path, schema, declared,
+range, selection_range, objects}` where `schema` is the database schema it exposes, null when
+the file has no `CREATE REST SCHEMA` for that path; `declared` is true when the file has a
+`CREATE REST SERVICE` (`CREATE REST SCHEMA`/`DATABASE`) for it, false for one a statement only
+names (`ON SERVICE /shared`), which a release must not drop. An object is `{kind, path,
+object, range, selection_range}` with `kind` one of `view`, `procedure`, `function` and `object` the qualified database object as written,
 quotes kept, blanks collapsed. `content_sets`, `auth_apps`, `roles` and `users` are arrays of
 `{name, range, selection_range}`; a content set's name is its request path, a user's is
 `user@app`. A service's `auth_apps` are the names of the auth apps linked to it, unquoted, its
@@ -239,8 +242,10 @@ in MariaDB Shell. Paths and names compare without regard to case, as on the serv
 `ADD AUTH APP` links an app, `REMOVE AUTH APP` (with or without `IF EXISTS`) unlinks it, in
 `CREATE` and `ALTER REST SERVICE`. A `CREATE OR REPLACE REST SERVICE` of a service the file has
 updates it in place, as MariaDB Shell does: its schemas, content sets and the links the
-statement does not name stay. `CREATE REST SERVICE IF NOT EXISTS` of such a service changes
-nothing, as does `CREATE REST SCHEMA IF NOT EXISTS` of a schema it has. `ALTER REST SERVICE ... NEW REQUEST PATH` renames the service. `DROP REST AUTH APP`
+statement does not name stay. `CREATE REST SERVICE IF NOT EXISTS` of a service
+the file creates changes nothing, as does `CREATE REST SCHEMA IF NOT EXISTS` of such a schema;
+of one a statement only named, it creates it. `ALTER REST SERVICE ... NEW REQUEST PATH` renames
+the service. `DROP REST AUTH APP`
 also unlinks the app from every service.
 
 The service and schema a statement does not name are resolved as MariaDB Shell's MRS DDL

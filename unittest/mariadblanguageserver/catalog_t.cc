@@ -356,6 +356,31 @@ TEST(Catalog, rest_if_not_exists_and_quoted_paths) {
   EXPECT_EQ("a", svcs[0].auth_apps[0].name);
 }
 
+// `declared`: the file has a CREATE REST SERVICE / SCHEMA for it, not just a
+// statement naming it (msm never drops a service a release only references).
+TEST(Catalog, rest_declared) {
+  const auto o = outline_of(
+      "CREATE REST SCHEMA /q ON SERVICE /shared FROM a;\n"
+      "CREATE REST VIEW /v ON SERVICE /shared SCHEMA /implicit AS a.t;\n"
+      "CREATE REST SERVICE /own;\n"
+      "CREATE REST VIEW /v ON SERVICE /own SCHEMA /later AS a.t;\n"
+      "CREATE REST SCHEMA IF NOT EXISTS /later ON SERVICE /own FROM a;\n");
+  const auto &svcs = o.catalog.rest_services();
+  ASSERT_EQ(2u, svcs.size());
+  EXPECT_FALSE(svcs[0].declared);
+  ASSERT_EQ(2u, svcs[0].schemas.size());
+  EXPECT_TRUE(svcs[0].schemas[0].declared);
+  EXPECT_FALSE(svcs[0].schemas[1].declared);
+  EXPECT_TRUE(svcs[1].declared);
+  ASSERT_EQ(1u, svcs[1].schemas.size());
+  EXPECT_TRUE(svcs[1].schemas[0].declared);  // IF NOT EXISTS of a schema only named creates it
+  EXPECT_EQ("a", svcs[1].schemas[0].schema);
+  EXPECT_EQ(1u, svcs[1].schemas[0].objects.size());
+  const std::string json = outline_json(o, "", Line_map(""));
+  EXPECT_NE(std::string::npos, json.find("{\"path\":\"/shared\",\"declared\":false,")) << json;
+  EXPECT_NE(std::string::npos, json.find("{\"path\":\"/q\",\"schema\":\"a\",\"declared\":true,")) << json;
+}
+
 TEST(Catalog, named_key_replaces_its_namesake) {
   const auto o = outline_of(
       "CREATE TABLE t (a INT, b INT, KEY k (a), KEY k (b), UNIQUE (a), UNIQUE (b));\n");

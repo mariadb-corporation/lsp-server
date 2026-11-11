@@ -1691,7 +1691,7 @@ bool Catalog_fold::rest(uint32_t n) {
     if (!place) return false;
     Rest_service &svc = c_.service(place->first);
     Rest_schema *it = find_rest_schema(svc, place->second);
-    if (it == nullptr) it = &svc.schemas.emplace_back(Rest_schema{place->second, "", {}, {stmt_, stmt_}});
+    if (it == nullptr) it = &svc.schemas.emplace_back(Rest_schema{place->second, "", {}, false, {stmt_, stmt_}});
     const uint32_t p = find(st, path_sym);
     Rest_object o{kind, text(p), text(find(st, s_.mrs_qualified_identifier)), origin(p)};
     auto ex = std::find_if(it->objects.begin(), it->objects.end(), [&](const Rest_object &x) {
@@ -1722,11 +1722,14 @@ bool Catalog_fold::rest(uint32_t n) {
   if (sym == s_.mrs_create_rest_service_statement) {
     // OR REPLACE (and a CREATE of a service the file has) updates the
     // service in place: its schemas, content sets and the links the
-    // statement does not name stay.  IF NOT EXISTS keeps it as it is.
+    // statement does not name stay.  IF NOT EXISTS keeps it as it is, when
+    // the file created it (not when a statement only named it).
     const uint32_t prefix = child(st, s_.mrs_create_rest_service_prefix);
-    const bool existed = c_.find_service(service_path) != nullptr;
-    if (existed && find(prefix, s_.IF_SYM) != npos) return true;
+    const Rest_service *had = c_.find_service(service_path);
+    const bool existed = had != nullptr;
+    if (existed && had->declared && find(prefix, s_.IF_SYM) != npos) return true;
     Rest_service &svc = c_.service(service_path);
+    svc.declared = true;
     svc.origin = origin(find(st, s_.mrs_service_request_path));
     link_auth_apps(svc, existed);
     return true;
@@ -1773,9 +1776,12 @@ bool Catalog_fold::rest(uint32_t n) {
     // Without a request path the shell takes /<database schema>.
     rs.path = schema_node != npos ? schema_path : "/" + rs.schema;
     rs.origin = origin(schema_node != npos ? schema_node : child(st, s_.mrs_identifier));
+    rs.declared = true;
     if (Rest_schema *it = find_rest_schema(svc, rs.path)) {
-      // IF NOT EXISTS keeps the schema as it is, as the shell does.
-      if (find(child(st, s_.mrs_create_rest_schema_prefix), s_.IF_SYM) != npos) return true;
+      // IF NOT EXISTS keeps a schema the file created as it is, as the
+      // shell does.
+      if (it->declared && find(child(st, s_.mrs_create_rest_schema_prefix), s_.IF_SYM) != npos)
+        return true;
       rs.objects = std::move(it->objects);
       *it = std::move(rs);
     } else {
