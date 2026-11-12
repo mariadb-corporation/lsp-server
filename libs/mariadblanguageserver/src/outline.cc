@@ -282,10 +282,10 @@ class Json_outline {
       w_.Null();
     }
   }
-  void opt_uint(const char *key, const std::optional<uint32_t> &v) {
+  void opt_uint(const char *key, const std::optional<uint64_t> &v) {
     w_.Key(key);
     if (v) {
-      w_.Uint(*v);
+      w_.Uint64(*v);
     } else {
       w_.Null();
     }
@@ -592,7 +592,7 @@ class Json_outline {
   void raw_json(const char *key, const std::optional<std::string> &v) {
     w_.Key(key);
     if (v) {
-      w_.RawValue(v->data(), v->size(), v->front() == '{' ? rapidjson::kObjectType : rapidjson::kStringType);
+      w_.RawValue(v->data(), v->size(), rapidjson::kObjectType);  // the type is not checked
     } else {
       w_.Null();
     }
@@ -606,10 +606,10 @@ class Json_outline {
       w_.Key("reference");
       if (f.reference) {
         w_.StartObject();
-        opt_str("schema", f.ref_schema);
-        str("table", f.ref_table);
+        opt_str("schema", f.reference->schema);
+        str("table", f.reference->table);
         w_.Key("fields");
-        rest_fields(f.fields);
+        rest_fields(f.reference->fields);
         w_.EndObject();
       } else {
         w_.Null();
@@ -642,20 +642,16 @@ class Json_outline {
     w_.EndArray();
     opt_str("enabled", o.enabled);
     opt_bool("requires_auth", o.requires_auth);
-    w_.Key("items_per_page");
-    if (o.items_per_page) w_.Uint64(*o.items_per_page); else w_.Null();
+    opt_uint("items_per_page", o.items_per_page);
     opt_str("comment", o.comment);
     opt_str("media_type", o.media_type);
-    w_.Key("media_type_autodetect");
-    w_.Bool(o.media_type_autodetect);
+    boolean("media_type_autodetect", o.media_type_autodetect);
     opt_str("format", o.format);
     opt_str("auth_procedure", o.auth_procedure);
     raw_json("options", o.options);
-    w_.Key("merge_options");
-    w_.Bool(o.merge_options);
+    boolean("merge_options", o.merge_options);
     raw_json("metadata", o.metadata);
-    w_.Key("force");
-    w_.Bool(o.force);
+    boolean("force", o.force);
   }
 
   Writer &w_;

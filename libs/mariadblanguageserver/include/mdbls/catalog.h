@@ -307,14 +307,20 @@ struct Schema {
   bool empty() const;
 };
 
+struct Rest_field;
+
+// `key: [schema.]table { ... }` in a REST object's data mapping.
+struct Rest_reference {
+  std::optional<std::string> schema;   // when qualified
+  std::string table;
+  std::vector<Rest_field> fields;
+};
+
 // A `key: value @OPTION ... { ... }` pair of a REST object's data mapping.
 struct Rest_field {
   std::string name;                    // the JSON key, unquoted
   std::optional<std::string> column;   // the column or parameter; nullopt for a reference
-  bool reference = false;              // `key: [schema.]table { ... }`
-  std::optional<std::string> ref_schema;  // a reference's schema, when qualified
-  std::string ref_table;
-  std::vector<Rest_field> fields;      // a reference's fields
+  std::optional<Rest_reference> reference;
   std::vector<std::string> options;    // @OPTIONs, upper-case, without @, but DATATYPE
   std::optional<std::string> datatype; // @DATATYPE("...")'s text
   std::optional<std::string> json_schema;  // JSON SCHEMA's value, as JSON text
@@ -350,7 +356,9 @@ struct Rest_object {
   std::optional<std::string> format;                // FEED, ITEM, MEDIA
   std::optional<std::string> auth_procedure;        // unquoted, schema.name
   std::optional<std::string> options;               // OPTIONS, as JSON text
-  bool merge_options = false;                       // ... written MERGE OPTIONS
+  // `options` is a patch to options the file does not know (JSON merge
+  // patch); never for a CREATE, which stores MERGE OPTIONS as they are.
+  bool merge_options = false;
   std::optional<std::string> metadata;              // METADATA, as JSON text
   bool force = false;                               // a routine's FORCE
 };

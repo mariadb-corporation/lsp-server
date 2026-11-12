@@ -267,8 +267,8 @@ otherwise it changes nothing, and is still applied, with no note. `DROP REST SER
 the current one clears it.
 
 A `CREATE OR REPLACE REST VIEW`, `PROCEDURE` or `FUNCTION`, or a plain `CREATE`, of an object
-the file has replaces it with the last statement's definition. `CREATE ... IF NOT EXISTS` of an
-object the file has changes nothing, as in MariaDB Shell.
+the file has replaces it with the last statement's definition. `CREATE ... IF NOT EXISTS` at a
+request path where the file has an object, of any kind, changes nothing, as in MariaDB Shell.
 
 ### REST object details
 
@@ -295,7 +295,7 @@ statement writes an option more than once, the last one counts.
 | `format` | string \| null | `FORMAT FEED`, `ITEM` or `MEDIA` |
 | `auth_procedure` | string \| null | `AUTHENTICATION PROCEDURE`, `schema.name` or `name` |
 | `options` | object \| null | `OPTIONS` / `MERGE OPTIONS`, as JSON |
-| `merge_options` | boolean | the `options` were written `MERGE OPTIONS`: the shell merges them into the stored options (JSON merge patch); the outline does not |
+| `merge_options` | boolean | `options` is a JSON merge patch to options the file does not know. Always false here: a `CREATE` stores `MERGE OPTIONS` as the whole options, as MariaDB Shell does, and `ALTER REST VIEW`/`PROCEDURE`/`FUNCTION` is not applied |
 | `metadata` | object \| null | `METADATA`, as JSON |
 | `force` | boolean | a routine's `FORCE` |
 

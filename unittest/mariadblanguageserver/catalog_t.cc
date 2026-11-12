@@ -1011,7 +1011,8 @@ TEST(Catalog, rest_view_details) {
       "CREATE REST VIEW /empty ON SERVICE /svc SCHEMA /s AS city {} MEDIA TYPE AUTODETECT;\n"
       "CREATE REST VIEW /plain ON SERVICE /svc SCHEMA /s AS country;\n"
       "CREATE REST VIEW IF NOT EXISTS /plain ON SERVICE /svc SCHEMA /s AS other.country\n"
-      "  COMMENT 'ignored';\n");
+      "  COMMENT 'ignored';\n"
+      "CREATE REST PROCEDURE IF NOT EXISTS /plain ON SERVICE /svc SCHEMA /s AS p;\n");
   EXPECT_TRUE(o.notes.empty());
   const auto &objs = o.catalog.rest_services().at(0).schemas.at(0).objects;
   ASSERT_EQ(3u, objs.size());
@@ -1030,16 +1031,17 @@ TEST(Catalog, rest_view_details) {
   EXPECT_TRUE(f[1].options.empty());
   EXPECT_EQ("varchar(45)", f[1].datatype.value_or(""));
   EXPECT_EQ("{\"type\":\"string\",\"n\":[1,-2.5,0.5,true,null]}", f[2].json_schema.value_or(""));
-  EXPECT_TRUE(f[3].reference);
+  ASSERT_TRUE(f[3].reference);
   EXPECT_FALSE(f[3].column);
-  EXPECT_EQ("sakila", f[3].ref_schema.value_or(""));
-  EXPECT_EQ("film_actor", f[3].ref_table);
+  EXPECT_EQ("sakila", f[3].reference->schema.value_or(""));
+  EXPECT_EQ("film_actor", f[3].reference->table);
   EXPECT_EQ((std::vector<std::string>{"UNNEST"}), f[3].options);
-  ASSERT_EQ(2u, f[3].fields.size());
-  EXPECT_TRUE(f[3].fields[1].reference);
-  EXPECT_FALSE(f[3].fields[1].ref_schema);
-  EXPECT_EQ("film", f[3].fields[1].ref_table);
-  ASSERT_EQ(1u, f[3].fields[1].fields.size());
+  const auto &sub = f[3].reference->fields;
+  ASSERT_EQ(2u, sub.size());
+  ASSERT_TRUE(sub[1].reference);
+  EXPECT_FALSE(sub[1].reference->schema);
+  EXPECT_EQ("film", sub[1].reference->table);
+  EXPECT_EQ(1u, sub[1].reference->fields.size());
   EXPECT_EQ("PRIVATE", v.enabled.value_or(""));
   EXPECT_EQ(std::optional<bool>(false), v.requires_auth);
   EXPECT_EQ(std::optional<uint64_t>(25), v.items_per_page);
@@ -1049,7 +1051,7 @@ TEST(Catalog, rest_view_details) {
   EXPECT_EQ("FEED", v.format.value_or(""));
   EXPECT_EQ("sakila.auth", v.auth_procedure.value_or(""));
   EXPECT_EQ("{\"b\":2}", v.options.value_or(""));
-  EXPECT_TRUE(v.merge_options);
+  EXPECT_FALSE(v.merge_options);  // a CREATE takes MERGE OPTIONS as the whole options
   EXPECT_EQ("{\"x\":[]}", v.metadata.value_or(""));
 
   EXPECT_EQ("", objs[1].object_schema);

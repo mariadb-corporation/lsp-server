@@ -21,7 +21,10 @@
 #include <cctype>
 #include <cstdlib>
 #include <optional>
+#include <span>
 #include <utility>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 
 #include "mdbls/keywords.h"
 #include "text_util.h"
@@ -416,7 +419,11 @@ class Catalog_fold {
   std::vector<Rest_field> rest_fields(uint32_t graphql_obj) const;
   Rest_field_set rest_field_set(uint32_t n, int name_sym) const;
   std::string rest_annotation(uint32_t annotation) const;
+  // A mrs_json_value as JSON text: single-quoted strings become JSON
+  // strings, numbers JSON numbers.
+  using Json_writer = rapidjson::Writer<rapidjson::StringBuffer>;
   std::string rest_json(uint32_t json_value) const;
+  void write_json(Json_writer &w, uint32_t json_value) const;
   std::string rest_string(uint32_t text_string) const {
     return unquote_string(trim(raw(text_string)));
   }
@@ -1657,31 +1664,6 @@ bool Catalog_fold::rename(uint32_t n) {
 
 namespace {
 
-// `s` as a JSON string.
-std::string json_quote(std::string_view s) {
-  std::string out = "\"";
-  for (const char c : s) {
-    switch (c) {
-      case '"': out += "\\\""; break;
-      case '\\': out += "\\\\"; break;
-      case '\n': out += "\\n"; break;
-      case '\r': out += "\\r"; break;
-      case '\t': out += "\\t"; break;
-      default:
-        if (static_cast<unsigned char>(c) < 0x20) {
-          static const char hex[] = "0123456789abcdef";
-          out += "\\u00";
-          out.push_back(hex[(c >> 4) & 0xf]);
-          out.push_back(hex[c & 0xf]);
-        } else {
-          out.push_back(c);
-        }
-    }
-  }
-  out.push_back('"');
-  return out;
-}
-
 // A SQL number as a JSON number: 007 -> 7, .5 -> 0.5, 5. -> 5.0.
 std::string json_number(std::string_view s) {
   const size_t e = s.find_first_of("eE");
@@ -1699,10 +1681,7 @@ std::string json_number(std::string_view s) {
 }  // namespace
 
 std::pair<std::string, std::string> Catalog_fold::rest_qualified(uint32_t n) const {
-  const auto ids = find_all(n, s_.mrs_identifier);
-  if (ids.size() >= 2) return {name_of(ids[0]), name_of(ids[1])};
-  if (ids.size() == 1) return {"", name_of(ids[0])};
-  return {"", name_of(n)};
+  return written_name(find_all(n, s_.mrs_identifier));
 }
 
 // @NAME -> NAME
@@ -1713,32 +1692,46 @@ std::string Catalog_fold::rest_annotation(uint32_t a) const {
 }
 
 std::string Catalog_fold::rest_json(uint32_t v) const {
-  if (v == npos) return "null";
-  const auto ch = t_.children(v);
-  if (ch.empty()) return "null";
+  rapidjson::StringBuffer buf;
+  Json_writer w(buf);
+  write_json(w, v);
+  return buf.GetString();
+}
+
+void Catalog_fold::write_json(Json_writer &w, uint32_t v) const {
+  const auto ch = v == npos ? std::span<const uint32_t>{} : t_.children(v);
+  if (ch.empty()) { w.Null(); return; }
   const uint32_t first = ch[0];
   const int sym = t_.node(first).symbol;
-  if (sym == s_.TEXT_STRING) return json_quote(rest_string(first));
-  if (sym == s_.mrs_json_number) return json_number(text(first));
-  if (sym == s_.mrs_json_obj) {
-    std::string out = "{";
+  auto string = [&](uint32_t n) {
+    const std::string s = rest_string(n);
+    w.String(s.data(), static_cast<rapidjson::SizeType>(s.size()));
+  };
+  auto number = [&](const std::string &n) {
+    w.RawValue(n.data(), n.size(), rapidjson::kNumberType);  // RawNumber would quote it
+  };
+  if (sym == s_.TEXT_STRING) {
+    string(first);
+  } else if (sym == s_.mrs_json_number) {
+    number(json_number(text(first)));
+  } else if (sym == s_.mrs_json_obj) {
+    w.StartObject();
     for (const uint32_t p : find_all(first, s_.mrs_json_pair)) {
-      if (out.size() > 1) out += ",";
-      out += json_quote(rest_string(child(p, s_.TEXT_STRING))) + ":" + rest_json(child(p, s_.mrs_json_value));
+      string(child(p, s_.TEXT_STRING));
+      write_json(w, child(p, s_.mrs_json_value));
     }
-    return out + "}";
+    w.EndObject();
+  } else if (sym == s_.mrs_json_arr) {
+    w.StartArray();
+    for (const uint32_t x : find_all(first, s_.mrs_json_value)) write_json(w, x);
+    w.EndArray();
+  } else if (sym == s_.TRUE_SYM || sym == s_.FALSE_SYM) {
+    w.Bool(sym == s_.TRUE_SYM);
+  } else if (const std::string t = text(first); t == "-" || t == "+") {
+    number((t == "-" ? "-" : "") + json_number(text(nth(v, 1))));
+  } else {
+    w.Null();
   }
-  if (sym == s_.mrs_json_arr) {
-    std::string out = "[";
-    for (const uint32_t x : find_all(first, s_.mrs_json_value)) {
-      if (out.size() > 1) out += ",";
-      out += rest_json(x);
-    }
-    return out + "]";
-  }
-  const std::string t = text(first);
-  if (t == "-" || t == "+") return (t == "-" ? "-" : "") + json_number(text(nth(v, 1)));
-  return lower(t);  // true, false, null
 }
 
 std::vector<Rest_field> Catalog_fold::rest_fields(uint32_t obj) const {
@@ -1751,15 +1744,15 @@ std::vector<Rest_field> Catalog_fold::rest_fields(uint32_t obj) const {
     const uint32_t q = child(value, s_.mrs_qualified_identifier);
     const uint32_t sub = child(child(p, s_.mrs_opt_graphql_obj), s_.mrs_graphql_obj);
     if (sub != npos) {
-      f.reference = true;
+      Rest_reference &r = f.reference.emplace();
       if (q != npos) {
         auto [s, t] = rest_qualified(q);
-        if (!s.empty()) f.ref_schema = std::move(s);
-        f.ref_table = std::move(t);
+        if (!s.empty()) r.schema = std::move(s);
+        r.table = std::move(t);
       } else {
-        f.ref_table = text(value);
+        r.table = text(value);
       }
-      f.fields = rest_fields(sub);
+      r.fields = rest_fields(sub);
     } else {
       f.column = q != npos ? rest_dotted(q) : text(value);
     }
@@ -1823,7 +1816,7 @@ void Catalog_fold::rest_object_details(Rest_object &o, uint32_t st) const {
       const std::string num = text(find(item, s_.mrs_int_number));
       o.items_per_page = std::strtoull(num.c_str(), nullptr, 10);
     } else if (is == s_.mrs_json_options) {
-      o.merge_options = find(item, s_.MERGE_SYM) != npos;
+      // A CREATE stores MERGE OPTIONS as the whole options, as the shell does.
       o.options = rest_json(child(item, s_.mrs_json_value));
     } else if (is == s_.mrs_comments) {
       o.comment = rest_string(child(item, s_.TEXT_STRING));
@@ -1910,9 +1903,13 @@ bool Catalog_fold::rest(uint32_t n) {
     auto ex = std::find_if(it->objects.begin(), it->objects.end(), [&](const Rest_object &x) {
       return iequals(x.path, o.path) && x.kind == o.kind;
     });
-    // IF NOT EXISTS keeps an object the file created as it is, as the shell
-    // does.
-    if (ex != it->objects.end() && find(nth(st, 0), s_.IF_SYM) != npos) return true;
+    // IF NOT EXISTS keeps an object the file created at the path, of any
+    // kind, as it is, as the shell does (it looks the path up alone).
+    if (find(nth(st, 0), s_.IF_SYM) != npos &&
+        std::any_of(it->objects.begin(), it->objects.end(),
+                    [&](const Rest_object &x) { return iequals(x.path, o.path); })) {
+      return true;
+    }
     rest_object_details(o, st);
     if (ex != it->objects.end()) *ex = std::move(o); else it->objects.push_back(std::move(o));
     return true;
