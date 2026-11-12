@@ -2791,6 +2791,40 @@ TEST(Schema_edit, placement_at_a_line) {
   };
   EXPECT_EQ("line 5 of the script is past its end: its last line is 4", refused(k_two_tables, 5));
   EXPECT_EQ("line 1 of the script starts inside a statement", refused("CREATE TABLE a (\n  id INT\n);\n", 1));
+  // A comment is no statement: below a block comment (the splitter gives
+  // it, its blank lines and the next "--" line as one entry) a line is
+  // free; inside the comment, or on its closing line, it is not.
+  const std::string commented = "CREATE TABLE a (id INT);\n\n/*\nCREATE TABLE x (id INT);\n*/\n\n\n-- next\n";
+  const std::string below = "CREATE TABLE a (id INT);\n\n/*\nCREATE TABLE x (id INT);\n*/\n\n"
+                            "CREATE VIEW v AS SELECT 1;\n\n\n-- next\n";
+  for (const int line : {5, 6, 7}) {
+    EXPECT_EQ(below, text(ok(edit_main(commented, {}, request("", add_view_at("v", at("", line))))), "")) << line;
+  }
+  EXPECT_EQ("line 3 of the script starts inside a statement", refused(commented, 3));
+  EXPECT_EQ("line 4 of the script starts inside a statement", refused(commented, 4));
+  // Between a statement's leading comment and its text, too.
+  EXPECT_EQ("/* b */\n\nCREATE VIEW v AS SELECT 1;\n\nCREATE TABLE b (id INT);\n",
+            text(ok(edit_main("/* b */\nCREATE TABLE b (id INT);\n", {}, request("", add_view_at("v", at("", 1))))), ""));
+}
+
+TEST(Schema_edit, placement_at_a_line_quotes_as_the_name_near) {
+  // The nearest CREATE above names its object in backticks on its second
+  // line, and a later statement defines that view again (MSM Sections 120
+  // and 910): still its quoting, not the unquoted CREATE SCHEMA's.
+  const std::string script = "CREATE SCHEMA IF NOT EXISTS shop;\nUSE shop;\n\n"
+                             "CREATE OR REPLACE SQL SECURITY INVOKER\nVIEW `version` (`major`) AS\nSELECT 0;\n\n"
+                             "-- tables\n\n"
+                             "USE shop;\nCREATE OR REPLACE VIEW `version` (`major`) AS SELECT 1;\n";
+  const auto r = ok(edit_main(script, {}, request("shop", add_table_at("t", at("", 8)))));
+  EXPECT_NE(std::string::npos, text(r, "").find("CREATE TABLE `t` (")) << text(r, "");
+  // A CREATE's name decides, not a DEFINER in backticks or a leading
+  // comment's backticks.
+  for (const std::string near : {"CREATE DEFINER=`root`@`%` VIEW other.v AS SELECT 1;\n",
+                                 "-- the `v` view\nCREATE VIEW other.v AS SELECT 1;\n"}) {
+    const auto u = ok(edit_main("CREATE SCHEMA shop;\nUSE shop;\n\n" + near + "\n", {},
+                                request("shop", add_table_at("t", at("", 4 + (near[0] == '-'))))));
+    EXPECT_NE(std::string::npos, text(u, "").find("CREATE TABLE t (")) << text(u, "");
+  }
 }
 
 TEST(Schema_edit, placement_forms) {
