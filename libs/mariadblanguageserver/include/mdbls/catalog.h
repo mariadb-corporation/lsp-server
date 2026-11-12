@@ -21,6 +21,7 @@
 #include <compare>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -412,6 +413,19 @@ struct Rest_service {
   Origin origin;
 };
 
+// A statement about a REST service, schema, object or content set (outline
+// feature rest_statements).
+struct Rest_statement {
+  std::string kind;                    // create, alter, use, drop
+  Origin origin;                       // the statement, and the item's name in it
+  // The comment lines right above it (no blank line between), as its
+  // `statement` range; none when they reach an MSM section marker.
+  std::optional<Origin> leading_comments;
+  bool shared = false;                 // it is also another item's (USE REST SERVICE s SCHEMA p)
+  bool auth_apps_only = false;         // an ALTER REST SERVICE of ADD / REMOVE AUTH APP alone
+  uint32_t order = 0;                  // fold order, across files and includes
+};
+
 // The schema objects a script defines, folded statement by statement in file
 // order: CREATE adds, ALTER changes, DROP removes, RENAME renames, USE sets
 // the schema unqualified names belong to.  Names compare without regard to
@@ -430,6 +444,14 @@ class Catalog {
   const std::vector<Named_object> &rest_roles() const { return m_roles; }
   const std::vector<Named_object> &rest_users() const { return m_users; }
   const std::string &current_schema() const { return m_current; }
+  // Every statement about a REST item, in file order, also those before a
+  // DROP and re-CREATE of it or written under an earlier path.
+  const std::vector<Rest_statement> &rest_statements(const Rest_service &svc) const;
+  const std::vector<Rest_statement> &rest_statements(const Rest_service &svc, const Rest_schema &rs) const;
+  const std::vector<Rest_statement> &rest_statements(const Rest_service &svc, const Rest_schema &rs,
+                                                     const Rest_object &o) const;
+  const std::vector<Rest_statement> &rest_content_set_statements(const Rest_service &svc,
+                                                                 const Named_object &content_set) const;
   const Schema *find(std::string_view schema) const;
 
   // The source index new origins get (see Origin); 0 by default.
@@ -463,6 +485,14 @@ class Catalog {
   std::vector<Named_object> m_auth_apps;
   std::vector<Named_object> m_roles;
   std::vector<Named_object> m_users;
+  // The statements of each REST item by its key (catalog.cc, rest_key_*):
+  // a schema's key extends its service's, an object's its schema's.
+  std::map<std::string, std::vector<Rest_statement>> m_rest_statements;
+  uint32_t m_rest_statement_count = 0;  // the next Rest_statement::order
+  const std::vector<Rest_statement> &rest_statements_of(const std::string &key) const;
+  // Moves the statements of `from` and of the items under it to `to` (a
+  // renamed service or schema).
+  void rekey_rest_statements(const std::string &from, const std::string &to);
   std::vector<Note> m_notes;
   uint32_t m_source = 0;
 

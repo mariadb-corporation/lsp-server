@@ -21,6 +21,7 @@
 #include <rapidjson/writer.h>
 
 #include <algorithm>
+#include <functional>
 #include <optional>
 
 #include "mdbls/lsp/json_position.h"
@@ -255,18 +256,24 @@ class Json_outline {
   // An object from an included file: `source` is its index in `includes`,
   // its ranges are positions in that file.
   void origin(const Origin &o) {
-    if (o.source > 0 && o.source <= includes_.size()) {
-      const auto &inc = includes_[o.source - 1];
+    if (included(o)) {
       w_.Key("source");
       w_.Uint(o.source - 1);
-      w_.Key("range");
-      lsp::write_range(w_, inc.text, inc.lines, o.statement.begin, o.statement.end);
-      w_.Key("selection_range");
-      lsp::write_range(w_, inc.text, inc.lines, o.name.begin, o.name.end);
-      return;
     }
-    range("range", o.statement);
-    range("selection_range", o.name);
+    w_.Key("range");
+    source_range(o, o.statement);
+    w_.Key("selection_range");
+    source_range(o, o.name);
+  }
+  bool included(const Origin &o) const { return o.source > 0 && o.source <= includes_.size(); }
+  // `r`, a range in the file `o` comes from.
+  void source_range(const Origin &o, Range r) {
+    if (included(o)) {
+      const auto &inc = includes_[o.source - 1];
+      lsp::write_range(w_, inc.text, inc.lines, r.begin, r.end);
+    } else {
+      lsp::write_range(w_, text_, lines_, r.begin, r.end);
+    }
   }
   void options(const std::vector<std::pair<std::string, std::string>> &opts) {
     w_.Key("options");
@@ -294,13 +301,16 @@ class Json_outline {
     w_.Key(key);
     w_.Bool(v);
   }
-  void named(const char *key, const std::vector<Named_object> &v) {
+  // `more` writes further members of each object.
+  void named(const char *key, const std::vector<Named_object> &v,
+             const std::function<void(const Named_object &)> &more = {}) {
     w_.Key(key);
     w_.StartArray();
     for (const auto &o : v) {
       w_.StartObject();
       str("name", o.name);
       origin(o.origin);
+      if (more) more(o);
       w_.EndObject();
     }
     w_.EndArray();
@@ -551,6 +561,7 @@ class Json_outline {
       w_.Bool(svc.declared);
       origin(svc.origin);
       rest_service_settings(svc);
+      rest_statements(c.rest_statements(svc));
       w_.Key("schemas");
       w_.StartArray();
       for (const auto &sch : svc.schemas) {
@@ -561,6 +572,7 @@ class Json_outline {
         w_.Bool(sch.declared);
         origin(sch.origin);
         rest_schema_settings(sch.settings);
+        rest_statements(c.rest_statements(svc, sch));
         w_.Key("objects");
         w_.StartArray();
         for (const auto &o : sch.objects) {
@@ -572,13 +584,15 @@ class Json_outline {
           str("object_name", o.object_name);
           origin(o.origin);
           rest_object_details(o);
+          rest_statements(c.rest_statements(svc, sch, o));
           w_.EndObject();
         }
         w_.EndArray();
         w_.EndObject();
       }
       w_.EndArray();
-      named("content_sets", svc.content_sets);
+      named("content_sets", svc.content_sets,
+            [&](const Named_object &cs) { rest_statements(c.rest_content_set_statements(svc, cs)); });
       named("auth_apps", svc.auth_apps);
       w_.EndObject();
     }
@@ -656,6 +670,28 @@ class Json_outline {
     boolean("merge_options", s.merge_options);
     raw_json("metadata", s.metadata);
   }
+  // Feature rest_statements: every statement about a REST item.
+  void rest_statements(const std::vector<Rest_statement> &statements) {
+    w_.Key("statements");
+    w_.StartArray();
+    for (const auto &s : statements) {
+      w_.StartObject();
+      str("kind", s.kind);
+      origin(s.origin);
+      w_.Key("leading_comments");
+      // Mapped out of an expanded text, the comments above a statement may
+      // lie in another file (above an include directive): none then.
+      if (s.leading_comments && s.leading_comments->source == s.origin.source) {
+        source_range(*s.leading_comments, s.leading_comments->statement);
+      } else {
+        w_.Null();
+      }
+      boolean("shared", s.shared);
+      boolean("auth_apps_only", s.auth_apps_only);
+      w_.EndObject();
+    }
+    w_.EndArray();
+  }
   // Feature rest_settings.
   void rest_service_settings(const Rest_service &svc) {
     const Rest_settings &s = svc.settings;
@@ -702,6 +738,7 @@ const std::vector<const char *> &outline_features() {
       "rest_drop_for_database",  // DROP REST SCHEMA ... FOR DATABASE db
       "rest_object_details",  // a REST object's data mapping, PARAMETERS/RESULT, options
       "rest_settings",        // REST services' and schemas' settings, ALTER REST SCHEMA
+      "rest_statements",      // every statement of each REST service, schema, object, content set
   };
   return features;
 }

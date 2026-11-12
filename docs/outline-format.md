@@ -22,6 +22,7 @@ Members added within format 1 are listed as features: `mariadb-lsp outline --fea
 | `rest_current_schema` | `USE REST SCHEMA` is followed, and the service and schema a REST statement does not name are resolved as MariaDB Shell does, with a note where the shell fails |
 | `rest_object_details` | a REST object's database object unquoted, data mapping, `PARAMETERS`/`RESULT` and options ([REST object details](#rest-object-details)); `CREATE REST VIEW`/`PROCEDURE`/`FUNCTION IF NOT EXISTS` keeps an object the file created |
 | `rest_settings` | the settings of REST services and schemas ([REST settings](#rest-settings)); `ALTER REST SCHEMA` is applied; services with developers are told apart as MariaDB Shell does |
+| `rest_statements` | `statements` on REST services, schemas, objects and content sets: every statement about each ([REST statements](#rest-statements)) |
 
 ## How the outline is built
 
@@ -277,6 +278,29 @@ the current one clears it.
 A `CREATE OR REPLACE REST VIEW`, `PROCEDURE` or `FUNCTION`, or a plain `CREATE`, of an object
 the file has replaces it with the last statement's definition. `CREATE ... IF NOT EXISTS` at a
 request path where the file has an object, of any kind, changes nothing, as in MariaDB Shell.
+
+### REST statements
+
+With feature `rest_statements`, every service, schema, object and content set has
+`statements`: each statement about it, in file order, so that a program can remove an item or
+replace its statement without parsing SQL. An entry is:
+
+| Member | Type | Meaning |
+| --- | --- | --- |
+| `kind` | string | `create`, `alter`, `use` or `drop` |
+| `range`, `selection_range`, `source` | | the statement (from its first keyword, before its delimiter, without comments) and the item's name in it, as an item's own; `source` for a statement in an included file |
+| `leading_comments` | range \| null | the comment lines right above the statement, with no blank line between, in its file; null when there are none, or when they reach an `-- MSM Section` marker line (they are then the section's banner) |
+| `shared` | boolean | the statement is also another item's: `USE REST SERVICE s SCHEMA p` is listed under `s` and under `p` |
+| `auth_apps_only` | boolean | an `ALTER REST SERVICE` whose only clauses are `ADD` / `REMOVE AUTH APP` |
+
+A statement is the item's when it creates (each `CREATE`, also one a later `CREATE OR REPLACE`
+replaced, or an `IF NOT EXISTS` that changed nothing), alters, uses or drops it (also a `DROP
+REST SCHEMA ... FOR SCHEMA db` that dropped nothing). Naming an item as a place (`ON SERVICE`,
+`ON SCHEMA`) does not make a statement that item's. An item lists its own statements only: a
+service's schemas, content sets and the objects of its schemas list theirs. The list follows the
+item across a `DROP` and a new `CREATE` and across a rename (`NEW REQUEST PATH`): it holds the
+statements written under the earlier path too. A statement that is not applied (with a note)
+is no item's.
 
 ### REST settings
 
