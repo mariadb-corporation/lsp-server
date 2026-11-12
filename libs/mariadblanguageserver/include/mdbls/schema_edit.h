@@ -85,6 +85,19 @@ std::string supported_edit_ops();
 // `mariadb-lsp edit --ops` prints.
 std::string edit_ops_json();
 
+// Where an add op puts its statement (`at`, docs/edit-format.md,
+// Placement): in file `file` (the script: "" or its name in the output;
+// an include: its path relative to the source dir, or as resolved), after
+// the statement whose outline range ends at LSP position (line,
+// character), or with `before_line`, at the start of 0-based line `line`.
+// Positions are in the file as it is on disk.
+struct Edit_at {
+  std::string file;
+  bool before_line = false;
+  uint32_t line = 0;
+  uint32_t character = 0;
+};
+
 // One edit of a request.  Which members it uses depends on the op.
 struct Schema_edit {
   Edit_op op = Edit_op::rename_table;
@@ -119,6 +132,11 @@ struct Schema_edit {
   std::string name;
   std::string kind;
   std::vector<std::string> columns;
+  // add_table, add_sequence, add_view, add_routine, add_trigger, add_event:
+  // where the statement goes, and how it is written ("create",
+  // "or_replace", "drop_first"; "" as the neighbour is).
+  std::optional<Edit_at> at;
+  std::string form;
 };
 
 struct Edit_request {
@@ -240,6 +258,9 @@ struct Edit_options {
   std::string source_dir;  // relative SOURCE paths are taken from here
   Source_reader read;      // reads included files; read_sql_file() when empty
   std::string schema;      // in use before the first statement
+  // The script's name in the output ("-" for stdin), which an `at` may
+  // give for the script.
+  std::string script_file;
 };
 
 // Applies `request` to `script` and the files it includes, in order, each

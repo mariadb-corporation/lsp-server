@@ -144,8 +144,9 @@ class Edit_fixture(unittest.TestCase):
         listed = json.loads(answer.stdout)
         self.assertEqual(listed["format"], 1)
         self.assertEqual(listed["ops"], help_ops())
-        # The request's merge_alters is understood.
+        # The request's merge_alters is understood, and the add ops' at and form.
         self.assertIs(listed["merge_alters"], True)
+        self.assertIs(listed["placement"], True)
         # In any order of the arguments.
         self.assertEqual(subprocess.run([BINARY, "--ops", "edit"], capture_output=True, text=True).stdout,
                          answer.stdout)
@@ -671,6 +672,74 @@ class Edit_mrs_project(unittest.TestCase):
         self.assertEqual(code, 0, result)
         self.p.apply(result)
         self.assertEqual(self.p.outline(), before)
+        self.assertEqual({f: f.read_bytes() for f in self.p.dev.rglob("*.sql")}, files)
+
+    def test_placement_as_msm_sends_it(self):
+        """msm places each add op (`at`, `form`) from the outline's ranges."""
+        before = self.p.outline()
+        files = {f: f.read_bytes() for f in self.p.dev.rglob("*.sql")}
+        script = self.p.script
+        schema = next(s for s in before["schemas"] if s["name"] == "mariadb_rest_service")
+        includes = before["includes"]
+
+        def after_last(kind):
+            o = schema[kind][-1]
+            return {"file": includes[o["source"]]["file"], "after": o["range"]["end"]}
+
+        def rel(name):
+            return "sections/" + name
+
+        tables = rel("140-10_tables.sql")
+        first_table = schema["tables"][0]
+        table_banner = first_table["range"]["start"]["line"] - 3  # its "-- ---" border
+        views = (self.p.dev / rel("150-10_views.sql")).read_text()
+        last_table = after_last("tables")
+        last_table["file"] = tables  # by its path relative to --source-dir
+        code, result = self.p.edit([
+            {"op": "add_table", "table": {"name": "zz_table", "columns": [{"name": "id", "type": "INT"}]},
+             "form": "create", "at": last_table},
+            {"op": "add_sequence", "sequence": {"name": "zz_sequence"}, "form": "create",
+             "at": {"file": tables, "line": table_banner}},
+            {"op": "add_view", "view": {"name": "zz_view", "definition": "SELECT 1"}, "form": "or_replace",
+             "at": {"file": rel("150-10_views.sql"), "line": views.count("\n")}},
+            ADD_ROUTINE | {"routine": dict(ADD_ROUTINE["routine"], name="zz_routine"), "form": "drop_first",
+                           "at": {"file": "-", "line": script[:script.index("-- MSM Section 170")].count("\n") - 1}},
+            {"op": "add_event", "event": {"name": "zz_event", "schedule": "EVERY 1 DAY",
+                                          "body": "BEGIN\n  DELETE FROM `audit_log` WHERE FALSE;\nEND"},
+             "form": "or_replace", "at": after_last("events")},
+        ], "mariadb_rest_service")
+        self.assertEqual(code, 0, result)
+        self.p.apply(result)
+        self.assertEqual(self.p.outline(), result["outline"])
+        check = self.p.run("check", "--source-dir", str(self.p.dev), "-")
+        self.assertEqual(check.returncode, 0, check.stdout.decode())
+        text = (self.p.dev / tables).read_text()
+        self.assertLess(text.index("CREATE SEQUENCE `zz_sequence`;"), text.index("-- Table `url_host`"))
+        self.assertIn("CREATE TABLE `zz_table`", text)
+        self.assertTrue((self.p.dev / rel("150-10_views.sql")).read_text().endswith(
+            "\nCREATE OR REPLACE VIEW `zz_view` AS SELECT 1;\n"))
+        # In the events' DELIMITER block, with its delimiter.
+        self.assertIn("CREATE OR REPLACE EVENT `zz_event`",
+                      (self.p.dev / rel("150-50_events.sql")).read_text().split("DELIMITER ;")[-2])
+        # A block of its own: the line is outside one.
+        self.assertRegex(self.p.script, r"DELIMITER (\S+)\nDROP PROCEDURE IF EXISTS `zz_routine`\1\n"
+                                        r"CREATE PROCEDURE `zz_routine`\(\)")
+        self.assertEqual([(m["action"], m["object"], m["name"]) for m in result["migration"]],
+                         [("create", "table", "zz_table"), ("create", "sequence", "zz_sequence"),
+                          ("create", "view", "zz_view"), ("create", "procedure", "zz_routine"),
+                          ("create", "event", "zz_event")])
+        # Dropped again: the files as they were.
+        code, result = self.p.edit([
+            {"op": "drop_event", "event": "zz_event"},
+            {"op": "drop_routine", "routine": "zz_routine"},
+            {"op": "drop_view", "view": "zz_view"},
+            {"op": "drop_sequence", "sequence": "zz_sequence"},
+            {"op": "drop_table", "table": "zz_table"},
+        ], "mariadb_rest_service")
+        self.assertEqual(code, 0, result)
+        self.p.apply(result)
+        self.assertEqual(self.p.outline(), before)
+        self.assertEqual(self.p.script, script)
         self.assertEqual({f: f.read_bytes() for f in self.p.dev.rglob("*.sql")}, files)
 
     def test_new_views_and_routines_in_section_150(self):
