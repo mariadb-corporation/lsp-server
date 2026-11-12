@@ -222,7 +222,7 @@ TEST(Catalog, rest_objects) {
       "DROP REST VIEW /actor;\n");
   const auto &svcs = o.catalog.rest_services();
   ASSERT_EQ(1u, svcs.size());
-  EXPECT_EQ("/svc", svcs[0].path);
+  EXPECT_EQ("/svc", svcs[0].name.path);
   ASSERT_EQ(1u, svcs[0].schemas.size());
   EXPECT_EQ("/sch", svcs[0].schemas[0].path);
   EXPECT_EQ("sakila", svcs[0].schemas[0].schema);
@@ -282,7 +282,7 @@ TEST(Catalog, rest_auth_app_links) {
   EXPECT_TRUE(o.notes.empty());
   const auto &svcs = o.catalog.rest_services();
   ASSERT_EQ(2u, svcs.size());
-  EXPECT_EQ("/memo", svcs[0].path);
+  EXPECT_EQ("/memo", svcs[0].name.path);
   std::vector<std::string> names;
   for (const auto &a : svcs[0].auth_apps) names.push_back(a.name);
   EXPECT_EQ((std::vector<std::string>{"Other", "Third", "MRS"}), names);
@@ -315,7 +315,7 @@ TEST(Catalog, rest_current_service_and_schema) {
       "DROP REST SCHEMA /x;\n");
   const auto &svcs = o.catalog.rest_services();
   ASSERT_EQ(1u, svcs.size());
-  EXPECT_EQ("/notes", svcs[0].path);
+  EXPECT_EQ("/notes", svcs[0].name.path);
   ASSERT_EQ(2u, svcs[0].schemas.size());
   EXPECT_EQ("/sakila", svcs[0].schemas[0].path);
   ASSERT_EQ(1u, svcs[0].schemas[0].objects.size());
@@ -368,7 +368,7 @@ TEST(Catalog, rest_current_schema_survives_rename) {
   EXPECT_TRUE(o.notes.empty());
   const auto &svcs = o.catalog.rest_services();
   ASSERT_EQ(1u, svcs.size());
-  EXPECT_EQ("/b", svcs[0].path);
+  EXPECT_EQ("/b", svcs[0].name.path);
   ASSERT_EQ(1u, svcs[0].schemas.size());
   ASSERT_EQ(1u, svcs[0].schemas[0].objects.size());
   EXPECT_EQ("/v", svcs[0].schemas[0].objects[0].path);
@@ -1042,27 +1042,27 @@ TEST(Catalog, rest_view_details) {
   EXPECT_FALSE(sub[1].reference->schema);
   EXPECT_EQ("film", sub[1].reference->table);
   EXPECT_EQ(1u, sub[1].reference->fields.size());
-  EXPECT_EQ("PRIVATE", v.enabled.value_or(""));
-  EXPECT_EQ(std::optional<bool>(false), v.requires_auth);
-  EXPECT_EQ(std::optional<uint64_t>(25), v.items_per_page);
-  EXPECT_EQ("it's", v.comment.value_or(""));
-  EXPECT_EQ("application/json", v.media_type.value_or(""));
-  EXPECT_FALSE(v.media_type_autodetect);
-  EXPECT_EQ("FEED", v.format.value_or(""));
-  EXPECT_EQ("sakila.auth", v.auth_procedure.value_or(""));
-  EXPECT_EQ("{\"b\":2}", v.options.value_or(""));
-  EXPECT_FALSE(v.merge_options);  // a CREATE takes MERGE OPTIONS as the whole options
-  EXPECT_EQ("{\"x\":[]}", v.metadata.value_or(""));
+  EXPECT_EQ("PRIVATE", v.settings.enabled.value_or(""));
+  EXPECT_EQ(std::optional<bool>(false), v.settings.requires_auth);
+  EXPECT_EQ(std::optional<uint64_t>(25), v.settings.items_per_page);
+  EXPECT_EQ("it's", v.settings.comment.value_or(""));
+  EXPECT_EQ("application/json", v.settings.media_type.value_or(""));
+  EXPECT_FALSE(v.settings.media_type_autodetect);
+  EXPECT_EQ("FEED", v.settings.format.value_or(""));
+  EXPECT_EQ("sakila.auth", v.settings.auth_procedure.value_or(""));
+  EXPECT_EQ("{\"b\":2}", v.settings.options.value_or(""));
+  EXPECT_FALSE(v.settings.merge_options);  // a CREATE takes MERGE OPTIONS as the whole options
+  EXPECT_EQ("{\"x\":[]}", v.settings.metadata.value_or(""));
 
   EXPECT_EQ("", objs[1].object_schema);
   ASSERT_TRUE(objs[1].fields);
   EXPECT_TRUE(objs[1].fields->empty());
-  EXPECT_TRUE(objs[1].media_type_autodetect);
-  EXPECT_FALSE(objs[1].media_type);
+  EXPECT_TRUE(objs[1].settings.media_type_autodetect);
+  EXPECT_FALSE(objs[1].settings.media_type);
 
   EXPECT_FALSE(objs[2].fields);           // no { ... }: one field per column
   EXPECT_EQ("country", objs[2].object);   // IF NOT EXISTS kept the earlier definition
-  EXPECT_FALSE(objs[2].comment);
+  EXPECT_FALSE(objs[2].settings.comment);
 }
 
 // rest_object_details: a routine's FORCE, PARAMETERS and RESULTs.
@@ -1093,7 +1093,7 @@ TEST(Catalog, rest_routine_details) {
   EXPECT_EQ("Res", p.results[0].name.value_or(""));
   EXPECT_FALSE(p.results[1].name);
   EXPECT_EQ("y", p.results[1].fields.at(0).column.value_or(""));
-  EXPECT_EQ("DISABLED", p.enabled.value_or(""));
+  EXPECT_EQ("DISABLED", p.settings.enabled.value_or(""));
   const Rest_object &f = objs[1];
   EXPECT_FALSE(f.force);
   ASSERT_TRUE(f.parameters);
@@ -1115,6 +1115,101 @@ TEST(Catalog, rest_routine_details) {
                       "\"comment\":null,\"media_type\":null,\"media_type_autodetect\":false,"
                       "\"format\":null,\"auth_procedure\":null,\"options\":null,"
                       "\"merge_options\":false,\"metadata\":null,\"force\":true")) << json;
+}
+
+// rest_settings: a service's settings; CREATE OR REPLACE writes them anew,
+// ALTER changes what it writes, MERGE OPTIONS merges in an ALTER only; a
+// service is the same however its developers are written.
+TEST(Catalog, rest_service_settings) {
+  const auto o = outline_of(
+      "CREATE REST SERVICE mike, `anna`@/svc ENABLED PUBLISHED PROTOCOL HTTPS COMMENT 'c'\n"
+      "  AUTHENTICATION PATH '/auth' REDIRECTION DEFAULT VALIDATION 'v' PAGE CONTENT 'pc'\n"
+      "  OPTIONS {\"a\": 1, \"b\": {\"c\": 2}} METADATA {\"m\": true};\n"
+      "ALTER REST SERVICE anna,MIKE@/svc DISABLED MERGE OPTIONS {\"b\": {\"c\": null, \"d\": 3}};\n"
+      "CREATE REST SERVICE /r COMMENT 'one' PROTOCOL HTTP;\n"
+      "CREATE OR REPLACE REST SERVICE /r MERGE OPTIONS {\"x\": null};\n"
+      "CREATE REST VIEW /v ON SERVICE /only SCHEMA /s AS a.t;\n"
+      "ALTER REST SERVICE /only MERGE OPTIONS {\"p\": 1};\n"
+      "ALTER REST SERVICE /only MERGE OPTIONS {\"q\": null};\n"
+      "CREATE REST SERVICE /n;\n"
+      "ALTER REST SERVICE /n MERGE OPTIONS {\"g\": 1} MERGE OPTIONS {\"h\": null};\n"
+      "CREATE REST SERVICE `a,b`@/k;\n"
+      "CREATE REST SERVICE a,b@/k;\n");
+  EXPECT_TRUE(o.notes.empty());
+  const auto &svcs = o.catalog.rest_services();
+  ASSERT_EQ(6u, svcs.size());
+  // Options null: MERGE OPTIONS stores them as they are; the last one counts.
+  EXPECT_EQ("{\"h\":null}", svcs[3].settings.options.value_or(""));
+  EXPECT_FALSE(svcs[3].settings.merge_options);
+  EXPECT_EQ((std::vector<std::string>{"a,b"}), svcs[4].name.developers);
+  EXPECT_EQ((std::vector<std::string>{"a", "b"}), svcs[5].name.developers);
+  const Rest_service &a = svcs[0];
+  EXPECT_EQ("mike, `anna`@/svc", a.name.path);
+  EXPECT_EQ("/svc", a.name.request_path);
+  EXPECT_EQ((std::vector<std::string>{"anna", "mike"}), a.name.developers);
+  EXPECT_EQ("DISABLED", a.settings.enabled.value_or(""));
+  EXPECT_EQ(std::optional<bool>(true), a.settings.published);
+  EXPECT_EQ("HTTPS", a.settings.protocol.value_or(""));
+  EXPECT_EQ("c", a.settings.comment.value_or(""));
+  EXPECT_EQ("/auth", a.settings.auth_path.value_or(""));
+  EXPECT_FALSE(a.settings.auth_redirection);  // DEFAULT
+  EXPECT_EQ("v", a.settings.auth_validation.value_or(""));
+  EXPECT_EQ("pc", a.settings.auth_page_content.value_or(""));
+  EXPECT_EQ("{\"a\":1,\"b\":{\"d\":3}}", a.settings.options.value_or(""));
+  EXPECT_FALSE(a.settings.merge_options);
+  EXPECT_EQ("{\"m\":true}", a.settings.metadata.value_or(""));
+
+  const Rest_service &r = svcs[1];
+  EXPECT_FALSE(r.settings.comment);   // OR REPLACE writes the settings anew
+  EXPECT_FALSE(r.settings.protocol);
+  EXPECT_EQ("{\"x\":null}", r.settings.options.value_or(""));  // a CREATE does not merge
+  EXPECT_FALSE(r.settings.merge_options);
+
+  const Rest_service &only = svcs[2];  // only named: its options are not known
+  EXPECT_FALSE(only.declared);
+  EXPECT_EQ("{\"p\":1,\"q\":null}", only.settings.options.value_or(""));
+  EXPECT_TRUE(only.settings.merge_options);
+
+  const std::string json = outline_json(o, "", Line_map(""));
+  EXPECT_NE(std::string::npos,
+            json.find("\"request_path\":\"/svc\",\"developers\":[\"anna\",\"mike\"],\"enabled\":false,"
+                      "\"published\":true,\"protocol\":\"HTTPS\",\"comment\":\"c\",\"auth_path\":\"/auth\","
+                      "\"auth_redirection\":null,\"auth_validation\":\"v\",\"auth_page_content\":\"pc\","
+                      "\"options\":{\"a\":1,\"b\":{\"d\":3}},\"merge_options\":false,\"metadata\":{\"m\":true},"))
+      << json;
+}
+
+// rest_settings: a schema's settings, and ALTER REST SCHEMA (rename, FROM,
+// settings; a note for one the file does not name).
+TEST(Catalog, rest_schema_settings) {
+  const auto o = outline_of(
+      "CREATE REST SERVICE /svc;\n"
+      "USE REST SERVICE /svc;\n"
+      "CREATE REST SCHEMA /s FROM sakila PRIVATE AUTHENTICATION REQUIRED ITEMS PER PAGE 10\n"
+      "  COMMENT 'sc' OPTIONS {\"k\": 1};\n"
+      "ALTER REST SCHEMA /s NEW REQUEST PATH /s2 FROM world ITEMS PER PAGE 20 MERGE OPTIONS {\"l\": 2};\n"
+      "CREATE REST VIEW /v AS t;\n"
+      "ALTER REST SCHEMA /nope COMMENT 'x';\n");
+  ASSERT_EQ(1u, o.notes.size());
+  EXPECT_EQ(Note_kind::unknown_rest_schema, o.notes[0].kind);
+  const auto &schemas = o.catalog.rest_services().at(0).schemas;
+  ASSERT_EQ(1u, schemas.size());
+  const Rest_schema &rs = schemas[0];
+  EXPECT_EQ("/s2", rs.path);
+  EXPECT_EQ("world", rs.schema);
+  EXPECT_EQ(1u, rs.objects.size());  // the current schema follows the rename
+  EXPECT_EQ("PRIVATE", rs.settings.enabled.value_or(""));
+  EXPECT_EQ(std::optional<bool>(true), rs.settings.requires_auth);
+  EXPECT_EQ(std::optional<uint64_t>(20), rs.settings.items_per_page);
+  EXPECT_EQ("sc", rs.settings.comment.value_or(""));
+  EXPECT_EQ("{\"k\":1,\"l\":2}", rs.settings.options.value_or(""));
+  EXPECT_FALSE(rs.settings.merge_options);
+
+  const std::string json = outline_json(o, "", Line_map(""));
+  EXPECT_NE(std::string::npos,
+            json.find("\"enabled\":\"PRIVATE\",\"requires_auth\":true,\"items_per_page\":20,\"comment\":\"sc\","
+                      "\"options\":{\"k\":1,\"l\":2},\"merge_options\":false,\"metadata\":null,"))
+      << json;
 }
 
 }  // namespace mdbls

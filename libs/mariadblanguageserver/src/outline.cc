@@ -546,10 +546,11 @@ class Json_outline {
     w_.StartArray();
     for (const auto &svc : c.rest_services()) {
       w_.StartObject();
-      str("path", svc.path);
+      str("path", svc.name.path);
       w_.Key("declared");
       w_.Bool(svc.declared);
       origin(svc.origin);
+      rest_service_settings(svc);
       w_.Key("schemas");
       w_.StartArray();
       for (const auto &sch : svc.schemas) {
@@ -559,6 +560,7 @@ class Json_outline {
         w_.Key("declared");
         w_.Bool(sch.declared);
         origin(sch.origin);
+        rest_schema_settings(sch.settings);
         w_.Key("objects");
         w_.StartArray();
         for (const auto &o : sch.objects) {
@@ -640,18 +642,47 @@ class Json_outline {
     w_.StartArray();
     for (const auto &r : o.results) rest_field_set(r);
     w_.EndArray();
-    opt_str("enabled", o.enabled);
-    opt_bool("requires_auth", o.requires_auth);
-    opt_uint("items_per_page", o.items_per_page);
-    opt_str("comment", o.comment);
-    opt_str("media_type", o.media_type);
-    boolean("media_type_autodetect", o.media_type_autodetect);
-    opt_str("format", o.format);
-    opt_str("auth_procedure", o.auth_procedure);
-    raw_json("options", o.options);
-    boolean("merge_options", o.merge_options);
-    raw_json("metadata", o.metadata);
+    const Rest_settings &s = o.settings;
+    access_settings(s);
+    opt_str("media_type", s.media_type);
+    boolean("media_type_autodetect", s.media_type_autodetect);
+    opt_str("format", s.format);
+    opt_str("auth_procedure", s.auth_procedure);
+    json_settings(s);
     boolean("force", o.force);
+  }
+  void json_settings(const Rest_settings &s) {
+    raw_json("options", s.options);
+    boolean("merge_options", s.merge_options);
+    raw_json("metadata", s.metadata);
+  }
+  // Feature rest_settings.
+  void rest_service_settings(const Rest_service &svc) {
+    const Rest_settings &s = svc.settings;
+    str("request_path", svc.name.request_path);
+    strings("developers", svc.name.developers);
+    std::optional<bool> enabled;
+    if (s.enabled) enabled = *s.enabled == "ENABLED";
+    opt_bool("enabled", enabled);
+    opt_bool("published", s.published);
+    opt_str("protocol", s.protocol);
+    opt_str("comment", s.comment);
+    opt_str("auth_path", s.auth_path);
+    opt_str("auth_redirection", s.auth_redirection);
+    opt_str("auth_validation", s.auth_validation);
+    opt_str("auth_page_content", s.auth_page_content);
+    json_settings(s);
+  }
+  // The settings schemas and objects share, but options and metadata.
+  void access_settings(const Rest_settings &s) {
+    opt_str("enabled", s.enabled);
+    opt_bool("requires_auth", s.requires_auth);
+    opt_uint("items_per_page", s.items_per_page);
+    opt_str("comment", s.comment);
+  }
+  void rest_schema_settings(const Rest_settings &s) {
+    access_settings(s);
+    json_settings(s);
   }
 
   Writer &w_;
@@ -670,6 +701,7 @@ const std::vector<const char *> &outline_features() {
       "rest_declared",        // rest.services[].declared, rest.services[].schemas[].declared
       "rest_drop_for_database",  // DROP REST SCHEMA ... FOR DATABASE db
       "rest_object_details",  // a REST object's data mapping, PARAMETERS/RESULT, options
+      "rest_settings",        // REST services' and schemas' settings, ALTER REST SCHEMA
   };
   return features;
 }

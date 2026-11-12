@@ -21,6 +21,7 @@ Members added within format 1 are listed as features: `mariadb-lsp outline --fea
 | `rest_drop_for_database` | `DROP REST SCHEMA ... FOR SCHEMA db` parses, and drops the REST schema only when its `schema` is `db` |
 | `rest_current_schema` | `USE REST SCHEMA` is followed, and the service and schema a REST statement does not name are resolved as MariaDB Shell does, with a note where the shell fails |
 | `rest_object_details` | a REST object's database object unquoted, data mapping, `PARAMETERS`/`RESULT` and options ([REST object details](#rest-object-details)); `CREATE REST VIEW`/`PROCEDURE`/`FUNCTION IF NOT EXISTS` keeps an object the file created |
+| `rest_settings` | the settings of REST services and schemas ([REST settings](#rest-settings)); `ALTER REST SCHEMA` is applied; services with developers are told apart as MariaDB Shell does |
 
 ## How the outline is built
 
@@ -37,8 +38,9 @@ and is listed under `notes` (kind `syntax-error` or `unsupported-sql-mode`, see 
 So are an `ALTER TABLE` or `CREATE INDEX` on a table the file does not create and a `CREATE
 TABLE ... LIKE t` of such a table (`unknown-table`); the `LIKE` statement is still applied and
 creates the table. So are a REST statement that names no service or schema when none is in use
-(`rest-none-in-use`) and an `ALTER REST SERVICE` of a service the file does not create
-(`unknown-rest-service`), see [REST objects](#rest-objects). A statement that parses but changes nothing (`CREATE`/`DROP USER`, `ROLE` or
+(`rest-none-in-use`), an `ALTER REST SERVICE` of a service the file does not create
+(`unknown-rest-service`) and an `ALTER REST SCHEMA` of a schema it does not name
+(`unknown-rest-schema`), see [REST objects](#rest-objects). A statement that parses but changes nothing (`CREATE`/`DROP USER`, `ROLE` or
 `SERVER`, `CREATE PACKAGE`, an `ALTER` of anything but a database, view, table, procedure,
 function, event or sequence, an `ALTER PROCEDURE`, `FUNCTION`, `EVENT` or `SEQUENCE` of an
 object the file does not create, a `RENAME` of a table, view or sequence the file does not
@@ -115,6 +117,7 @@ an included statement where its directive stands):
 | `include-nested` | `false` | a `SOURCE` directive in an included text, which msm does not expand; the note is on that directive, in its file |
 | `rest-none-in-use` | `false` | a REST statement names no service (or no schema) and none is in use, where MariaDB Shell fails ("No REST SERVICE specified.", "No REST schema given."); see [REST objects](#rest-objects) |
 | `unknown-rest-service` | `false` | an `ALTER REST SERVICE` names a service the file does not create |
+| `unknown-rest-schema` | `false` | an `ALTER REST SCHEMA` names a schema the file does not create or name |
 
 A kind is never removed or renamed within format 1; new kinds may be added, so a consumer that
 does not know a kind should go by `applied`.
@@ -239,7 +242,10 @@ quotes kept, blanks collapsed. `content_sets`, `auth_apps`, `roles` and `users` 
 `user@app`. A service's `auth_apps` are the names of the auth apps linked to it, unquoted, its
 case as in the `ADD AUTH APP` that linked it, its range that of the last statement that linked
 it. A `CREATE REST SCHEMA` without a request path has `/` and the database schema's name, as
-in MariaDB Shell. Paths and names compare without regard to case, as on the server.
+in MariaDB Shell. Paths and names compare without regard to case, as on the server. A service
+named with developers (`mike, anna@/svc`) is the same service however its developers are
+quoted, spaced or ordered, as in MariaDB Shell; its `path` is as the statement that made it
+wrote it.
 
 `ADD AUTH APP` links an app, `REMOVE AUTH APP` (with or without `IF EXISTS`) unlinks it, in
 `CREATE` and `ALTER REST SERVICE`. A `CREATE OR REPLACE REST SERVICE` of a service the file has
@@ -247,7 +253,9 @@ updates it in place, as MariaDB Shell does: its schemas, content sets and the li
 statement does not name stay. `CREATE REST SERVICE IF NOT EXISTS` of a service
 the file creates changes nothing, as does `CREATE REST SCHEMA IF NOT EXISTS` of such a schema;
 of one a statement only named, it creates it. `ALTER REST SERVICE ... NEW REQUEST PATH` renames
-the service. `DROP REST AUTH APP`
+the service. `ALTER REST SCHEMA [p] [ON SERVICE s] [NEW REQUEST PATH q] [FROM db]` renames the
+schema and changes the database schema it exposes; one of a schema the file does not create or
+name is not applied and gets an `unknown-rest-schema` note. `DROP REST AUTH APP`
 also unlinks the app from every service.
 
 The service and schema a statement does not name are resolved as MariaDB Shell's MRS DDL
@@ -269,6 +277,43 @@ the current one clears it.
 A `CREATE OR REPLACE REST VIEW`, `PROCEDURE` or `FUNCTION`, or a plain `CREATE`, of an object
 the file has replaces it with the last statement's definition. `CREATE ... IF NOT EXISTS` at a
 request path where the file has an object, of any kind, changes nothing, as in MariaDB Shell.
+
+### REST settings
+
+With feature `rest_settings`, services and schemas also have the members below, all of them
+always there, null where not written. A `CREATE` (also `OR REPLACE`, in place) sets every
+setting to what it writes, as MariaDB Shell writes the service or schema anew; an `ALTER`
+changes only what it writes. Where a statement writes an option more than once, the last one
+counts.
+
+A service:
+
+| Member | Type | Meaning |
+| --- | --- | --- |
+| `request_path` | string | the request path, unquoted (`/svc`) |
+| `developers` | string[] | the developers before `@`, unquoted, sorted as MariaDB Shell does (without regard to case); `[]` for none |
+| `enabled` | boolean \| null | `ENABLED` / `DISABLED` |
+| `published` | boolean \| null | `PUBLISHED` / `UNPUBLISHED` |
+| `protocol` | string \| null | `PROTOCOL HTTP` or `HTTPS` |
+| `comment` | string \| null | `COMMENT` |
+| `auth_path`, `auth_redirection`, `auth_validation`, `auth_page_content` | string \| null | `AUTHENTICATION PATH`, `REDIRECTION`, `VALIDATION`, `PAGE CONTENT`; null for `DEFAULT` |
+| `options`, `merge_options`, `metadata` | | as for objects, below |
+
+A schema:
+
+| Member | Type | Meaning |
+| --- | --- | --- |
+| `enabled` | string \| null | `ENABLED`, `DISABLED` or `PRIVATE` |
+| `requires_auth` | boolean \| null | `AUTHENTICATION [NOT] REQUIRED` |
+| `items_per_page` | number \| null | `ITEMS PER PAGE` |
+| `comment` | string \| null | `COMMENT` |
+| `options`, `merge_options`, `metadata` | | as for objects, below |
+
+`MERGE OPTIONS` in a `CREATE` sets the options as written, as in MariaDB Shell. In an `ALTER`
+it is merged into the options there (JSON merge patch, RFC 7396, as the server's
+`JSON_MERGE_PATCH`; where the options are null, they become the patch as written) when the
+file creates the service or schema, or wrote its whole `OPTIONS` since; otherwise the file does not know the options it patches, and `options` is the patch,
+with `merge_options` true.
 
 ### REST object details
 
@@ -295,7 +340,7 @@ statement writes an option more than once, the last one counts.
 | `format` | string \| null | `FORMAT FEED`, `ITEM` or `MEDIA` |
 | `auth_procedure` | string \| null | `AUTHENTICATION PROCEDURE`, `schema.name` or `name` |
 | `options` | object \| null | `OPTIONS` / `MERGE OPTIONS`, as JSON |
-| `merge_options` | boolean | `options` is a JSON merge patch to options the file does not know. Always false here: a `CREATE` stores `MERGE OPTIONS` as the whole options, as MariaDB Shell does, and `ALTER REST VIEW`/`PROCEDURE`/`FUNCTION` is not applied |
+| `merge_options` | boolean | `options` is a JSON merge patch to options the file does not know (see [REST settings](#rest-settings)). Always false for objects: a `CREATE` stores `MERGE OPTIONS` as the whole options, as MariaDB Shell does, and `ALTER REST VIEW`/`PROCEDURE`/`FUNCTION` is not applied |
 | `metadata` | object \| null | `METADATA`, as JSON |
 | `force` | boolean | a routine's `FORCE` |
 
