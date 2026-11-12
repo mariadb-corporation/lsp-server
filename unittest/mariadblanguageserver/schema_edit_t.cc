@@ -2630,6 +2630,8 @@ TEST(Schema_edit, a_views_check_option_is_written_once) {
   const std::string script = "CREATE TABLE t (a INT);\n";
   const auto r = ok(edit(script, {}, request("", R"j({"op": "add_view", "view": {"name": "v", "definition": "SELECT a FROM t WITH CASCADED CHECK OPTION", "check_option": "CASCADED"}})j")));
   EXPECT_EQ("CREATE TABLE t (a INT);\nCREATE VIEW v AS SELECT a FROM t WITH CASCADED CHECK OPTION;\n", text(r, ""));
+  // One of the other level contradicts check_option.
+  EXPECT_EQ("bad-request", failed(edit(script, {}, request("", R"j({"op": "add_view", "view": {"name": "v", "definition": "SELECT a FROM t WITH LOCAL CHECK OPTION", "check_option": "CASCADED"}})j"))).kind);
 }
 
 // An index of the outline, with both "columns" and "key_parts", goes back

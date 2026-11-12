@@ -29,6 +29,21 @@
 
 namespace mdbls::edit_text {
 
+// A character of a name or keyword: letters, digits, _, $ and non-ASCII.
+bool is_word_char(char c);
+
+// A word of a statement as the subject scanner sees it.
+struct Word {
+  std::string_view text;
+  bool quoted = false;  // a quoted name
+  bool punct = false;   // one punctuation character
+};
+
+// The first `max` words of `sql`: names, keywords, quoted names, and single
+// punctuation characters.  Comments and strings are skipped; a versioned
+// comment's text is read as if it were not commented.
+std::vector<Word> words_of(std::string_view sql, size_t max);
+
 // How the file being edited writes SQL.
 struct Style {
   bool backticks = true;  // names in backticks, else quoted only when needed

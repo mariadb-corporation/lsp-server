@@ -198,7 +198,7 @@ has above it (a banner's comment lines not counted); no banner is written.
   always one of the two, `CREATE OR REPLACE` unless the neighbour drops first. Its `definition`
   is the `SELECT`: `check_option` writes the `WITH ... CHECK OPTION`, and a trailing one in
   the `definition` (the outline's holds it) is dropped when `check_option` is set, so a view of
-  the outline can be sent back as it is. A
+  the outline can be sent back as it is (`bad-request` when it names the other level). A
   definition that is empty or does not parse is `bad-request`.
 - **A routine** goes after the schema's last routine of either kind, inside its
   `DELIMITER` block; where `;` is the delimiter and the routine holds one, in a new block
