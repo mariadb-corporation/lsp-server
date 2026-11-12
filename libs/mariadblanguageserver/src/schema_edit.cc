@@ -1730,6 +1730,30 @@ bool is_blank(std::string_view s) {
   return std::all_of(s.begin(), s.end(), [](char c) { return c == ' ' || c == '\t'; });
 }
 
+// Whether `s` holds only blanks and whole ordinary comments: `-- ` and `#`
+// lines ended by a line break, `/* */` blocks closed in `s`.  An executable
+// comment (`/*!`, `/*M!`) is SQL.
+bool only_comments(std::string_view s) {
+  size_t i = 0;
+  while (i < s.size()) {
+    if (std::isspace(static_cast<unsigned char>(s[i]))) {
+      ++i;
+    } else if (s[i] == '#' ||
+               (s.substr(i, 2) == "--" && i + 2 < s.size() && std::isspace(static_cast<unsigned char>(s[i + 2])))) {
+      const size_t eol = s.find('\n', i);
+      if (eol == std::string_view::npos) return false;
+      i = eol + 1;
+    } else if (s.substr(i, 2) == "/*" && s.substr(i, 3) != "/*!" && s.substr(i, 4) != "/*M!") {
+      const size_t close = s.find("*/", i + 2);
+      if (close == std::string_view::npos) return false;
+      i = close + 2;
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
 // The end of the line holding `p`: where its line break starts.
 uint32_t line_end(std::string_view text, uint32_t p) {
   while (p < text.size() && text[p] != '\n') ++p;
@@ -3044,8 +3068,12 @@ class Editor {
       }
       return error(i, "bad-request", where + " is not the end of a statement's range");
     }
-    const size_t next = index().find(*p);  // the statement after p, or the one p is in
-    if (next < index().statements().size() && statement(next).begin < *p) {
+    // The statement after p, or the one p is in.  Comments are no
+    // statement: a line after whole comments that start one (a comment
+    // entry, a statement's leading comments) is outside it.
+    const size_t next = index().find(*p);
+    if (next < index().statements().size() && statement(next).begin < *p &&
+        !only_comments(text().substr(statement(next).begin, *p - statement(next).begin))) {
       return error(i, "bad-request", where + " starts inside a statement");
     }
     // Whole lines at the line's start, in the file's own text (the searched
@@ -3091,7 +3119,7 @@ class Editor {
     }
     for (const bool object : {true, false}) {
       for (const auto k : {before, after}) {
-        if (!place.near && k && (!object || anchor_of(*k).origin != nullptr)) place.near = k;
+        if (!place.near && k && (!object || defines_object(*k))) place.near = k;
       }
     }
     return place;
@@ -3157,15 +3185,34 @@ class Editor {
     if (a.origin != nullptr) return style_of(*a.origin);
     return a.k ? style_near(*a.k) : style_at(std::nullopt, std::nullopt);
   }
-  // The style of searched statement `k`: its object's, else (a DROP, an
-  // ALTER) names in backticks when its head, up to a parenthesis or line
+  // The style of searched statement `k`: its object's; else for a CREATE
+  // names in backticks when its name, as written on whatever line, is in
+  // them (not a DEFINER's); else (a DROP, an ALTER) when its head, from
+  // its first word (past leading comments) up to a parenthesis or line
   // break, has one.
   edit_text::Style style_near(size_t k) const {
     if (const Anchor a = anchor_of(k); a.origin != nullptr) return style_of(*a.origin);
     edit_text::Style st = style_at(k, std::nullopt);
-    const std::string_view sql = index().text_of(text(), statement(k));
+    std::string_view sql = index().text_of(text(), statement(k));
+    if (const auto s = subject_of(sql); s && s->verb == "CREATE") {
+      st.backticks = s->name_words.front().starts_with('`');
+      return st;
+    }
+    if (const auto w = words_of(sql, 1); !w.empty()) sql.remove_prefix(w[0].text.data() - sql.data());
     st.backticks = sql.substr(0, sql.find_first_of("(\n")).find('`') != std::string_view::npos;
     return st;
+  }
+  // Whether searched statement `k` defines a schema object: the home
+  // schema's, or a CREATE of a table, view, routine, trigger, event or
+  // sequence the home schema does not take from it (one a later statement
+  // defines again, as MSM Section 910 does Section 120's version view, or
+  // another schema's).
+  bool defines_object(size_t k) const {
+    if (anchor_of(k).origin != nullptr) return true;
+    const auto s = subject_of(index().text_of(text(), statement(k)));
+    static const char *const kinds[] = {"TABLE", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "EVENT", "SEQUENCE"};
+    return s && s->verb == "CREATE" &&
+           std::any_of(std::begin(kinds), std::end(kinds), [&](const char *x) { return s->kind == x; });
   }
 
   // The items of a field list (CREATE TABLE's elements) with what each is:

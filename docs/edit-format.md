@@ -333,8 +333,12 @@ The rest is as for any add: style, layout, the migration (the `CREATE` alone, al
   above it or below it. Blank lines right above line L stay below the new lines, so they go
   after the last line with text above (within the part of F the script includes): a drop,
   which takes a statement's blank lines above it, then gives the text back. The delimiter is
-  the one in force at that line. The style is that of F's nearest statement above, else
-  below, one that defines an object first (its name shows the quoting); F's line breaks.
+  the one in force at that line. A comment is no statement: a line below whole comments
+  (a block comment's blank lines after `*/`, a statement's leading comments) is outside it.
+  The style is that of F's nearest statement above, else below, one that defines an object
+  first (a CREATE's name, as written on whatever line, shows the quoting; any CREATE of a
+  table, view, routine, trigger, event or sequence counts, one a later statement defines
+  again too); F's line breaks.
 - A routine, trigger or event whose body holds `;` gets a `DELIMITER` block of its own where
   `;` is the delimiter (its `DROP ... IF EXISTS` inside it), as without `at`.
 - Two adds at one `at` keep the request's order. Positions are in the files as they are on
@@ -344,8 +348,8 @@ The rest is as for any add: style, layout, the migration (the `CREATE` alone, al
 
 `bad-request` when `at` names a file that is neither the script nor one it includes, an
 `after` that is not the end of a statement's range in F, a line past F's last line or one
-that starts inside a statement, a place outside the part of F the script includes or in text
-an earlier edit of the request changed (a statement it dropped, say), or a trigger above its table's `CREATE TABLE`; and
+that starts inside a statement (in its SQL or inside a comment), a place outside the part of
+F the script includes or in text an earlier edit of the request changed (a statement it dropped, say), or a trigger above its table's `CREATE TABLE`; and
 for a `form` the op does not take. `replace_*` (which rewrite a statement where it stands),
 `add_column`, `add_index` and `add_foreign_key` take neither member.
 
