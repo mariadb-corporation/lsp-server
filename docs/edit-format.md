@@ -333,7 +333,8 @@ The rest is as for any add: style, layout, the migration (the `CREATE` alone, al
   above it or below it. Blank lines right above line L stay below the new lines, so they go
   after the last line with text above (within the part of F the script includes): a drop,
   which takes a statement's blank lines above it, then gives the text back. The delimiter is
-  the one in force at that line.
+  the one in force at that line. The style is that of F's nearest statement above, else
+  below, one that defines an object first (its name shows the quoting); F's line breaks.
 - A routine, trigger or event whose body holds `;` gets a `DELIMITER` block of its own where
   `;` is the delimiter (its `DROP ... IF EXISTS` inside it), as without `at`.
 - Two adds at one `at` keep the request's order. Positions are in the files as they are on
