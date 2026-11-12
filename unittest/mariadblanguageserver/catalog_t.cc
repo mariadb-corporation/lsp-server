@@ -988,4 +988,133 @@ TEST(Catalog, may_change_catalog) {
   EXPECT_FALSE(may_change_catalog("CREATED"));
 }
 
+// rest_object_details: a view's CLASS, CRUD options, data mapping (nested
+// references, @options, DATATYPE, JSON SCHEMA) and object options, the last
+// of a repeated option winning.
+TEST(Catalog, rest_view_details) {
+  const auto o = outline_of(
+      "CREATE REST SERVICE /svc;\n"
+      "CREATE REST SCHEMA /s ON SERVICE /svc FROM sakila;\n"
+      "CREATE OR REPLACE REST VIEW /actor ON SERVICE /svc SCHEMA /s\n"
+      "  AS `sakila`.`actor` CLASS Actor @INSERT @UPDATE @NOCHECK {\n"
+      "    actorId: actor_id @KEY @SORTABLE,\n"
+      "    \"firstName\": first_name @DATATYPE(\"varchar(45)\"),\n"
+      "    last: last_update JSON SCHEMA {\"type\": 'string', \"n\": [1, -2.5, .5, true, null]},\n"
+      "    films: sakila.film_actor @UNNEST {\n"
+      "      filmId: film_id @KEY,\n"
+      "      film: film { title: title }\n"
+      "    }\n"
+      "  }\n"
+      "  ENABLED AUTHENTICATION NOT REQUIRED ITEMS PER PAGE 25 COMMENT 'it''s'\n"
+      "  MEDIA TYPE 'application/json' FORMAT FEED OPTIONS {\"a\": 1} MERGE OPTIONS {\"b\": 2}\n"
+      "  METADATA {\"x\": []} AUTHENTICATION PROCEDURE `sakila`.`auth` PRIVATE;\n"
+      "CREATE REST VIEW /empty ON SERVICE /svc SCHEMA /s AS city {} MEDIA TYPE AUTODETECT;\n"
+      "CREATE REST VIEW /plain ON SERVICE /svc SCHEMA /s AS country;\n"
+      "CREATE REST VIEW IF NOT EXISTS /plain ON SERVICE /svc SCHEMA /s AS other.country\n"
+      "  COMMENT 'ignored';\n"
+      "CREATE REST PROCEDURE IF NOT EXISTS /plain ON SERVICE /svc SCHEMA /s AS p;\n");
+  EXPECT_TRUE(o.notes.empty());
+  const auto &objs = o.catalog.rest_services().at(0).schemas.at(0).objects;
+  ASSERT_EQ(3u, objs.size());
+  const Rest_object &v = objs[0];
+  EXPECT_EQ("sakila", v.object_schema);
+  EXPECT_EQ("actor", v.object_name);
+  EXPECT_EQ("Actor", v.class_name.value_or(""));
+  EXPECT_EQ((std::vector<std::string>{"INSERT", "UPDATE", "NOCHECK"}), v.crud);
+  ASSERT_TRUE(v.fields);
+  ASSERT_EQ(4u, v.fields->size());
+  const auto &f = *v.fields;
+  EXPECT_EQ("actorId", f[0].name);
+  EXPECT_EQ("actor_id", f[0].column.value_or(""));
+  EXPECT_EQ((std::vector<std::string>{"KEY", "SORTABLE"}), f[0].options);
+  EXPECT_EQ("firstName", f[1].name);
+  EXPECT_TRUE(f[1].options.empty());
+  EXPECT_EQ("varchar(45)", f[1].datatype.value_or(""));
+  EXPECT_EQ("{\"type\":\"string\",\"n\":[1,-2.5,0.5,true,null]}", f[2].json_schema.value_or(""));
+  ASSERT_TRUE(f[3].reference);
+  EXPECT_FALSE(f[3].column);
+  EXPECT_EQ("sakila", f[3].reference->schema.value_or(""));
+  EXPECT_EQ("film_actor", f[3].reference->table);
+  EXPECT_EQ((std::vector<std::string>{"UNNEST"}), f[3].options);
+  const auto &sub = f[3].reference->fields;
+  ASSERT_EQ(2u, sub.size());
+  ASSERT_TRUE(sub[1].reference);
+  EXPECT_FALSE(sub[1].reference->schema);
+  EXPECT_EQ("film", sub[1].reference->table);
+  EXPECT_EQ(1u, sub[1].reference->fields.size());
+  EXPECT_EQ("PRIVATE", v.enabled.value_or(""));
+  EXPECT_EQ(std::optional<bool>(false), v.requires_auth);
+  EXPECT_EQ(std::optional<uint64_t>(25), v.items_per_page);
+  EXPECT_EQ("it's", v.comment.value_or(""));
+  EXPECT_EQ("application/json", v.media_type.value_or(""));
+  EXPECT_FALSE(v.media_type_autodetect);
+  EXPECT_EQ("FEED", v.format.value_or(""));
+  EXPECT_EQ("sakila.auth", v.auth_procedure.value_or(""));
+  EXPECT_EQ("{\"b\":2}", v.options.value_or(""));
+  EXPECT_FALSE(v.merge_options);  // a CREATE takes MERGE OPTIONS as the whole options
+  EXPECT_EQ("{\"x\":[]}", v.metadata.value_or(""));
+
+  EXPECT_EQ("", objs[1].object_schema);
+  ASSERT_TRUE(objs[1].fields);
+  EXPECT_TRUE(objs[1].fields->empty());
+  EXPECT_TRUE(objs[1].media_type_autodetect);
+  EXPECT_FALSE(objs[1].media_type);
+
+  EXPECT_FALSE(objs[2].fields);           // no { ... }: one field per column
+  EXPECT_EQ("country", objs[2].object);   // IF NOT EXISTS kept the earlier definition
+  EXPECT_FALSE(objs[2].comment);
+}
+
+// rest_object_details: a routine's FORCE, PARAMETERS and RESULTs.
+TEST(Catalog, rest_routine_details) {
+  const auto o = outline_of(
+      "CREATE REST SERVICE /svc;\n"
+      "CREATE REST SCHEMA /s ON SERVICE /svc FROM sakila;\n"
+      "USE REST SERVICE /svc;\n"
+      "USE REST SCHEMA /s;\n"
+      "CREATE OR REPLACE REST PROCEDURE /p AS sakila.film_in_stock FORCE\n"
+      "  PARAMETERS Params { id: p_film_id @IN, n: p_count @OUT @DATATYPE(INT) }\n"
+      "  RESULT Res { filmId: inventory_id }\n"
+      "  RESULT { x: y }\n"
+      "  DISABLED;\n"
+      "CREATE REST FUNCTION /f AS balance PARAMETERS { c: p_customer_id } RESULT R { r: result };\n");
+  EXPECT_TRUE(o.notes.empty());
+  const auto &objs = o.catalog.rest_services().at(0).schemas.at(0).objects;
+  ASSERT_EQ(2u, objs.size());
+  const Rest_object &p = objs[0];
+  EXPECT_TRUE(p.force);
+  EXPECT_FALSE(p.fields);
+  ASSERT_TRUE(p.parameters);
+  EXPECT_EQ("Params", p.parameters->name.value_or(""));
+  ASSERT_EQ(2u, p.parameters->fields.size());
+  EXPECT_EQ((std::vector<std::string>{"OUT"}), p.parameters->fields[1].options);
+  EXPECT_EQ("INT", p.parameters->fields[1].datatype.value_or(""));
+  ASSERT_EQ(2u, p.results.size());
+  EXPECT_EQ("Res", p.results[0].name.value_or(""));
+  EXPECT_FALSE(p.results[1].name);
+  EXPECT_EQ("y", p.results[1].fields.at(0).column.value_or(""));
+  EXPECT_EQ("DISABLED", p.enabled.value_or(""));
+  const Rest_object &f = objs[1];
+  EXPECT_FALSE(f.force);
+  ASSERT_TRUE(f.parameters);
+  EXPECT_FALSE(f.parameters->name);
+  ASSERT_EQ(1u, f.results.size());
+  EXPECT_EQ("R", f.results[0].name.value_or(""));
+  EXPECT_EQ("", f.object_schema);
+  EXPECT_EQ("balance", f.object_name);
+
+  const std::string json = outline_json(o, "", Line_map(""));
+  EXPECT_NE(std::string::npos,
+            json.find("\"object\":\"sakila.film_in_stock\",\"object_schema\":\"sakila\","
+                      "\"object_name\":\"film_in_stock\",")) << json;
+  EXPECT_NE(std::string::npos,
+            json.find("{\"name\":\"n\",\"column\":\"p_count\",\"reference\":null,\"options\":[\"OUT\"],"
+                      "\"datatype\":\"INT\",\"json_schema\":null}")) << json;
+  EXPECT_NE(std::string::npos,
+            json.find("\"enabled\":\"DISABLED\",\"requires_auth\":null,\"items_per_page\":null,"
+                      "\"comment\":null,\"media_type\":null,\"media_type_autodetect\":false,"
+                      "\"format\":null,\"auth_procedure\":null,\"options\":null,"
+                      "\"merge_options\":false,\"metadata\":null,\"force\":true")) << json;
+}
+
 }  // namespace mdbls

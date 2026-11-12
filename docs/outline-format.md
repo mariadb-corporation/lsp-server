@@ -20,6 +20,7 @@ Members added within format 1 are listed as features: `mariadb-lsp outline --fea
 | `rest_declared` | `declared` on REST services and REST schemas |
 | `rest_drop_for_database` | `DROP REST SCHEMA ... FOR SCHEMA db` parses, and drops the REST schema only when its `schema` is `db` |
 | `rest_current_schema` | `USE REST SCHEMA` is followed, and the service and schema a REST statement does not name are resolved as MariaDB Shell does, with a note where the shell fails |
+| `rest_object_details` | a REST object's database object unquoted, data mapping, `PARAMETERS`/`RESULT` and options ([REST object details](#rest-object-details)); `CREATE REST VIEW`/`PROCEDURE`/`FUNCTION IF NOT EXISTS` keeps an object the file created |
 
 ## How the outline is built
 
@@ -264,3 +265,50 @@ s] FOR SCHEMA db` (`FOR DATABASE` is the same) removes `p` only when its `schema
 compared without regard to case, or when the file only named `p` (its `schema` is null);
 otherwise it changes nothing, and is still applied, with no note. `DROP REST SERVICE` or `SCHEMA` of
 the current one clears it.
+
+A `CREATE OR REPLACE REST VIEW`, `PROCEDURE` or `FUNCTION`, or a plain `CREATE`, of an object
+the file has replaces it with the last statement's definition. `CREATE ... IF NOT EXISTS` at a
+request path where the file has an object, of any kind, changes nothing, as in MariaDB Shell.
+
+### REST object details
+
+With feature `rest_object_details`, each object also has the members below. All of them are
+always there; one that does not apply to the object's kind is null, `[]` or `false`. Names are
+unquoted, as elsewhere; keywords and `@` options are upper case, without the `@`. Where the
+statement writes an option more than once, the last one counts.
+
+| Member | Type | Meaning |
+| --- | --- | --- |
+| `object_schema` | string \| null | the database object's schema, null when unqualified |
+| `object_name` | string | the database object's name |
+| `class` | string \| null | a view's `CLASS` name |
+| `crud` | string[] | a view's `@` options after `CLASS` (`INSERT`, `UPDATE`, `DELETE`, `NOCHECK`, the `NO...` forms), as written |
+| `fields` | Field[] \| null | a view's `{ ... }`; null when the statement has none (the server then makes one field per column), `[]` for `{}` |
+| `parameters` | `{name, fields}` \| null | a routine's `PARAMETERS`; `name` is the class name written after the keyword, or null |
+| `results` | `{name, fields}`[] | a routine's `RESULT`s in order (a function has at most one) |
+| `enabled` | string \| null | `ENABLED`, `DISABLED` or `PRIVATE` |
+| `requires_auth` | boolean \| null | `AUTHENTICATION [NOT] REQUIRED` |
+| `items_per_page` | number \| null | `ITEMS PER PAGE` |
+| `comment` | string \| null | `COMMENT` |
+| `media_type` | string \| null | `MEDIA TYPE '...'` |
+| `media_type_autodetect` | boolean | `MEDIA TYPE AUTODETECT` (then `media_type` is null) |
+| `format` | string \| null | `FORMAT FEED`, `ITEM` or `MEDIA` |
+| `auth_procedure` | string \| null | `AUTHENTICATION PROCEDURE`, `schema.name` or `name` |
+| `options` | object \| null | `OPTIONS` / `MERGE OPTIONS`, as JSON |
+| `merge_options` | boolean | `options` is a JSON merge patch to options the file does not know. Always false here: a `CREATE` stores `MERGE OPTIONS` as the whole options, as MariaDB Shell does, and `ALTER REST VIEW`/`PROCEDURE`/`FUNCTION` is not applied |
+| `metadata` | object \| null | `METADATA`, as JSON |
+| `force` | boolean | a routine's `FORCE` |
+
+A Field is one `key: value` pair of a `{ ... }`:
+
+| Member | Type | Meaning |
+| --- | --- | --- |
+| `name` | string | the JSON key |
+| `column` | string \| null | the column or parameter it maps (`schema.name` joined when written qualified); null for a reference |
+| `reference` | `{schema, table, fields}` \| null | a pair with its own `{ ... }`: `key: [schema.]table @... { ... }`, `schema` null when unqualified. The join columns are not in the SQL |
+| `options` | string[] | its `@` options in written order, but `DATATYPE` (`KEY`, `SORTABLE`, `NOFILTERING`, `NOCHECK`, `NOUPDATE`, `ROWOWNERSHIP`, `IN`, `OUT`, `INOUT`, `UNNEST`, ...) |
+| `datatype` | string \| null | `@DATATYPE("...")`'s text; the argument of any other `@` option is dropped |
+| `json_schema` | object \| null | `JSON SCHEMA {...}`, as JSON |
+
+The JSON values the statement writes (`OPTIONS`, `METADATA`, `JSON SCHEMA`) are reported as
+JSON: single-quoted strings become JSON strings, `.5` becomes `0.5`, a leading `+` goes.

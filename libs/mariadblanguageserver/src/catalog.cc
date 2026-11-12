@@ -21,7 +21,10 @@
 #include <cctype>
 #include <cstdlib>
 #include <optional>
+#include <span>
 #include <utility>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 
 #include "mdbls/keywords.h"
 #include "text_util.h"
@@ -410,6 +413,27 @@ class Catalog_fold {
   bool drop(uint32_t n);
   bool rename(uint32_t n);
   bool rest(uint32_t n);
+
+  // --- REST object details (rest_object_details)
+  void rest_object_details(Rest_object &o, uint32_t st) const;
+  std::vector<Rest_field> rest_fields(uint32_t graphql_obj) const;
+  Rest_field_set rest_field_set(uint32_t n, int name_sym) const;
+  std::string rest_annotation(uint32_t annotation) const;
+  // A mrs_json_value as JSON text: single-quoted strings become JSON
+  // strings, numbers JSON numbers.
+  using Json_writer = rapidjson::Writer<rapidjson::StringBuffer>;
+  std::string rest_json(uint32_t json_value) const;
+  void write_json(Json_writer &w, uint32_t json_value) const;
+  std::string rest_string(uint32_t text_string) const {
+    return unquote_string(trim(raw(text_string)));
+  }
+  // [schema, name] of an mrs_qualified_identifier, unquoted; schema "" when
+  // unqualified.
+  std::pair<std::string, std::string> rest_qualified(uint32_t n) const;
+  std::string rest_dotted(uint32_t n) const {
+    const auto [s, name] = rest_qualified(n);
+    return s.empty() ? name : s + "." + name;
+  }
 
   // --- parts
   View make_view(uint32_t n, uint32_t id) const;
@@ -1636,6 +1660,184 @@ bool Catalog_fold::rename(uint32_t n) {
   return changed;
 }
 
+// --- REST object details --------------------------------------------------
+
+namespace {
+
+// A SQL number as a JSON number: 007 -> 7, .5 -> 0.5, 5. -> 5.0.
+std::string json_number(std::string_view s) {
+  const size_t e = s.find_first_of("eE");
+  std::string m(s.substr(0, e));
+  const std::string exp = e == std::string_view::npos ? "" : std::string(s.substr(e));
+  const size_t dot = m.find('.');
+  std::string whole = m.substr(0, dot);
+  std::string frac = dot == std::string::npos ? "" : m.substr(dot + 1);
+  const size_t nz = whole.find_first_not_of('0');
+  whole = nz == std::string::npos ? "0" : whole.substr(nz);
+  if (dot != std::string::npos && frac.empty()) frac = "0";
+  return whole + (dot != std::string::npos ? "." + frac : "") + exp;
+}
+
+}  // namespace
+
+std::pair<std::string, std::string> Catalog_fold::rest_qualified(uint32_t n) const {
+  return written_name(find_all(n, s_.mrs_identifier));
+}
+
+// @NAME -> NAME
+std::string Catalog_fold::rest_annotation(uint32_t a) const {
+  std::string_view s = trim(raw(a));
+  if (!s.empty() && s.front() == '@') s.remove_prefix(1);
+  return upper(trim(s));
+}
+
+std::string Catalog_fold::rest_json(uint32_t v) const {
+  rapidjson::StringBuffer buf;
+  Json_writer w(buf);
+  write_json(w, v);
+  return buf.GetString();
+}
+
+void Catalog_fold::write_json(Json_writer &w, uint32_t v) const {
+  const auto ch = v == npos ? std::span<const uint32_t>{} : t_.children(v);
+  if (ch.empty()) { w.Null(); return; }
+  const uint32_t first = ch[0];
+  const int sym = t_.node(first).symbol;
+  auto string = [&](uint32_t n) {
+    const std::string s = rest_string(n);
+    w.String(s.data(), static_cast<rapidjson::SizeType>(s.size()));
+  };
+  auto number = [&](const std::string &n) {
+    w.RawValue(n.data(), n.size(), rapidjson::kNumberType);  // RawNumber would quote it
+  };
+  if (sym == s_.TEXT_STRING) {
+    string(first);
+  } else if (sym == s_.mrs_json_number) {
+    number(json_number(text(first)));
+  } else if (sym == s_.mrs_json_obj) {
+    w.StartObject();
+    for (const uint32_t p : find_all(first, s_.mrs_json_pair)) {
+      string(child(p, s_.TEXT_STRING));
+      write_json(w, child(p, s_.mrs_json_value));
+    }
+    w.EndObject();
+  } else if (sym == s_.mrs_json_arr) {
+    w.StartArray();
+    for (const uint32_t x : find_all(first, s_.mrs_json_value)) write_json(w, x);
+    w.EndArray();
+  } else if (sym == s_.TRUE_SYM || sym == s_.FALSE_SYM) {
+    w.Bool(sym == s_.TRUE_SYM);
+  } else if (const std::string t = text(first); t == "-" || t == "+") {
+    number((t == "-" ? "-" : "") + json_number(text(nth(v, 1))));
+  } else {
+    w.Null();
+  }
+}
+
+std::vector<Rest_field> Catalog_fold::rest_fields(uint32_t obj) const {
+  std::vector<Rest_field> out;
+  if (obj == npos) return out;
+  for (const uint32_t p : find_all(obj, s_.mrs_graphql_pair)) {
+    Rest_field f;
+    f.name = unquote_any(trim(raw(child(p, s_.mrs_graphql_pair_key))));
+    const uint32_t value = child(p, s_.mrs_graphql_pair_value);
+    const uint32_t q = child(value, s_.mrs_qualified_identifier);
+    const uint32_t sub = child(child(p, s_.mrs_opt_graphql_obj), s_.mrs_graphql_obj);
+    if (sub != npos) {
+      Rest_reference &r = f.reference.emplace();
+      if (q != npos) {
+        auto [s, t] = rest_qualified(q);
+        if (!s.empty()) r.schema = std::move(s);
+        r.table = std::move(t);
+      } else {
+        r.table = text(value);
+      }
+      r.fields = rest_fields(sub);
+    } else {
+      f.column = q != npos ? rest_dotted(q) : text(value);
+    }
+    for (const uint32_t a : find_all(child(p, s_.mrs_graphql_annotations), s_.mrs_graphql_annotation)) {
+      std::string name = rest_annotation(child(a, s_.mrs_annotation));
+      const uint32_t arg = child(a, s_.mrs_graphql_datatype_text);
+      if (name == "DATATYPE") {
+        if (arg != npos) f.datatype = unquote_any(trim(raw(arg)));
+      } else {
+        f.options.push_back(std::move(name));
+      }
+    }
+    const uint32_t js = child(child(p, s_.mrs_opt_graphql_value_json_schema), s_.mrs_json_value);
+    if (js != npos) f.json_schema = rest_json(js);
+    out.push_back(std::move(f));
+  }
+  return out;
+}
+
+Rest_field_set Catalog_fold::rest_field_set(uint32_t n, int name_sym) const {
+  Rest_field_set set;
+  if (const uint32_t name = child(n, name_sym); name != npos) set.name = name_of(name);
+  set.fields = rest_fields(child(n, s_.mrs_graphql_obj));
+  return set;
+}
+
+void Catalog_fold::rest_object_details(Rest_object &o, uint32_t st) const {
+  const int sym = t_.node(st).symbol;
+  std::tie(o.object_schema, o.object_name) = rest_qualified(child(st, s_.mrs_qualified_identifier));
+  if (sym == s_.mrs_create_rest_view_statement) {
+    if (const uint32_t c = child(child(st, s_.mrs_opt_class), s_.mrs_rest_object_name); c != npos)
+      o.class_name = name_of(c);
+    for (const uint32_t a : find_all(child(st, s_.mrs_opt_graphql_crud_options), s_.mrs_annotation))
+      o.crud.push_back(rest_annotation(a));
+    if (const uint32_t g = child(child(st, s_.mrs_opt_graphql_obj), s_.mrs_graphql_obj); g != npos)
+      o.fields = rest_fields(g);
+  } else {
+    o.force = non_empty(child(st, s_.mrs_opt_force));
+    if (const uint32_t p = child(st, s_.mrs_opt_rest_parameters); non_empty(p))
+      o.parameters = rest_field_set(p, s_.mrs_rest_object_name);
+    uint32_t results = child(st, s_.mrs_rest_results);
+    if (results == npos) results = child(st, s_.mrs_opt_rest_result);
+    for (const uint32_t r : find_all(results, s_.mrs_rest_result))
+      o.results.push_back(rest_field_set(r, s_.mrs_rest_result_name));
+  }
+  // mrs_rest_object_options is left-recursive: its options in written order.
+  std::vector<uint32_t> levels;
+  for (uint32_t n = child(st, s_.mrs_rest_object_options); n != npos && t_.children(n).size() >= 2;
+       n = t_.children(n)[0]) {
+    levels.push_back(n);
+  }
+  for (auto it = levels.rbegin(); it != levels.rend(); ++it) {
+    const auto ch = t_.children(*it);
+    const uint32_t item = ch[1];
+    const int is = t_.node(item).symbol;
+    if (is == s_.mrs_enabled_disabled_private) {
+      o.enabled = upper(text(item));
+    } else if (is == s_.mrs_authentication_required) {
+      o.requires_auth = find(item, s_.NOT_SYM) == npos;
+    } else if (is == s_.mrs_items_per_page) {
+      const std::string num = text(find(item, s_.mrs_int_number));
+      o.items_per_page = std::strtoull(num.c_str(), nullptr, 10);
+    } else if (is == s_.mrs_json_options) {
+      // A CREATE stores MERGE OPTIONS as the whole options, as the shell does.
+      o.options = rest_json(child(item, s_.mrs_json_value));
+    } else if (is == s_.mrs_comments) {
+      o.comment = rest_string(child(item, s_.TEXT_STRING));
+    } else if (is == s_.mrs_metadata) {
+      o.metadata = rest_json(child(item, s_.mrs_json_value));
+    } else if (is == s_.mrs_rest_view_format) {
+      o.format = upper(text(t_.children(item).back()));
+    } else if (is == s_.MEDIA_SYM && ch.size() >= 4) {
+      if (t_.node(ch[3]).symbol == s_.TEXT_STRING) {
+        o.media_type = rest_string(ch[3]);
+        o.media_type_autodetect = false;
+      } else {
+        o.media_type.reset();
+        o.media_type_autodetect = true;
+      }
+    } else if (is == s_.AUTHENTICATION_SYM && ch.size() >= 4) {
+      o.auth_procedure = rest_dotted(ch[3]);
+    }
+  }
+}
+
 // REST statements resolve the service and schema they do not name as
 // MariaDB Shell's MRS DDL executor (mysqlshdk/libs/mrs/ddl_executor*.cc)
 // does: only USE REST SERVICE sets the current service, and clears the
@@ -1693,10 +1895,22 @@ bool Catalog_fold::rest(uint32_t n) {
     Rest_schema *it = find_rest_schema(svc, place->second);
     if (it == nullptr) it = &svc.schemas.emplace_back(Rest_schema{place->second, "", {}, false, {stmt_, stmt_}});
     const uint32_t p = find(st, path_sym);
-    Rest_object o{kind, text(p), text(find(st, s_.mrs_qualified_identifier)), origin(p)};
+    Rest_object o;
+    o.kind = kind;
+    o.path = text(p);
+    o.object = text(child(st, s_.mrs_qualified_identifier));
+    o.origin = origin(p);
     auto ex = std::find_if(it->objects.begin(), it->objects.end(), [&](const Rest_object &x) {
       return iequals(x.path, o.path) && x.kind == o.kind;
     });
+    // IF NOT EXISTS keeps an object the file created at the path, of any
+    // kind, as it is, as the shell does (it looks the path up alone).
+    if (find(nth(st, 0), s_.IF_SYM) != npos &&
+        std::any_of(it->objects.begin(), it->objects.end(),
+                    [&](const Rest_object &x) { return iequals(x.path, o.path); })) {
+      return true;
+    }
+    rest_object_details(o, st);
     if (ex != it->objects.end()) *ex = std::move(o); else it->objects.push_back(std::move(o));
     return true;
   };
