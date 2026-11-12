@@ -462,7 +462,8 @@ ADD_EVENT = {"op": "add_event", "event": {"name": "purge", "schedule": "EVERY 1 
 
 class Edit_msm_sections(unittest.TestCase):
     """Section 150 of an MSM script runs on every deployment: what the edits
-    write there must be safe to run again."""
+    write there must be safe to run again.  msm gives the place and form
+    (`at`, `form`); without them a new object follows its neighbour."""
 
     def setUp(self):
         dev = pathlib.Path(tempfile.mkdtemp(prefix="mdbls-msm-"))
@@ -478,6 +479,10 @@ class Edit_msm_sections(unittest.TestCase):
         check = self.p.run("check", "--source-dir", str(self.p.dev), "-")
         self.assertEqual(check.returncode, 0, check.stdout.decode())
         return result
+
+    def line_of(self, text):
+        """The 0-based line of the script that starts with `text`."""
+        return self.p.script[:self.p.script.index("\n" + text) + 1].count("\n")
 
     def section(self, number):
         start = self.p.script.index("-- MSM Section %d" % number)
@@ -501,7 +506,8 @@ class Edit_msm_sections(unittest.TestCase):
         self.assertEqual(self.p.script, MSM_SCRIPT)
 
     def test_a_sequence_goes_before_the_first_table(self):
-        result = self.apply([{"op": "add_sequence", "sequence": {"name": "order_ids"}}])
+        result = self.apply([{"op": "add_sequence", "sequence": {"name": "order_ids"},
+                              "at": {"file": "", "line": self.line_of("CREATE TABLE `customer`")}}])
         section = self.section(140)
         self.assertLess(section.index("CREATE SEQUENCE `order_ids`;"), section.index("CREATE TABLE"))
         self.assertEqual([(m["action"], m["object"], m["name"]) for m in result["migration"]],
@@ -513,7 +519,7 @@ class Edit_msm_sections(unittest.TestCase):
         self.assertEqual(self.p.script, MSM_SCRIPT)
 
     def test_a_trigger_and_an_event_are_dropped_before_their_create(self):
-        result = self.apply([ADD_TRIGGER, ADD_EVENT])
+        result = self.apply([ADD_TRIGGER | {"form": "drop_first"}, ADD_EVENT | {"form": "drop_first"}])
         section = self.section(150)
         self.assertIn("DROP TRIGGER IF EXISTS `orders_bi`%%\nCREATE TRIGGER `orders_bi` BEFORE INSERT ON `orders`",
                       section)
@@ -526,8 +532,9 @@ class Edit_msm_sections(unittest.TestCase):
                     {"op": "drop_trigger", "trigger": "orders_bi", "table": "orders"}])
         self.assertEqual(self.p.script, MSM_SCRIPT)
 
-    def test_a_first_view_goes_into_section_150(self):
-        self.apply([{"op": "drop_view", "view": "customer_ids"}, ADD_VIEW])
+    def test_a_first_view_goes_where_msm_puts_it(self):
+        self.apply([{"op": "drop_view", "view": "customer_ids"}])
+        self.apply([ADD_VIEW | {"at": {"file": "", "line": self.line_of("DELIMITER ;")}, "form": "or_replace"}])
         self.assertIn("CREATE OR REPLACE VIEW `order_ids`", self.section(150))
         self.assertNotIn("order_ids", self.section(140))
 
@@ -742,14 +749,14 @@ class Edit_mrs_project(unittest.TestCase):
         self.assertEqual(self.p.script, script)
         self.assertEqual({f: f.read_bytes() for f in self.p.dev.rglob("*.sql")}, files)
 
-    def test_new_views_and_routines_in_section_150(self):
+    def test_new_views_and_routines_follow_their_neighbours(self):
         code, result = self.p.edit([ADD_VIEW | {"view": {"name": "view1", "definition": "SELECT 1"}},
                                     ADD_ROUTINE | {"routine": dict(ADD_ROUTINE["routine"], name="routine1")}],
                                    "mariadb_rest_service")
         self.assertEqual(code, 0, result)
         self.p.apply(result)
-        views = (self.p.dev / "sections" / "150-10_views.sql").read_text()
-        self.assertRegex(views, r"CREATE OR REPLACE\s.*VIEW `view1`")
+        # After the last view, written as it is.
+        self.assertRegex(self.p.script, r"CREATE OR REPLACE\s.*VIEW `view1`")
         # After restore_roles, the last routine, which the script drops first.
         self.assertIn("DROP PROCEDURE IF EXISTS `routine1`%%\nCREATE PROCEDURE `routine1`()", self.p.script)
 

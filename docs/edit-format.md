@@ -172,12 +172,9 @@ its first keyword; the file's line breaks. A new statement is laid out by the fo
 `DELIMITER $$` block), and has as many blank lines before it as the statement it follows
 has above it (a banner's comment lines not counted); no banner is written.
 
-- **An MSM script** (one with `-- MSM Section NNN: ...` marker lines) keeps its sections: a
-  table goes into Section 140 (after its last table there, else at the end of the section),
-  a view or routine into Section 150, which every deployment runs again (below). Other
-  scripts follow the rules below without sections. These rules apply to an add op without
-  `at`; msm, which owns an MSM project's layout, passes `at` and `form` where the binary lists
-  `placement` ([Placement](#placement)), and the section rules go once msm requires it.
+- **An MSM script** gets no rules of its own: msm, which owns an MSM project's layout, passes
+  `at` and `form` with every add ([Placement](#placement)). The rules below are for an add op
+  without `at`, in any script.
 - **A table** goes after the `CREATE TABLE` of the schema's last table (in the order of the
   expanded script), in that statement's file; to the end of the script when the schema has
   none. Its keys and foreign keys go into it; a foreign key's table must exist (or be the
@@ -198,34 +195,27 @@ has above it (a banner's comment lines not counted); no banner is written.
   sets later wins over it, so the self-check refuses such an edit. Option names are the
   outline's (`engine`, `charset`, `collation`, `comment`, `auto_increment`, `row_format`,
   an engine-defined one under its own name); `comment` is the text, quoted when written.
-- **A view** goes after the schema's last view, else after its last table; in an MSM script
-  after its last view in Section 150, else at the end of Section 150 (after its last
-  statement, or after its banner when it has none). It is written as its neighbouring view
-  is: `CREATE OR REPLACE VIEW`, or with a `DROP VIEW IF EXISTS` before it. In Section 150 it is
-  always one of the two, `CREATE OR REPLACE` unless the neighbour drops first. Its `definition`
+- **A view** goes after the schema's last view, else after its last table. It is written as
+  its neighbouring view is: `CREATE OR REPLACE VIEW`, or with a `DROP VIEW IF EXISTS` before
+  it. Its `definition`
   is the `SELECT`: `check_option` writes the `WITH ... CHECK OPTION`, and a trailing one in
   the `definition` (the outline's holds it) is dropped when `check_option` is set, so a view of
   the outline can be sent back as it is (`bad-request` when it names the other level). A
   definition that is empty or does not parse is `bad-request`.
 - **A routine** goes after the schema's last routine of either kind, inside its
   `DELIMITER` block; where `;` is the delimiter and the routine holds one, in a new block
-  (`DELIMITER $$`, or the delimiter the script uses elsewhere). In an MSM script: after its
-  last routine in Section 150, else its last view there, else at the end of Section 150. It is
-  written as the routine it follows is: with `DROP PROCEDURE|FUNCTION IF EXISTS` before it, or
-  `CREATE OR REPLACE`; in Section 150 always one of the two, the `DROP` unless the neighbour
-  uses `OR REPLACE`. Blank lines before it are counted above the neighbour's `DROP`. The
+  (`DELIMITER $$`, or the delimiter the script uses elsewhere). It is written as the routine
+  it follows is: with `DROP PROCEDURE|FUNCTION IF EXISTS` before it, or `CREATE OR REPLACE`.
+  Blank lines before it are counted above the neighbour's `DROP`. The
   migration holds the `CREATE` alone. A function needs `returns`.
   Its name must be free among the routines of its kind (`name-taken`); a procedure and a
   function may share a name, as in MariaDB.
 - **A trigger** goes after the schema's last trigger, else its last routine, else its last
   view, else its last table, never before its own table's `CREATE TABLE` and never after the
   schema's first event (nor that event's `DROP EVENT IF EXISTS`); an **event**
-  after the schema's last event, else its last trigger, routine, view or table. In an MSM script
-  both go into Section 150: after the last object of that order there, else at the end of the
-  section. They are written as their neighbour of their own kind is, dropped first or `CREATE OR
-  REPLACE`, and in Section 150 always one of the two, the `DROP TRIGGER|EVENT IF EXISTS` unless
-  the neighbour uses `OR REPLACE`; inside a `DELIMITER` block when the body holds `;`, as a
-  routine. A trigger's `events` is the outline's string (`INSERT`, `UPDATE OR DELETE`), not an
+  after the schema's last event, else its last trigger, routine, view or table. They are
+  written as their neighbour of their own kind is, dropped first or `CREATE OR REPLACE`;
+  inside a `DELIMITER` block when the body holds `;`, as a routine. A trigger's `events` is the outline's string (`INSERT`, `UPDATE OR DELETE`), not an
   array; `update_columns` needs `UPDATE` among them. Its table must exist and be a table
   (`unknown-object`), as must the columns of its `update_columns` and the trigger its `order`
   names: on the same table, with the same timing, firing on every event of the new one (else
@@ -236,8 +226,7 @@ has above it (a banner's comment lines not counted); no banner is written.
   names neither elsewhere), with `name-in-string` notes as the other renames.
 - **A sequence** goes after the schema's last sequence, else before its first table (its
   `DROP TABLE IF EXISTS` included), whose column defaults may take values from it: after the
-  last statement above that table, else after the script's (or the section's) opening
-  comments; in an MSM script in Section 140. Its numbers (`start`, `increment`, `minvalue`,
+  last statement above that table, else after the script's opening comments. Its numbers (`start`, `increment`, `minvalue`,
   `maxvalue`, `cache`) are strings of an integer, as the outline writes them; `cache` `"0"` writes
   `NOCACHE`. Sequences share the namespace of tables and views (`name-taken`). A sequence a
   `CREATE TABLE` or `ALTER TABLE` of another table names (a column default, also one a later

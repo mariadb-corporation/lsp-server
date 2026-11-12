@@ -2746,33 +2746,9 @@ class Editor {
     }
     return at;
   }
-  // An MSM script's section `id`: from its marker (a line `-- MSM Section
-  // 150: ...`) to the next one, in the searched text; nullopt when the
-  // script has no such marker (it is not an MSM script).
-  std::optional<Range> msm_section(int id) const {
-    const std::string_view t = text();
-    const std::string_view marker = k_msm_marker;
-    std::optional<Range> out;
-    for (size_t p = t.find(marker); p != std::string_view::npos; p = t.find(marker, p + 1)) {
-      if (p != line_begin(t, static_cast<uint32_t>(p))) continue;
-      size_t q = p + marker.size();
-      int n = 0;
-      while (q < t.size() && std::isdigit(static_cast<unsigned char>(t[q]))) n = n * 10 + (t[q++] - '0');
-      // The section ends where the next one's banner starts: at the comment
-      // line right above its marker (the banner's top border), if any.
-      if (out && out->end == t.size()) {
-        const auto e = static_cast<uint32_t>(p);  // after out->begin: a later marker
-        const uint32_t above = line_begin(t, e - 1);
-        out->end = above > out->begin && is_comment_line(t.substr(above, e - 1 - above)) ? above : e;
-      }
-      if (n == id && !out) out = Range{static_cast<uint32_t>(p), static_cast<uint32_t>(t.size())};
-    }
-    return out;
-  }
-
-  // Where a statement goes at the end of a section: after its last
-  // statement, else after the comment block of its marker.
-  Spot end_of_section(Range r, const std::string &eol) const {
+  // Where a statement goes at the end of range `r` of the searched text:
+  // after its last statement, else after the comment lines it starts with.
+  Spot end_of_range(Range r, const std::string &eol) const {
     std::optional<size_t> last;
     std::optional<size_t> before;  // the last statement above the section
     for (size_t k = 0; k < index().statements().size(); ++k) {
@@ -2830,24 +2806,21 @@ class Editor {
   }
   // Where a new object goes: at `spot`, else at the end of the script.
   // `anchor`, the statement it follows, gives its style and form; without
-  // one, statement `near` its style.  `msm`: the script has MSM sections.
+  // one, statement `near` its style.
   struct Place {
     Anchor anchor;
     std::optional<Spot> spot;
-    bool msm = false;
     std::optional<size_t> near;
   };
   // After the home schema's last object of the first of `kinds` that has
-  // one; in an MSM script only within section `section`, else at that
-  // section's end.  Never at or after the first object of `before` (its
-  // DROP ... IF EXISTS included), and never before the CREATE TABLE of
-  // `after_table`, which the new object depends on.
-  Place place_for(int section, std::initializer_list<Kind> kinds, std::initializer_list<Kind> before = {},
-              const Table *after_table = nullptr) const {
+  // one, never at or after the first object of `before` (its DROP ... IF
+  // EXISTS included; without such an object then right above it), and
+  // never before the CREATE TABLE of `after_table`, which the new object
+  // depends on.  In an MSM script msm gives the place (`at`).
+  Place place_for(std::initializer_list<Kind> kinds, std::initializer_list<Kind> before = {},
+                  const Table *after_table = nullptr) const {
     Place p;
-    const auto r = msm_section(section);
-    p.msm = r.has_value();
-    Range within = r.value_or(Range{0, static_cast<uint32_t>(text().size())});
+    Range within{0, static_cast<uint32_t>(text().size())};
     bool cut = false;  // an object of `before` ends the range
     const Schema *h = home();
     if (h == nullptr) return p;
@@ -2869,14 +2842,13 @@ class Editor {
       p.anchor = with_objects(*h, kind, [&](const auto &objects) { return last_of(objects, within); });
       if (p.anchor.k) break;
     }
-    if (after_table != nullptr && !p.msm) {
+    if (after_table != nullptr) {
       const auto kt = statement_of(after_table->origin);
       if (kt && (!p.anchor.k || *p.anchor.k < *kt)) p.anchor = {kt, &after_table->origin, after_table->name, Kind::table};
     }
-    // In a section, or before the first object of `before`: at the end of
-    // that range.
+    // Before the first object of `before`: at the end of what is above it.
     if (p.anchor.k) p.spot = after_create(*p.anchor.k, style_of(p.anchor).eol);
-    else if (r || cut) p.spot = end_of_section(within, style_at(std::nullopt, std::nullopt).eol);
+    else if (cut) p.spot = end_of_range(within, style_at(std::nullopt, std::nullopt).eol);
     return p;
   }
   // The style new text at `p` is written in: its anchor's, else the
@@ -2893,10 +2865,7 @@ class Editor {
 
   // How a new view, routine, trigger or event (`kind`) is written: CREATE
   // OR REPLACE, or with a DROP ... IF EXISTS before it.  `form` is the
-  // request's; without it, as the object it follows of its own kind is,
-  // and in an MSM script (Section 150, which every deployment runs again)
-  // always one of the two: a view CREATE OR REPLACE, the others dropped
-  // first.
+  // request's; without it, as the object it follows of its own kind is.
   struct Written {
     bool or_replace = false;
     bool drop = false;
@@ -2906,8 +2875,7 @@ class Editor {
     if (form == "or_replace") return {true, false};
     if (form == "drop_first") return {false, true};
     const Form f = place.anchor.kind == kind ? form_at(*place.anchor.k, place.anchor.name) : Form{};
-    if (kind == Kind::view) return {f.or_replace || (place.msm && !f.drop), f.drop && !f.or_replace};
-    return {f.or_replace, f.drop || (place.msm && !f.or_replace)};
+    return {f.or_replace, f.drop.has_value()};
   }
 
   // ---------------------------------------------------------------------
@@ -3427,8 +3395,7 @@ class Editor {
     for (const auto &fk : t.foreign_keys) {
       if (auto err = check_foreign_key(i, t, fk)) return err;
     }
-    // An MSM script's tables are in Section 140.
-    Place place = place_for(140, {Kind::table});
+    Place place = place_for({Kind::table});
     if (auto err = apply_at(i, e, place)) return err;
     const edit_text::Style st = style_of(place);
     for (const auto &c : t.columns) {
@@ -3984,9 +3951,7 @@ class Editor {
   std::optional<Edit_error> add_view(size_t i, const Schema_edit &e, Changes &changes) {
     const View &v = *e.new_view;
     if (auto err = table_name_free(i, "", v.name)) return err;
-    // An MSM script's views are in Section 150, which every deployment runs
-    // again: the view must be CREATE OR REPLACE (or dropped first).
-    Place place = place_for(150, {Kind::view, Kind::table});
+    Place place = place_for({Kind::view, Kind::table});
     if (auto err = apply_at(i, e, place)) return err;
     const Written w = written_as(place, Kind::view, e.form);
     const edit_text::Style st = style_of(place);
@@ -4014,7 +3979,7 @@ class Editor {
     // A procedure and a function may share a name.
     if (!l.routines(r.name, r.kind).empty()) return error(i, "name-taken", "a " + r.kind + " `" + r.name + "` exists");
     m_routine_kind = r.kind;
-    Place place = place_for(150, {Kind::routine, Kind::view, Kind::table});
+    Place place = place_for({Kind::routine, Kind::view, Kind::table});
     if (auto err = apply_at(i, e, place)) return err;
     return insert_create(i, place, Kind::routine, e.form, routine_object(r.kind), r.name,
                          [&](const edit_text::Style &st, bool or_replace) {
@@ -4132,7 +4097,7 @@ class Editor {
     const Table *table = nullptr;
     if (auto err = check_trigger(i, t, nullptr, table)) return err;
     // Before the events, after its table.
-    Place place = place_for(150, {Kind::trigger, Kind::routine, Kind::view, Kind::table}, {Kind::event}, table);
+    Place place = place_for({Kind::trigger, Kind::routine, Kind::view, Kind::table}, {Kind::event}, table);
     if (auto err = apply_at(i, e, place)) return err;
     // A CREATE TRIGGER runs after its table's CREATE TABLE.
     if (const auto kt = e.at && table != nullptr ? statement_of(table->origin) : std::nullopt) {
@@ -4193,7 +4158,7 @@ class Editor {
   std::optional<Edit_error> add_event(size_t i, const Schema_edit &e, Changes &changes) {
     const Event &ev = *e.new_event;
     if (lookup().event(ev.name).second != nullptr) return error(i, "name-taken", "an event `" + ev.name + "` exists");
-    Place place = place_for(150, {Kind::event, Kind::trigger, Kind::routine, Kind::view, Kind::table});
+    Place place = place_for({Kind::event, Kind::trigger, Kind::routine, Kind::view, Kind::table});
     if (auto err = apply_at(i, e, place)) return err;
     return insert_create(
         i, place, Kind::event, e.form, Obj::event, ev.name,
@@ -4466,9 +4431,9 @@ class Editor {
     const Sequence &q = *e.new_sequence;
     if (auto err = table_name_free(i, "", q.name)) return err;
     // After the last sequence, else before the first table (whose column
-    // defaults may take values from it); in an MSM script in Section 140.
-    Place place = place_for(140, {Kind::sequence});
-    if (!place.anchor.k) place = place_for(140, {}, {Kind::table});
+    // defaults may take values from it).
+    Place place = place_for({Kind::sequence});
+    if (!place.anchor.k) place = place_for({}, {Kind::table});
     if (auto err = apply_at(i, e, place)) return err;
     const edit_text::Style st = style_of(place);
     const std::string sql = edit_text::create_sequence_sql(q, st);
