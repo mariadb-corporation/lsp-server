@@ -245,7 +245,7 @@ TEST(Catalog, rest_drop_is_scoped) {
       "CREATE REST SCHEMA /s ON SERVICE /a FROM sakila;\n"
       "CREATE REST SCHEMA /s ON SERVICE /b FROM sakila;\n"
       "CREATE REST VIEW /x ON SERVICE /a SCHEMA /s AS sakila.actor;\n"
-      "CREATE REST PROCEDURE /x ON SERVICE /a SCHEMA /s AS sakila.film_in_stock;\n"
+      "CREATE REST PROCEDURE /y ON SERVICE /a SCHEMA /s AS sakila.film_in_stock;\n"
       "CREATE REST VIEW /x ON SERVICE /b SCHEMA /s AS sakila.actor;\n"
       "CREATE REST CONTENT SET /cs ON SERVICE /a;\n"
       "CREATE REST CONTENT SET /cs ON SERVICE /b;\n"
@@ -1013,7 +1013,9 @@ TEST(Catalog, rest_view_details) {
       "CREATE REST VIEW IF NOT EXISTS /plain ON SERVICE /svc SCHEMA /s AS other.country\n"
       "  COMMENT 'ignored';\n"
       "CREATE REST PROCEDURE IF NOT EXISTS /plain ON SERVICE /svc SCHEMA /s AS p;\n");
-  EXPECT_TRUE(o.notes.empty());
+  // The procedure does nothing: /plain is a view.
+  ASSERT_EQ(1u, o.notes.size());
+  EXPECT_EQ(Note_kind::rest_object_kind, o.notes[0].kind);
   const auto &objs = o.catalog.rest_services().at(0).schemas.at(0).objects;
   ASSERT_EQ(3u, objs.size());
   const Rest_object &v = objs[0];
@@ -1284,4 +1286,123 @@ TEST(Catalog, rest_statements_executable_comment_above) {
   EXPECT_FALSE(statements[0].leading_comments.has_value());
 }
 
+// An object is its path, of any kind, as in MariaDB Shell.
+TEST(Catalog, rest_object_path_any_kind) {
+  const std::string sql =
+      "CREATE REST SERVICE /svc;\n"                                 // 0
+      "CREATE REST SCHEMA /s ON SERVICE /svc FROM sakila;\n"        // 1
+      "USE REST SERVICE /svc SCHEMA /s;\n"                          // 2
+      "CREATE REST PROCEDURE /v AS p;\n"                            // 3
+      "CREATE REST VIEW IF NOT EXISTS /v AS t;\n"                   // 4
+      "DROP REST VIEW /v;\n"                                        // 5
+      "CREATE REST PROCEDURE IF NOT EXISTS /v AS p2;\n"             // 6
+      "CREATE OR REPLACE REST FUNCTION /v AS f;\n";                 // 7
+  const auto o = outline_of(sql);
+  ASSERT_EQ(2u, o.notes.size());
+  EXPECT_EQ(Note_kind::rest_object_kind, o.notes[0].kind);
+  EXPECT_FALSE(o.notes[0].applied);
+  EXPECT_NE(std::string::npos, o.notes[0].message.find("is a REST PROCEDURE")) << o.notes[0].message;
+  EXPECT_EQ(Note_kind::rest_object_kind, o.notes[1].kind);
+  const Catalog &c = o.catalog;
+  const auto &svc = c.rest_services().at(0);
+  const auto &rs = svc.schemas.at(0);
+  ASSERT_EQ(1u, rs.objects.size());
+  EXPECT_EQ("function", rs.objects[0].kind);
+  EXPECT_EQ("f", rs.objects[0].object);
+  const Line_map lines(sql);
+  std::vector<uint32_t> at;
+  for (const auto &s : c.rest_statements(svc, rs, rs.objects[0]))
+    at.push_back(lines.position(sql, s.origin.statement.begin).line);
+  EXPECT_EQ((std::vector<uint32_t>{3, 4, 5, 6, 7}), at);
+}
+
+// A rename onto a path in use fails in MariaDB Shell, with its other clauses.
+TEST(Catalog, rest_rename_onto_path_in_use) {
+  const std::string sql =
+      "CREATE REST SERVICE /a;\n"
+      "CREATE REST SERVICE /b;\n"
+      "ALTER REST SERVICE /a NEW REQUEST PATH /B COMMENT 'x';\n"
+      "CREATE REST SCHEMA /s ON SERVICE /a FROM sakila;\n"
+      "CREATE REST SCHEMA /t ON SERVICE /a FROM sakila;\n"
+      "ALTER REST SCHEMA /s ON SERVICE /a NEW REQUEST PATH /t;\n"
+      "ALTER REST SERVICE /a NEW REQUEST PATH /A;\n";
+  const auto o = outline_of(sql);
+  ASSERT_EQ(2u, o.notes.size());
+  EXPECT_EQ(Note_kind::rest_path_in_use, o.notes[0].kind);
+  EXPECT_EQ(Note_kind::rest_path_in_use, o.notes[1].kind);
+  const Catalog &c = o.catalog;
+  ASSERT_EQ(2u, c.rest_services().size());
+  const auto &a = c.rest_services()[0];
+  EXPECT_EQ("/A", a.name.path);  // a rename onto its own path, other case, is fine
+  EXPECT_FALSE(a.settings.comment.has_value());
+  ASSERT_EQ(2u, a.schemas.size());
+  EXPECT_EQ("/s", a.schemas[0].path);
+  EXPECT_EQ(3u, c.rest_statements(a).size());  // create, the failed alter, the rename
+  EXPECT_EQ(2u, c.rest_statements(a, a.schemas[0]).size());
+  EXPECT_EQ(1u, c.rest_statements(c.rest_services()[1]).size());
+}
+
+// The shell's metadata checks paths against enabled services only.
+TEST(Catalog, rest_rename_onto_path_of_disabled_service) {
+  const auto o = outline_of(
+      "CREATE REST SERVICE /a;\n"
+      "CREATE REST SERVICE /b DISABLED;\n"
+      "ALTER REST SERVICE /a NEW REQUEST PATH /b;\n"
+      "CREATE REST SERVICE /c DISABLED;\n"
+      "CREATE REST SCHEMA /s ON SERVICE /c FROM sakila;\n"
+      "CREATE REST SCHEMA /t ON SERVICE /c FROM sakila;\n"
+      "ALTER REST SCHEMA /s ON SERVICE /c NEW REQUEST PATH /t;\n");
+  EXPECT_TRUE(o.notes.empty());
+  ASSERT_EQ(3u, o.catalog.rest_services().size());
+  EXPECT_EQ("/b", o.catalog.rest_services()[0].name.path);
+  EXPECT_EQ("/t", o.catalog.rest_services()[2].schemas.at(0).path);
+}
+
+// DROP ... IF EXISTS of another kind does nothing in the shell, without failing.
+TEST(Catalog, rest_drop_if_exists_other_kind) {
+  const auto o = outline_of(
+      "CREATE REST SERVICE /svc;\n"
+      "CREATE REST SCHEMA /s ON SERVICE /svc FROM sakila;\n"
+      "CREATE REST PROCEDURE /v ON SERVICE /svc SCHEMA /s AS p;\n"
+      "DROP REST VIEW IF EXISTS /v FROM SERVICE /svc SCHEMA /s;\n");
+  ASSERT_EQ(1u, o.notes.size());
+  EXPECT_EQ(Note_kind::rest_object_kind, o.notes[0].kind);
+  EXPECT_NE(std::string::npos, o.notes[0].message.find("does nothing")) << o.notes[0].message;
+  EXPECT_EQ(1u, o.catalog.rest_services().at(0).schemas.at(0).objects.size());
+}
+
+// A plain CREATE at a path the file has fails in MariaDB Shell, in an
+// enabled service; OR REPLACE replaces, and a service only named is created.
+TEST(Catalog, rest_plain_create_onto_path_in_use) {
+  const std::string sql =
+      "CREATE REST SCHEMA /s ON SERVICE /svc FROM sakila;\n"         // /svc only named
+      "CREATE REST SERVICE /svc;\n"                                 // creates it
+      "CREATE REST SERVICE /svc COMMENT 'x';\n"                     // fails
+      "CREATE REST SCHEMA /s ON SERVICE /svc FROM other;\n"         // fails
+      "CREATE REST VIEW /v ON SERVICE /svc SCHEMA /s AS t;\n"
+      "CREATE REST PROCEDURE /v ON SERVICE /svc SCHEMA /s AS p;\n"  // fails
+      "CREATE REST CONTENT SET /cs ON SERVICE /svc;\n"
+      "CREATE REST CONTENT SET /cs ON SERVICE /svc;\n"              // fails
+      "CREATE OR REPLACE REST PROCEDURE /v ON SERVICE /svc SCHEMA /s AS p;\n"
+      "CREATE REST SERVICE /off DISABLED;\n"
+      "CREATE REST SCHEMA /s ON SERVICE /off FROM sakila;\n"
+      "CREATE REST SCHEMA /s ON SERVICE /off FROM other;\n";       // disabled: replaces
+  const auto o = outline_of(sql);
+  ASSERT_EQ(4u, o.notes.size());
+  for (const auto &n : o.notes) {
+    EXPECT_EQ(Note_kind::rest_path_in_use, n.kind) << n.message;
+    EXPECT_FALSE(n.applied);
+  }
+  EXPECT_NE(std::string::npos, o.notes[2].message.find("REST VIEW /v exists")) << o.notes[2].message;
+  const auto &svcs = o.catalog.rest_services();
+  ASSERT_EQ(2u, svcs.size());
+  EXPECT_FALSE(svcs[0].settings.comment.has_value());
+  ASSERT_EQ(1u, svcs[0].schemas.size());
+  EXPECT_EQ("sakila", svcs[0].schemas[0].schema);
+  ASSERT_EQ(1u, svcs[0].schemas[0].objects.size());
+  EXPECT_EQ("procedure", svcs[0].schemas[0].objects[0].kind);
+  EXPECT_EQ(1u, svcs[0].content_sets.size());
+  ASSERT_EQ(1u, svcs[1].schemas.size());
+  EXPECT_EQ("other", svcs[1].schemas[0].schema);
+}
 }  // namespace mdbls

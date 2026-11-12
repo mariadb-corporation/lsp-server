@@ -100,12 +100,21 @@ void erase_by_path(std::vector<T> &v, std::string_view path) {
   std::erase_if(v, [&](const T &x) { return iequals(x.path, path); });
 }
 
-// The REST schema of `svc` with request path `path`, or nullptr.
-Rest_schema *find_rest_schema(Rest_service &svc, std::string_view path) {
-  auto it = std::find_if(svc.schemas.begin(), svc.schemas.end(),
-                         [&](const Rest_schema &s) { return iequals(s.path, path); });
-  return it == svc.schemas.end() ? nullptr : &*it;
+// The REST item of v (schemas, objects) with request path `path`, or
+// nullptr; an object of any kind, as the shell's find_rest_object.
+template <typename T>
+T *find_by_path(std::vector<T> &v, std::string_view path) {
+  auto it = std::find_if(v.begin(), v.end(), [&](const T &x) { return iequals(x.path, path); });
+  return it == v.end() ? nullptr : &*it;
 }
+
+// The REST schema of `svc` with request path `path`, or nullptr.
+Rest_schema *find_rest_schema(Rest_service &svc, std::string_view path) { return find_by_path(svc.schemas, path); }
+
+// Whether MariaDB Shell's metadata counts a service's request paths (its
+// valid_request_path and triggers look at services with enabled = TRUE only).
+// A service with no setting is enabled.
+bool rest_enabled(const Rest_settings &s) { return !s.enabled || *s.enabled == "ENABLED"; }
 
 // The grammar symbols the fold looks for, resolved once.
 struct Syms {
@@ -138,6 +147,8 @@ const char *to_string(Note_kind kind) {
     case Note_kind::rest_none_in_use: return "rest-none-in-use";
     case Note_kind::unknown_rest_service: return "unknown-rest-service";
     case Note_kind::unknown_rest_schema: return "unknown-rest-schema";
+    case Note_kind::rest_object_kind: return "rest-object-kind";
+    case Note_kind::rest_path_in_use: return "rest-path-in-use";
   }
   return "";
 }
@@ -311,10 +322,9 @@ std::string rest_key_service(std::string_view service_key) { return lower(servic
 std::string rest_key_schema(std::string_view service_key, std::string_view path) {
   return rest_key_service(service_key) + k_key_sep + "s" + lower(path);
 }
-std::string rest_key_object(std::string_view service_key, std::string_view schema_path,
-                            std::string_view kind, std::string_view path) {
-  return rest_key_schema(service_key, schema_path) + k_key_sep + "o" + std::string(kind) + k_key_sep +
-         lower(path);
+// An object by its path alone, of any kind: the shell looks objects up so.
+std::string rest_key_object(std::string_view service_key, std::string_view schema_path, std::string_view path) {
+  return rest_key_schema(service_key, schema_path) + k_key_sep + "o" + lower(path);
 }
 std::string rest_key_content_set(std::string_view service_key, std::string_view name) {
   return rest_key_service(service_key) + k_key_sep + "c" + lower(name);
@@ -338,7 +348,7 @@ const std::vector<Rest_statement> &Catalog::rest_statements(const Rest_service &
 
 const std::vector<Rest_statement> &Catalog::rest_statements(const Rest_service &svc, const Rest_schema &rs,
                                                             const Rest_object &o) const {
-  return rest_statements_of(rest_key_object(svc.name.key, rs.path, o.kind, o.path));
+  return rest_statements_of(rest_key_object(svc.name.key, rs.path, o.path));
 }
 
 const std::vector<Rest_statement> &Catalog::rest_content_set_statements(const Rest_service &svc,
@@ -515,6 +525,8 @@ class Catalog_fold {
   void rest_settings(Rest_settings &s, uint32_t list, Options_write mode = Options_write::replace) const;
   // Whether a CREATE statement says IF NOT EXISTS.
   bool if_not_exists(uint32_t st) const { return find(nth(st, 0), s_.IF_SYM) != npos; }
+  // Whether a CREATE statement says OR REPLACE.
+  bool or_replace(uint32_t st) const { return find(nth(st, 0), s_.OR_SYM) != npos; }
   // The levels of a left-recursive list (`list: empty | list item...`) in
   // written order; each level's children after the first are one item.
   std::vector<uint32_t> list_levels(uint32_t list) const;
@@ -2126,6 +2138,20 @@ bool Catalog_fold::rest(uint32_t n) {
     if (c_.m_current_rest_schema.empty()) { none_in_use("SCHEMA"); return std::nullopt; }
     return std::pair{*svc, c_.m_current_rest_schema};
   };
+  // A rest-object-kind note: the statement's path holds `ex`, of another kind.
+  auto other_kind = [&](const Rest_object &ex, const char *effect) {
+    note(Note_kind::rest_object_kind, false, what() + ": " + effect + ex.path + " is a REST " + upper(ex.kind));
+  };
+  // A plain CREATE (no OR REPLACE, no IF NOT EXISTS) of a REST item at a
+  // path the file has in an enabled service fails in the shell: its
+  // metadata triggers ("The request_path is already used by another
+  // entity.").  For an item that exists: gives the note, and whether the
+  // statement fails.
+  auto path_taken = [&](bool enabled, const std::string &item) {
+    if (!enabled || or_replace(st) || if_not_exists(st)) return false;
+    note(Note_kind::rest_path_in_use, false, what() + ": " + item + " exists (CREATE OR REPLACE replaces it)");
+    return true;
+  };
   auto object = [&](const char *kind, int path_sym) {
     const auto place = rest_place();
     if (!place) return false;
@@ -2134,23 +2160,23 @@ bool Catalog_fold::rest(uint32_t n) {
     if (it == nullptr) it = &svc.schemas.emplace_back(Rest_schema{place->second, "", {}, false, {stmt_, stmt_}, {}});
     const uint32_t p = find(st, path_sym);
     Rest_object o;
-    o.kind = kind;
     o.path = text(p);
-    rest_statement(rest_key_object(place->first.key, place->second, kind, o.path), "create", p);
+    rest_statement(rest_key_object(place->first.key, place->second, o.path), "create", p);
+    // The shell looks an object up by its path alone, of any kind: a CREATE
+    // replaces what is there, IF NOT EXISTS keeps it as it is.
+    Rest_object *ex = find_by_path(it->objects, o.path);
+    if (ex != nullptr && if_not_exists(st)) {
+      if (ex->kind == kind) return true;
+      other_kind(*ex, "does nothing, ");
+      return false;
+    }
+    if (ex != nullptr && path_taken(rest_enabled(svc.settings), "REST " + upper(ex->kind) + " " + o.path))
+      return false;
+    o.kind = kind;
     o.object = text(child(st, s_.mrs_qualified_identifier));
     o.origin = origin(p);
-    auto ex = std::find_if(it->objects.begin(), it->objects.end(), [&](const Rest_object &x) {
-      return iequals(x.path, o.path) && x.kind == o.kind;
-    });
-    // IF NOT EXISTS keeps an object the file created at the path, of any
-    // kind, as it is, as the shell does (it looks the path up alone).
-    if (if_not_exists(st) &&
-        std::any_of(it->objects.begin(), it->objects.end(),
-                    [&](const Rest_object &x) { return iequals(x.path, o.path); })) {
-      return true;
-    }
     rest_object_details(o, st);
-    if (ex != it->objects.end()) *ex = std::move(o); else it->objects.push_back(std::move(o));
+    if (ex != nullptr) *ex = std::move(o); else it->objects.push_back(std::move(o));
     return true;
   };
   auto name_at = [&](uint32_t p) { return unquote_any(text(p)); };
@@ -2182,11 +2208,15 @@ bool Catalog_fold::rest(uint32_t n) {
     const Rest_service *had = c_.find_service(service.key);
     const bool existed = had != nullptr;
     if (existed && had->declared && if_not_exists(st)) return true;
+    Rest_settings settings;
+    rest_settings(settings, child(st, s_.mrs_rest_service_options));
+    if (existed && had->declared &&
+        path_taken(rest_enabled(settings) && rest_enabled(had->settings), "REST service " + service.path))
+      return false;
     Rest_service &svc = c_.service(service);
     svc.declared = true;
     svc.origin = origin(find(st, s_.mrs_service_request_path));
-    svc.settings = {};
-    rest_settings(svc.settings, child(st, s_.mrs_rest_service_options));
+    svc.settings = std::move(settings);
     link_auth_apps(svc, existed);
     return true;
   }
@@ -2208,15 +2238,25 @@ bool Catalog_fold::rest(uint32_t n) {
                              const int is = t_.node(t_.children(level)[1]).symbol;
                              return is == s_.mrs_add_auth_app || is == s_.mrs_remove_auth_app;
                            });
+    // Only what the statement writes changes.
+    Rest_settings settings = svc->settings;
+    rest_settings(settings, child(st, s_.mrs_rest_service_options),
+                  svc->declared ? Options_write::merge : Options_write::compose_patch);
     if (renamed != npos) {
       const Rest_service_name to = rest_service_name(find(renamed, s_.mrs_service_request_path));
+      // The shell's metadata fails such a rename ("The request_path is
+      // already used by another entity."), and the statement with it; it
+      // checks an enabled service's path against enabled services only.
+      if (const Rest_service *other = c_.find_service(to.key);
+          other != nullptr && other != svc && rest_enabled(settings) && rest_enabled(other->settings)) {
+        note(Note_kind::rest_path_in_use, false, what() + ": REST service " + to.path + " exists");
+        return false;
+      }
       if (iequals(c_.m_current_service.key, svc->name.key)) c_.m_current_service = to;
       c_.rekey_rest_statements(rest_key_service(svc->name.key), rest_key_service(to.key));
       svc->name = to;
     }
-    // Only what the statement writes changes.
-    rest_settings(svc->settings, child(st, s_.mrs_rest_service_options),
-                  svc->declared ? Options_write::merge : Options_write::compose_patch);
+    svc->settings = std::move(settings);
     link_auth_apps(*svc);
     return true;
   }
@@ -2256,6 +2296,8 @@ bool Catalog_fold::rest(uint32_t n) {
     // IF NOT EXISTS keeps a schema the file created as it is, as the shell
     // does.
     if (it != nullptr && it->declared && if_not_exists(st)) return true;
+    if (it != nullptr && it->declared && path_taken(rest_enabled(svc.settings), "REST schema " + rs.path))
+      return false;
     rest_settings(rs.settings, child(st, s_.mrs_rest_schema_options));
     if (it != nullptr) {
       rs.objects = std::move(it->objects);
@@ -2281,10 +2323,18 @@ bool Catalog_fold::rest(uint32_t n) {
     rest_statement(rest_key_schema(svc->name.key, rs->path), "alter", schema_node);
     const uint32_t to = child(child(st, s_.mrs_opt_new_request_path), s_.mrs_request_path_identifier);
     if (to != npos) {
+      std::string to_path = text(to);
+      // As for a service: the shell fails the statement (the schemas of a
+      // service that is not enabled do not count).
+      if (const Rest_schema *other = find_rest_schema(*svc, to_path);
+          other != nullptr && other != rs && rest_enabled(svc->settings)) {
+        note(Note_kind::rest_path_in_use, false, what() + ": REST schema " + to_path + " exists");
+        return false;
+      }
       if (iequals(svc->name.key, c_.m_current_service.key) && iequals(rs->path, c_.m_current_rest_schema))
-        c_.m_current_rest_schema = text(to);
-      c_.rekey_rest_statements(rest_key_schema(svc->name.key, rs->path), rest_key_schema(svc->name.key, text(to)));
-      rs->path = text(to);
+        c_.m_current_rest_schema = to_path;
+      c_.rekey_rest_statements(rest_key_schema(svc->name.key, rs->path), rest_key_schema(svc->name.key, to_path));
+      rs->path = std::move(to_path);
     }
     if (const uint32_t db = child(child(st, s_.mrs_opt_from_schema_name), s_.mrs_identifier); db != npos)
       rs->schema = name_of(db);
@@ -2299,8 +2349,13 @@ bool Catalog_fold::rest(uint32_t n) {
     const auto svc_path = service_named();
     if (!svc_path) return false;
     const uint32_t p = find(st, s_.mrs_content_set_request_path);
-    rest_statement(rest_key_content_set(svc_path->key, name_at(p)), "create", p);
-    named(c_.service(*svc_path).content_sets, s_.mrs_content_set_request_path);
+    const std::string name = name_at(p);
+    rest_statement(rest_key_content_set(svc_path->key, name), "create", p);
+    Rest_service &svc = c_.service(*svc_path);
+    if (find_named(svc.content_sets, name) != svc.content_sets.end() &&
+        path_taken(rest_enabled(svc.settings), "REST content set " + name))
+      return false;
+    named(svc.content_sets, s_.mrs_content_set_request_path);
     return true;
   }
   if (sym == s_.mrs_create_rest_auth_app_statement) { named(c_.m_auth_apps, s_.mrs_auth_app_name); return true; }
@@ -2348,11 +2403,20 @@ bool Catalog_fold::rest(uint32_t n) {
     if (!place) return false;
     const uint32_t p = find(st, path_sym);
     const std::string path = text(p);
-    rest_statement(rest_key_object(place->first.key, place->second, kind, path), "drop", p);
+    rest_statement(rest_key_object(place->first.key, place->second, path), "drop", p);
     Rest_service *svc = c_.find_service(place->first.key);
     Rest_schema *sch = svc != nullptr ? find_rest_schema(*svc, place->second) : nullptr;
     if (sch == nullptr) return true;
-    std::erase_if(sch->objects, [&](const Rest_object &o) { return o.kind == kind && iequals(o.path, path); });
+    const Rest_object *ex = find_by_path(sch->objects, path);
+    if (ex == nullptr) return true;
+    // The shell drops an object of the kind the statement names only: it
+    // fails, or with IF EXISTS does nothing.
+    if (ex->kind != kind) {
+      const bool if_exists = find(child(st, s_.mrs_opt_if_exists), s_.IF_SYM) != npos;
+      other_kind(*ex, if_exists ? "does nothing, " : "");
+      return false;
+    }
+    erase_by_path(sch->objects, path);
     return true;
   };
   if (sym == s_.mrs_drop_rest_view_statement) return drop_object("view", s_.mrs_view_request_path);
