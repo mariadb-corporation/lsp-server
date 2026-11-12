@@ -2650,4 +2650,230 @@ TEST(Schema_edit, a_check_of_two_groups_is_parenthesized) {
   EXPECT_NE(std::string::npos, text(r, "").find("CHECK ((a > 0) OR (b = ')('))")) << text(r, "");
   EXPECT_NE(std::string::npos, text(r, "").find("CHECK (a < 10)")) << text(r, "");
 }
+// ---------------------------------------------------------------------------
+// Placement: an add op's `at` and `form`
+
+namespace {
+
+// edit() with the script named "main.sql", as the output names it.
+std::variant<Edit_result, Edit_error> edit_main(const std::string &script, const Files &files,
+                                                const std::string &request) {
+  auto parsed = parse_edit_request(request);
+  if (auto *e = std::get_if<Edit_error>(&parsed)) return *e;
+  Edit_options o;
+  o.source_dir = k_dir;
+  o.read = reader(files);
+  o.script_file = "main.sql";
+  return apply_schema_edits(script, std::get<Edit_request>(parsed), pool(), o);
+}
+
+// An `at` member: after (line, character), or at line `line` (character < 0).
+std::string at(const std::string &file, int line, int character = -1) {
+  const std::string f = "\"at\": {\"file\": \"" + file + "\", ";
+  if (character < 0) return f + "\"line\": " + std::to_string(line) + "}";
+  return f + "\"after\": {\"line\": " + std::to_string(line) + ", \"character\": " + std::to_string(character) + "}}";
+}
+
+std::string add_table_at(const std::string &name, const std::string &placement) {
+  return R"({"op": "add_table", "table": {"name": ")" + name + R"(", "columns": [{"name": "id", "type": "INT"}]}, )" +
+         placement + "}";
+}
+std::string add_view_at(const std::string &name, const std::string &placement) {
+  return R"({"op": "add_view", "view": {"name": ")" + name + R"(", "definition": "SELECT 1"}, )" + placement + "}";
+}
+std::string add_procedure_at(const std::string &name, const std::string &placement) {
+  return R"({"op": "add_routine", "routine": {"name": ")" + name +
+         R"(", "kind": "procedure", "body": "BEGIN SELECT 1; END"}, )" + placement + "}";
+}
+
+const std::string k_two_tables =
+    "CREATE TABLE a (id INT);\n"
+    "\n"
+    "CREATE TABLE b (id INT);\n"
+    "-- the end\n";
+
+}  // namespace
+
+TEST(Schema_edit, placement_request) {
+  auto kind = [](const std::string &edits) {
+    const auto r = parse_edit_request(request("", edits));
+    return std::holds_alternative<Edit_error>(r) ? std::get<Edit_error>(r).kind + ": " + std::get<Edit_error>(r).message
+                                                 : std::string("ok");
+  };
+  // Read on the six add ops.
+  const auto r = parse_edit_request(request("", add_view_at("v", at("x.sql", 3, 7) + R"(, "form": "OR_REPLACE")")));
+  ASSERT_TRUE(std::holds_alternative<Edit_request>(r));
+  const Schema_edit &e = std::get<Edit_request>(r).edits[0];
+  ASSERT_TRUE(e.at.has_value());
+  EXPECT_EQ("x.sql", e.at->file);
+  EXPECT_FALSE(e.at->before_line);
+  EXPECT_EQ(3u, e.at->line);
+  EXPECT_EQ(7u, e.at->character);
+  EXPECT_EQ("or_replace", e.form);
+  const auto l = parse_edit_request(request("", add_table_at("t", at("", 4) + R"(, "form": "create")")));
+  ASSERT_TRUE(std::holds_alternative<Edit_request>(l));
+  EXPECT_TRUE(std::get<Edit_request>(l).edits[0].at->before_line);
+  EXPECT_EQ(4u, std::get<Edit_request>(l).edits[0].at->line);
+  EXPECT_EQ("ok", kind(R"({"op": "add_sequence", "sequence": {"name": "q"}, "form": "create", )" + at("", 0) + "}"));
+  EXPECT_EQ("ok", kind(R"({"op": "add_event", "event": {"name": "e", "schedule": "EVERY 1 DAY", "body": "DO 1"}, "form": "drop_first"})"));
+  EXPECT_EQ("ok", kind(R"({"op": "add_trigger", "trigger": {"name": "g", "table": "t", "timing": "BEFORE", "events": "INSERT", "body": "SET @x = 1"}, "form": "or_replace"})"));
+  // Tables and sequences are only created.
+  EXPECT_EQ("bad-request", kind(add_table_at("t", R"("form": "or_replace")")).substr(0, 11));
+  EXPECT_EQ("bad-request", kind(R"({"op": "add_sequence", "sequence": {"name": "q"}, "form": "drop_first"})").substr(0, 11));
+  EXPECT_EQ("bad-request", kind(add_view_at("v", R"("form": "replace")")).substr(0, 11));
+  // One of after and line; a file; numbers from 0.
+  EXPECT_EQ("bad-request: \"at\" of the add_view edit needs either \"after\" or \"line\"",
+            kind(add_view_at("v", R"("at": {"file": "", "line": 1, "after": {"line": 0, "character": 0}})")));
+  EXPECT_EQ("bad-request", kind(add_view_at("v", R"("at": {"line": 1})")).substr(0, 11));
+  EXPECT_EQ("bad-request", kind(add_view_at("v", R"("at": {"file": "", "line": -1})")).substr(0, 11));
+  EXPECT_EQ("bad-request", kind(add_view_at("v", R"("at": {"file": "", "after": {"line": 1}})")).substr(0, 11));
+  EXPECT_EQ("bad-request", kind(add_view_at("v", R"("at": {"file": "", "line": 1, "column": 2})")).substr(0, 11));
+  // Not on the other ops.
+  EXPECT_EQ("bad-request: the replace_view edit has an unknown member \"at\"",
+            kind(R"({"op": "replace_view", "view": {"name": "v", "definition": "SELECT 1"}, )" + at("", 0) + "}"));
+  EXPECT_EQ("bad-request", kind(R"({"op": "add_column", "table": "t", "column": {"name": "c", "type": "INT"}, "form": "create"})").substr(0, 11));
+  // Advertised.
+  rapidjson::Document d;
+  d.Parse(edit_ops_json().c_str());
+  ASSERT_TRUE(d.HasMember("placement"));
+  EXPECT_TRUE(d["placement"].GetBool());
+}
+
+TEST(Schema_edit, placement_after_a_statement) {
+  // After a: the end of its outline range, before the delimiter.
+  const auto r = ok(edit_main(k_two_tables, {}, request("", add_table_at("c", at("", 0, 23)))));
+  EXPECT_EQ("CREATE TABLE a (id INT);\n"
+            "CREATE TABLE c (\n  id INT\n);\n"
+            "\n"
+            "CREATE TABLE b (id INT);\n"
+            "-- the end\n",
+            text(r, ""));
+  EXPECT_EQ((Tags{"create table c"}), tags(r));
+  // The script by its output name; after b, with its blank line.
+  const auto b = ok(edit_main(k_two_tables, {}, request("", add_table_at("c", at("main.sql", 2, 23)))));
+  EXPECT_EQ("CREATE TABLE a (id INT);\n"
+            "\n"
+            "CREATE TABLE b (id INT);\n"
+            "\n"
+            "CREATE TABLE c (\n  id INT\n);\n"
+            "-- the end\n",
+            text(b, ""));
+  // Anything else is refused.
+  auto refused = [&](const std::string &placement) {
+    return failed(edit_main(k_two_tables, {}, request("", add_table_at("c", placement)))).message;
+  };
+  EXPECT_EQ("(0, 22) of the script is not the end of a statement's range", refused(at("", 0, 22)));
+  EXPECT_EQ("(0, 24) of the script is not the end of a statement's range", refused(at("", 0, 24)));
+  EXPECT_EQ("(0, 40) of the script is not a position in that line", refused(at("", 0, 40)));
+  EXPECT_EQ("(9, 0) of the script is past its end: its last line is 4", refused(at("", 9, 0)));
+  EXPECT_EQ("\"at\" names the file \"other.sql\", which is neither the script nor a file it includes",
+            refused(at("other.sql", 0, 23)));
+}
+
+TEST(Schema_edit, placement_at_a_line) {
+  auto placed = [&](int line) { return text(ok(edit_main(k_two_tables, {}, request("", add_view_at("v", at("", line))))), ""); };
+  // Before a: a blank line below.
+  EXPECT_EQ("CREATE VIEW `v` AS SELECT 1;\n\nCREATE TABLE a (id INT);\n\nCREATE TABLE b (id INT);\n-- the end\n", placed(0));
+  // On the blank line: none needed below, one above.
+  EXPECT_EQ("CREATE TABLE a (id INT);\n\nCREATE VIEW `v` AS SELECT 1;\n\nCREATE TABLE b (id INT);\n-- the end\n", placed(1));
+  // Before the comment, and at the end (the last line, empty).
+  EXPECT_EQ("CREATE TABLE a (id INT);\n\nCREATE TABLE b (id INT);\n\nCREATE VIEW `v` AS SELECT 1;\n\n-- the end\n", placed(3));
+  EXPECT_EQ("CREATE TABLE a (id INT);\n\nCREATE TABLE b (id INT);\n-- the end\n\nCREATE VIEW `v` AS SELECT 1;\n", placed(4));
+  // Before b: above the blank line, which stays between v and b.
+  EXPECT_EQ("CREATE TABLE a (id INT);\n\nCREATE VIEW `v` AS SELECT 1;\n\nCREATE TABLE b (id INT);\n-- the end\n", placed(2));
+  // So a drop gives back the text, however many blank lines there were.
+  const std::string spaced = "CREATE TABLE a (id INT);\n\n\n\nCREATE TABLE b (id INT);\n";
+  const auto added = ok(edit_main(spaced, {}, request("", add_view_at("v", at("", 4)))));
+  EXPECT_EQ("CREATE TABLE a (id INT);\n\nCREATE VIEW `v` AS SELECT 1;\n\n\n\nCREATE TABLE b (id INT);\n", text(added, ""));
+  EXPECT_EQ(spaced, text(ok(edit_main(text(added, ""), {}, request("", R"({"op": "drop_view", "view": "v"})"))), ""));
+  auto refused = [&](const std::string &script, int line) {
+    return failed(edit_main(script, {}, request("", add_view_at("v", at("", line))))).message;
+  };
+  EXPECT_EQ("line 5 of the script is past its end: its last line is 4", refused(k_two_tables, 5));
+  EXPECT_EQ("line 1 of the script starts inside a statement", refused("CREATE TABLE a (\n  id INT\n);\n", 1));
+}
+
+TEST(Schema_edit, placement_forms) {
+  // Without `form`: as the anchor of its own kind, else a plain CREATE.
+  const std::string script = "CREATE OR REPLACE VIEW w AS SELECT 2;\n";
+  EXPECT_EQ("CREATE OR REPLACE VIEW w AS SELECT 2;\nCREATE OR REPLACE VIEW v AS SELECT 1;\n",
+            text(ok(edit_main(script, {}, request("", add_view_at("v", at("", 0, 36))))), ""));
+  EXPECT_EQ("CREATE VIEW `v` AS SELECT 1;\n\nCREATE OR REPLACE VIEW w AS SELECT 2;\n",
+            text(ok(edit_main(script, {}, request("", add_view_at("v", at("", 0))))), ""));
+  // A form given wins over the anchor's.
+  EXPECT_EQ("CREATE OR REPLACE VIEW w AS SELECT 2;\nCREATE VIEW v AS SELECT 1;\n",
+            text(ok(edit_main(script, {}, request("", add_view_at("v", at("", 0, 36) + R"(, "form": "create")")))), ""));
+  EXPECT_EQ("CREATE OR REPLACE VIEW w AS SELECT 2;\nDROP VIEW IF EXISTS v;\nCREATE VIEW v AS SELECT 1;\n",
+            text(ok(edit_main(script, {}, request("", add_view_at("v", at("", 0, 36) + R"(, "form": "drop_first")")))), ""));
+  // A routine dropped first, in a block of its own where ";" is the
+  // delimiter; the migration is its CREATE.
+  const auto p = ok(edit_main(script, {}, request("", add_procedure_at("p", at("", 1) + R"(, "form": "drop_first")"))));
+  EXPECT_EQ("CREATE OR REPLACE VIEW w AS SELECT 2;\n"
+            "\n"
+            "DELIMITER $$\n"
+            "DROP PROCEDURE IF EXISTS `p`$$\n"
+            "CREATE PROCEDURE `p`()\nBEGIN\n  SELECT 1;\nEND$$\n"
+            "DELIMITER ;\n",
+            text(p, ""));
+  EXPECT_EQ((Tags{"create procedure p"}), tags(p));
+  EXPECT_EQ(std::vector<std::string>{"routine-created"}, note_kinds(p));
+  const auto q = ok(edit_main(script, {}, request("", add_procedure_at("p", at("", 1) + R"(, "form": "or_replace")"))));
+  EXPECT_NE(std::string::npos, text(q, "").find("CREATE OR REPLACE PROCEDURE `p`()")) << text(q, "");
+}
+
+TEST(Schema_edit, placement_in_an_msm_script) {
+  const std::string script = msm_script(k_section_150);
+  // Without `at`, Section 150's rules: after the view, CREATE OR REPLACE.
+  const auto d = ok(edit_main(script, {}, request("shop", add_view_at("v", R"("form": "create")"))));
+  EXPECT_NE(std::string::npos, text(d, "").find("`customer`%%\n\nCREATE VIEW `v` AS SELECT 1%%\n")) << text(d, "");
+  const auto f = ok(edit(script, {}, request("shop", R"({"op": "add_view", "view": {"name": "v", "definition": "SELECT 1"}})")));
+  EXPECT_NE(std::string::npos, text(f, "").find("CREATE OR REPLACE VIEW `v` AS SELECT 1%%")) << text(f, "");
+  // With `at` and no form: no section rule, a plain CREATE; at the start of
+  // Section 170, in no DELIMITER block.
+  const size_t line_170 = static_cast<size_t>(std::count(script.begin(), script.begin() + static_cast<std::ptrdiff_t>(script.find("-- MSM Section 170")), '\n')) - 1;
+  const auto a = ok(edit_main(script, {}, request("shop", add_view_at("v", at("", static_cast<int>(line_170))))));
+  EXPECT_NE(std::string::npos, text(a, "").find("DELIMITER ;\n\nCREATE VIEW `v` AS SELECT 1;\n\n-- ####")) << text(a, "");
+  // In the DELIMITER block, after the procedure: its form, its delimiter.
+  const size_t end_line = static_cast<size_t>(std::count(script.begin(), script.begin() + static_cast<std::ptrdiff_t>(script.find("END%%")), '\n'));
+  const auto b = ok(edit_main(script, {}, request("shop", add_procedure_at("p", at("", static_cast<int>(end_line), 3)))));
+  EXPECT_NE(std::string::npos,
+            text(b, "").find("END%%\n\nDROP PROCEDURE IF EXISTS `p`%%\nCREATE PROCEDURE `p`()\nBEGIN\n  SELECT 1;\nEND%%\n\nCREATE OR REPLACE VIEW"))
+      << text(b, "");
+}
+
+TEST(Schema_edit, placement_in_includes) {
+  const std::string script = "CREATE TABLE a (id INT);\nSOURCE 'r.sql';\nSOURCE 'part.sql'[ln2:ln2];\n";
+  const std::string r_sql = "CREATE VIEW v1 AS SELECT 1;\n";
+  const std::string part = "CREATE VIEW p1 AS SELECT 1;\nCREATE VIEW p2 AS SELECT 2;\nCREATE VIEW p3 AS SELECT 3;\n";
+  const Files files{{"r.sql", r_sql}, {"part.sql", part}};
+  // By the path relative to the source dir, or as resolved; two adds after
+  // one statement keep their order.
+  const auto r = ok(edit_main(script, files,
+                              request("", add_view_at("v2", at("r.sql", 0, 26)) + ", " +
+                                              add_view_at("v3", at(k_dir + "/r.sql", 0, 26)))));
+  EXPECT_EQ("CREATE VIEW v1 AS SELECT 1;\nCREATE VIEW v2 AS SELECT 1;\nCREATE VIEW v3 AS SELECT 1;\n", text(r, "r.sql"));
+  EXPECT_EQ(script, text(r, ""));
+  // At an include's end, and before a SOURCE line of the script; twice at
+  // one line, in order.
+  const auto e = ok(edit_main(script, files, request("", add_view_at("v2", at("r.sql", 1)) + ", " + add_view_at("v3", at("r.sql", 1)))));
+  EXPECT_EQ("CREATE VIEW v1 AS SELECT 1;\n\nCREATE VIEW `v2` AS SELECT 1;\n\nCREATE VIEW `v3` AS SELECT 1;\n", text(e, "r.sql"));
+  const auto s = ok(edit_main(script, files, request("", add_table_at("t", at("", 1)))));
+  EXPECT_EQ("CREATE TABLE a (id INT);\n\nCREATE TABLE `t` (\n  `id` INT\n);\n\nSOURCE 'r.sql';\nSOURCE 'part.sql'[ln2:ln2];\n",
+            text(s, ""));
+  // Inside the slice only.
+  EXPECT_NE(nullptr, file(ok(edit_main(script, files, request("", add_view_at("v", at("part.sql", 1, 26))))), "part.sql"));
+  EXPECT_EQ("(0, 26) of \"part.sql\" is not in the part of the file the script includes",
+            failed(edit_main(script, files, request("", add_view_at("v", at("part.sql", 0, 26))))).message);
+  EXPECT_EQ("line 3 of \"part.sql\" is not in the part of the file the script includes",
+            failed(edit_main(script, files, request("", add_view_at("v", at("part.sql", 3))))).message);
+}
+
+TEST(Schema_edit, placement_of_a_trigger_after_its_table) {
+  const std::string trigger =
+      R"({"op": "add_trigger", "trigger": {"name": "g", "table": "b", "timing": "BEFORE", "events": "INSERT", "body": "SET NEW.id = 1"}, )";
+  EXPECT_EQ("\"at\" puts trigger `g` above the CREATE TABLE of `b`, which it needs",
+            failed(edit_main(k_two_tables, {}, request("", trigger + at("", 1) + "}"))).message);
+  const auto r = ok(edit_main(k_two_tables, {}, request("", trigger + at("", 2, 23) + "}")));
+  EXPECT_NE(std::string::npos, text(r, "").find("CREATE TABLE b (id INT);\n\nCREATE TRIGGER g BEFORE INSERT ON b")) << text(r, "");
+}
 }  // namespace mdbls

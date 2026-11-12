@@ -1043,6 +1043,7 @@ int run_edit(const Options &o, const std::string &file, const std::string &text,
   eo.format.version_id = o.index.version_id;
   if (!o.indent.empty()) eo.format.indent = o.indent;
   eo.source_dir = source_dir(o, file);
+  eo.script_file = file;
   auto result = mdbls::apply_schema_edits(text, std::get<mdbls::Edit_request>(parsed), pool, eo);
   if (auto *err = std::get_if<mdbls::Edit_error>(&result)) {
     std::cout << mdbls::edit_error_json(*err) << '\n';

@@ -30,13 +30,16 @@ error or an unreadable script or request.
 `edit ops:` line of `--help` lists the same, for people):
 
 ```json
-{"format": 1, "ops": ["rename_table", "rename_column", ...], "merge_alters": true}
+{"format": 1, "ops": ["rename_table", "rename_column", ...], "merge_alters": true, "placement": true}
 ```
 
 A binary that answers `--ops` also tags each migration statement (`action`, `object`, ...)
 and answers `unsupported` for an op it does not know; older ones (#25 to #28) exit 2 there.
 `merge_alters` is there when the binary understands the request member of that name (an
 older one ignores it, as it ignores any member it does not know at the top level).
+`placement` is there when the add ops take `at` and `form` ([Placement](#placement)); an
+older binary refuses them as unknown members (`bad-request`), so send them only when it is
+listed.
 
 ## Request
 
@@ -65,7 +68,9 @@ and `type` drops the column's comment. An unknown member is `bad-request`, namin
 positions an outline object carries (`range`, `selection_range`, `source`) and a view's
 `reads` (derived from its `definition`) are ignored, so an object read from an outline can be
 sent back. The ops of the renames do not check for
-unknown members.
+unknown members. The add ops of objects (`add_table`, `add_sequence`, `add_view`,
+`add_routine`, `add_trigger`, `add_event`) also take `at` and `form`, where the statement goes
+and how it is written ([Placement](#placement)).
 
 ### Ops
 
@@ -75,28 +80,28 @@ unknown members.
 | `rename_column` | `table`, `column`, `new_name` | done | the definition, also when an `ALTER TABLE` adds the column, and every reference |
 | `rename_view` | `view`, `new_name` | done | the definition and every reference, a `DROP VIEW [IF EXISTS]` of it included |
 | `rename_routine` | `routine`, `new_name`, `kind` (`procedure` or `function`; needed when both kinds have the name) | done | the definition and every reference, a `DROP PROCEDURE [IF EXISTS]` (or `FUNCTION`, by its kind) of it included |
-| `add_table` | `table` (Table) | done | a `CREATE TABLE` after the schema's last one |
+| `add_table` | `table` (Table); `at`, `form` optional | done | a `CREATE TABLE` after the schema's last one |
 | `drop_table` | `table` | done | its `CREATE TABLE`, every `ALTER TABLE`, `CREATE INDEX` and `DROP INDEX` on it, its triggers, and `DROP TABLE` statements of it alone |
 | `add_column` | `table`, `column` (Column), `after` or `first` | done | an element of the `CREATE TABLE`, or an `ALTER TABLE ... ADD COLUMN ... AFTER` (below) |
 | `modify_column` | `table`, `column` (its name now), `new_column` (Column) | done | the column's definition; a different `new_column.name` is also a rename, references included |
 | `drop_column` | `table`, `column` | done | its definition, its key parts in every index (an index left with none goes) and the `ALTER TABLE` changes of it |
 | `set_table_options` | `table`, `options` (`{name: value or null}`) | done | the `CREATE TABLE`'s options: a value replaces or adds one, null removes it |
-| `add_view` | `view` (View) | done | a `CREATE VIEW` after the schema's last view, else its last table |
+| `add_view` | `view` (View); `at`, `form` optional | done | a `CREATE VIEW` after the schema's last view, else its last table |
 | `drop_view` | `view` | done | its `CREATE VIEW`, `ALTER VIEW` and `DROP VIEW` statements of it alone |
-| `add_routine` | `routine` (Routine) | done | a `CREATE PROCEDURE` or `FUNCTION` after the schema's last routine (below) |
+| `add_routine` | `routine` (Routine); `at`, `form` optional | done | a `CREATE PROCEDURE` or `FUNCTION` after the schema's last routine (below) |
 | `drop_routine` | `routine`, `kind` (as for `rename_routine`) | done | its `CREATE`, `ALTER` and `DROP` statements of it alone |
 | `add_index` | `table`, `index` (Index: `columns`, or `key_parts` for lengths and order; both, as the outline gives them, when they name the same columns) | done | an element of the `CREATE TABLE` (below) |
 | `drop_index` | `table`, and `name`, `kind: "primary"`, or `columns` (an unnamed index) | done | its element, `ALTER TABLE` change or `CREATE INDEX`, or a column's `PRIMARY KEY` / `UNIQUE` |
 | `set_primary_key` | `table`, `columns` | done | the primary key's columns where it is written; a column's `PRIMARY KEY` becomes an element; added when there is none |
 | `add_foreign_key` | `table`, `foreign_key` (Foreign key) | done | an element of the `CREATE TABLE`, or an `ALTER TABLE ... ADD` (below) |
 | `drop_foreign_key` | `table`, and `name` or `columns` (an unnamed key) | done | its element, `ALTER TABLE` change, or a column's `REFERENCES` |
-| `add_trigger` | `trigger` (Trigger: `name`, `timing`, `events`, `table`, `body`; `update_columns`, `order`, `definer` optional) | done | a `CREATE TRIGGER` after the schema's last trigger (below) |
+| `add_trigger` | `trigger` (Trigger: `name`, `timing`, `events`, `table`, `body`; `update_columns`, `order`, `definer` optional); `at`, `form` optional | done | a `CREATE TRIGGER` after the schema's last trigger (below) |
 | `drop_trigger` | `trigger`, `table` (optional: refused when the trigger is on another table) | done | its `CREATE` and `DROP` statements |
 | `rename_trigger` | `trigger`, `new_name` | done | its `CREATE`, its `DROP TRIGGER [IF EXISTS]`, and the `FOLLOWS` / `PRECEDES` of other triggers |
-| `add_event` | `event` (Event: `name`, `schedule`, `body`; `on_completion_preserve`, `status`, `comment`, `definer` optional) | done | a `CREATE EVENT` after the schema's last event (below) |
+| `add_event` | `event` (Event: `name`, `schedule`, `body`; `on_completion_preserve`, `status`, `comment`, `definer` optional); `at`, `form` optional | done | a `CREATE EVENT` after the schema's last event (below) |
 | `drop_event` | `event` | done | its `CREATE`, `ALTER` and `DROP` statements |
 | `rename_event` | `event`, `new_name` | done | its `CREATE`, `ALTER EVENT` and `DROP EVENT [IF EXISTS]` statements |
-| `add_sequence` | `sequence` (Sequence: `name`; `type`, `start`, `increment`, `minvalue`, `maxvalue`, `cache`, `cycle`, `options` optional) | done | a `CREATE SEQUENCE` after the schema's last sequence, else before its first table (below) |
+| `add_sequence` | `sequence` (Sequence: `name`; `type`, `start`, `increment`, `minvalue`, `maxvalue`, `cache`, `cycle`, `options` optional); `at`, `form` optional | done | a `CREATE SEQUENCE` after the schema's last sequence, else before its first table (below) |
 | `drop_sequence` | `sequence` | done | its `CREATE`, `ALTER` and `DROP SEQUENCE` statements |
 | `rename_sequence` | `sequence`, `new_name` | done | the definition and every reference (`NEXT VALUE FOR`, `NEXTVAL()`, `LASTVAL()`, `SETVAL()`, `PREVIOUS VALUE FOR`, `FROM s`, `RENAME TABLE`), as `rename_table` finds them |
 | `rename_schema` | `schema`, `new_name` (both may hold MSM placeholders), `comments` (optional boolean) | done | every name that resolves to the schema (below); no migration |
@@ -170,7 +175,9 @@ has above it (a banner's comment lines not counted); no banner is written.
 - **An MSM script** (one with `-- MSM Section NNN: ...` marker lines) keeps its sections: a
   table goes into Section 140 (after its last table there, else at the end of the section),
   a view or routine into Section 150, which every deployment runs again (below). Other
-  scripts follow the rules below without sections.
+  scripts follow the rules below without sections. These rules apply to an add op without
+  `at`; msm, which owns an MSM project's layout, passes `at` and `form` where the binary lists
+  `placement` ([Placement](#placement)), and the section rules go once msm requires it.
 - **A table** goes after the `CREATE TABLE` of the schema's last table (in the order of the
   expanded script), in that statement's file; to the end of the script when the schema has
   none. Its keys and foreign keys go into it; a foreign key's table must exist (or be the
@@ -297,6 +304,47 @@ has above it (a banner's comment lines not counted); no banner is written.
   key uses (of its table or of another), is `referenced`, unless an earlier edit of the
   request removed that key or table: undo sends the inverse ops in reverse order. The last
   column of a table cannot be dropped (`bad-request`).
+
+### Placement
+
+msm decides where a new object's statement goes in an MSM project and in what form; the
+binary writes the statement's text there. The add ops of objects take two optional members:
+
+```json
+{"op": "add_view", "view": {"name": "v", "definition": "SELECT 1"}, "form": "or_replace",
+ "at": {"file": "sections/150-10_views.sql", "after": {"line": 41, "character": 30}}}
+```
+
+| Member | Type | Meaning |
+| --- | --- | --- |
+| `at` | object, optional | where the statement goes: `{"file": F, "after": {line, character}}`, after the statement whose outline `range` ends at that position in F, or `{"file": F, "line": L}`, at the start of line L of F; left out: the rules of [Adding and removing](#adding-and-removing) |
+| `at.file` | string | the script: `""` or its `files[].file` name in the output (`-` for stdin); an included file: its `files[].file` name (its path relative to `--source-dir`) or the outline's `includes[].file` (as resolved) |
+| `at.after` | position | the `end` of a statement's outline `range` in F (before its delimiter; 0-based line, UTF-16 character), in the file as it is on disk |
+| `at.line` | number | a 0-based line of F as it is on disk; F's last line (the empty one after a final line break) is its end |
+| `form` | string, optional | `"create"`: a plain `CREATE`; `"or_replace"`: `CREATE OR REPLACE`; `"drop_first"`: a `DROP VIEW` / `PROCEDURE` / `FUNCTION` / `TRIGGER` / `EVENT IF EXISTS` of the name, then a plain `CREATE`. `add_table` and `add_sequence` take only `"create"`. Left out: as the statement `at.after` names when that is an object of the same kind, else a plain `CREATE`; without `at`, the rules of [Adding and removing](#adding-and-removing) |
+
+The rest is as for any add: style, layout, the migration (the `CREATE` alone, also for
+`drop_first`), the `*-created` notes, the self-check and the outline.
+
+- **After a statement** the new one goes as after a neighbour: at the end of the line its
+  delimiter ends, with as many blank lines before it as that statement has above it, with the
+  delimiter in force there (inside its `DELIMITER` block).
+- **At a line** it goes as whole lines starting there: one blank line between it and text
+  above it or below it. Blank lines right above line L stay below the new lines, so they go
+  after the last line with text above (within the part of F the script includes): a drop,
+  which takes a statement's blank lines above it, then gives the text back. The delimiter is
+  the one in force at that line.
+- A routine, trigger or event whose body holds `;` gets a `DELIMITER` block of its own where
+  `;` is the delimiter (its `DROP ... IF EXISTS` inside it), as without `at`.
+- Two adds at one `at` keep the request's order. Positions are in the files as they are on
+  disk, so each `at` may come from the outline msm read before the request.
+
+`bad-request` when `at` names a file that is neither the script nor one it includes, an
+`after` that is not the end of a statement's range in F, a line past F's last line or one
+that starts inside a statement, a place outside the part of F the script includes or in text
+an earlier edit of the request changed, or a trigger above its table's `CREATE TABLE`; and
+for a `form` the op does not take. `replace_*` (which rewrite a statement where it stands),
+`add_column`, `add_index` and `add_foreign_key` take neither member.
 
 ## Output
 
@@ -475,7 +523,7 @@ A refused request writes no edits, whatever edits before the failing one did:
 
 | Kind | When |
 | --- | --- |
-| `bad-request` | the request is not JSON of format 1, a member is missing, empty, unknown or of the wrong type, a new name is too long, a routine name is ambiguous without `kind`, a column's type is not a MariaDB data type, or a definition does not parse |
+| `bad-request` | the request is not JSON of format 1, a member is missing, empty, unknown or of the wrong type, a new name is too long, a routine name is ambiguous without `kind`, a column's type is not a MariaDB data type, or a definition does not parse; an add op's `at` or `form` that cannot be followed ([Placement](#placement)) |
 | `unsupported` | an op this binary does not do or does not know (a newer binary may), or a column added to a table whose columns the script does not list (`CREATE TABLE ... AS SELECT`, `LIKE`) |
 | `unknown-object` | the table, column, view, routine, trigger, event or sequence is not in the outline, nor the table or column a foreign key references, nor the column `after` names, nor a trigger's table (a view is not one) or the trigger its `order` names; `drop_trigger`'s `table` is not the trigger's |
 | `name-taken` | the new name is taken: by a table, view or sequence for a table, view or sequence (they share a namespace), by a column of the table, by a routine of the same kind, by an index of the table, by a foreign key of the schema, by a trigger or an event of the schema for a trigger or event; a second primary key (use `set_primary_key`); a change of case only is a rename |
