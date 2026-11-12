@@ -317,7 +317,9 @@ service's schemas, content sets and the objects of its schemas list theirs. The 
 item across a `DROP` and a new `CREATE` and across a rename (`NEW REQUEST PATH`): it holds the
 statements written under the earlier path too. A rename onto the path of an item dropped
 earlier does not take that item's statements (nor those of the items that were under it):
-they are no item's then. An object's statements are those at its path,
+they are no item's then. Where an item is at the new path (a rename MariaDB Shell allows in a
+disabled service), the two items' lists merge, each item under it with the renamed item's of
+the same path; the statements of items under it that were dropped earlier are still no item's. An object's statements are those at its path,
 of any kind: a `CREATE REST VIEW IF NOT EXISTS /v` that found a procedure `/v` is the
 procedure's. A statement not applied because it names no service or schema, or one the file
 does not have (`rest-none-in-use`, `unknown-rest-service`, `unknown-rest-schema`), is no item's;
