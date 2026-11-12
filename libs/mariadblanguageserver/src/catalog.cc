@@ -270,6 +270,12 @@ void Catalog::for_each_origin(const std::function<void(Origin &)> &f) {
   }
   for (auto *list : {&m_auth_apps, &m_roles, &m_users})
     for (auto &o : *list) f(o.origin);
+  for (auto &[key, statements] : m_rest_statements) {
+    for (auto &s : statements) {
+      f(s.origin);
+      if (s.leading_comments) f(*s.leading_comments);
+    }
+  }
 }
 
 Catalog Catalog::from_schemas(std::vector<Schema> schemas) {
@@ -293,6 +299,70 @@ Schema &Catalog::schema(const std::string &n) {
   m_schemas.push_back(Schema{});
   m_schemas.back().name = n;
   return m_schemas.back();
+}
+
+// --- REST statements --------------------------------------------------------
+
+namespace {
+
+// The keys of Catalog::m_rest_statements: lower case, as names compare.
+constexpr char k_key_sep = '\x1f';
+std::string rest_key_service(std::string_view service_key) { return lower(service_key); }
+std::string rest_key_schema(std::string_view service_key, std::string_view path) {
+  return rest_key_service(service_key) + k_key_sep + "s" + lower(path);
+}
+std::string rest_key_object(std::string_view service_key, std::string_view schema_path,
+                            std::string_view kind, std::string_view path) {
+  return rest_key_schema(service_key, schema_path) + k_key_sep + "o" + std::string(kind) + k_key_sep +
+         lower(path);
+}
+std::string rest_key_content_set(std::string_view service_key, std::string_view name) {
+  return rest_key_service(service_key) + k_key_sep + "c" + lower(name);
+}
+
+}  // namespace
+
+const std::vector<Rest_statement> &Catalog::rest_statements_of(const std::string &key) const {
+  static const std::vector<Rest_statement> none;
+  const auto it = m_rest_statements.find(key);
+  return it == m_rest_statements.end() ? none : it->second;
+}
+
+const std::vector<Rest_statement> &Catalog::rest_statements(const Rest_service &svc) const {
+  return rest_statements_of(rest_key_service(svc.name.key));
+}
+
+const std::vector<Rest_statement> &Catalog::rest_statements(const Rest_service &svc, const Rest_schema &rs) const {
+  return rest_statements_of(rest_key_schema(svc.name.key, rs.path));
+}
+
+const std::vector<Rest_statement> &Catalog::rest_statements(const Rest_service &svc, const Rest_schema &rs,
+                                                            const Rest_object &o) const {
+  return rest_statements_of(rest_key_object(svc.name.key, rs.path, o.kind, o.path));
+}
+
+const std::vector<Rest_statement> &Catalog::rest_content_set_statements(const Rest_service &svc,
+                                                                        const Named_object &cs) const {
+  return rest_statements_of(rest_key_content_set(svc.name.key, cs.name));
+}
+
+void Catalog::rekey_rest_statements(const std::string &from, const std::string &to) {
+  if (from == to) return;
+  std::vector<std::pair<std::string, std::vector<Rest_statement>>> moved;
+  for (auto it = m_rest_statements.lower_bound(from); it != m_rest_statements.end();) {
+    const std::string &k = it->first;
+    if (k.compare(0, from.size(), from) != 0) break;
+    if (k.size() > from.size() && k[from.size()] != k_key_sep) { ++it; continue; }
+    moved.emplace_back(to + k.substr(from.size()), std::move(it->second));
+    it = m_rest_statements.erase(it);
+  }
+  for (auto &[k, v] : moved) {
+    auto &dest = m_rest_statements[k];
+    dest.insert(dest.end(), std::make_move_iterator(v.begin()), std::make_move_iterator(v.end()));
+    std::stable_sort(dest.begin(), dest.end(), [](const Rest_statement &a, const Rest_statement &b) {
+      return a.origin.statement.begin < b.origin.statement.begin;
+    });
+  }
 }
 
 Rest_service *Catalog::find_service(std::string_view key) {
@@ -444,6 +514,10 @@ class Catalog_fold {
   // written order; each level's children after the first are one item.
   std::vector<uint32_t> list_levels(uint32_t list) const;
   Rest_service_name rest_service_name(uint32_t service_request_path) const;
+  // Lists the statement being folded under REST item `key` (rest_statements).
+  void rest_statement(const std::string &key, const char *kind, uint32_t name_node, bool shared = false);
+  // The comment lines right above the statement being folded.
+  std::optional<Origin> leading_comments() const;
   // [schema, name] of an mrs_qualified_identifier, unquoted; schema "" when
   // unqualified.
   std::pair<std::string, std::string> rest_qualified(uint32_t n) const;
@@ -1934,6 +2008,34 @@ void Catalog_fold::rest_settings(Rest_settings &s, uint32_t list, Options_write 
 
 // [developer, ...@]/path: developers unquoted and sorted as MariaDB Shell's
 // format_developers does (without regard to case, then by bytes).
+void Catalog_fold::rest_statement(const std::string &key, const char *kind, uint32_t name_node, bool shared) {
+  Rest_statement s;
+  s.kind = kind;
+  s.origin = origin(name_node);
+  s.leading_comments = leading_comments();
+  s.shared = shared;
+  c_.m_rest_statements[key].push_back(std::move(s));
+}
+
+std::optional<Origin> Catalog_fold::leading_comments() const {
+  constexpr std::string_view k_msm_marker = "-- MSM Section ";
+  const uint32_t first = line_begin(text_, stmt_.begin);
+  if (!trim(text_.substr(first, stmt_.begin - first)).empty()) return std::nullopt;  // not first on its line
+  uint32_t top = first;
+  while (top > 0) {
+    const uint32_t above = line_begin(text_, top - 1);
+    const std::string_view line = trim(text_.substr(above, top - 1 - above));
+    if (!is_comment_line(line)) break;
+    // A run that reaches a section marker is the section's banner.
+    if (line.substr(0, k_msm_marker.size()) == k_msm_marker) return std::nullopt;
+    top = above;
+  }
+  if (top == first) return std::nullopt;
+  uint32_t end = first - 1;  // the last comment line's break
+  if (end > top && text_[end - 1] == '\r') --end;
+  return Origin{{top, end}, {top, end}, c_.m_source};
+}
+
 Rest_service_name Catalog_fold::rest_service_name(uint32_t n) const {
   Rest_service_name name;
   if (n == npos) return name;
@@ -2026,6 +2128,7 @@ bool Catalog_fold::rest(uint32_t n) {
     Rest_schema *it = find_rest_schema(svc, place->second);
     if (it == nullptr) it = &svc.schemas.emplace_back(Rest_schema{place->second, "", {}, false, {stmt_, stmt_}, {}});
     const uint32_t p = find(st, path_sym);
+    rest_statement(rest_key_object(place->first.key, place->second, kind, text(p)), "create", p);
     Rest_object o;
     o.kind = kind;
     o.path = text(p);
@@ -2070,6 +2173,7 @@ bool Catalog_fold::rest(uint32_t n) {
     // statement does not name stay.  IF NOT EXISTS keeps it as it is, when
     // the file created it (not when a statement only named it).
     // Its settings are the statement's, as the shell writes them anew.
+    rest_statement(rest_key_service(service.key), "create", find(st, s_.mrs_service_request_path));
     const Rest_service *had = c_.find_service(service.key);
     const bool existed = had != nullptr;
     if (existed && had->declared && if_not_exists(st)) return true;
@@ -2088,10 +2192,23 @@ bool Catalog_fold::rest(uint32_t n) {
            what() + ": the file does not create this REST service");
       return false;
     }
+    rest_statement(rest_key_service(svc->name.key), "alter", find(st, s_.mrs_service_request_path));
+    {
+      // Only ADD / REMOVE AUTH APP clauses: msm keeps such an ALTER when it
+      // writes the service anew.
+      const auto items = list_levels(child(st, s_.mrs_rest_service_options));
+      c_.m_rest_statements[rest_key_service(svc->name.key)].back().auth_apps_only =
+          !items.empty() && child(st, s_.mrs_new_service_request_path) == npos &&
+          std::all_of(items.begin(), items.end(), [&](uint32_t level) {
+            const int is = t_.node(t_.children(level)[1]).symbol;
+            return is == s_.mrs_add_auth_app || is == s_.mrs_remove_auth_app;
+          });
+    }
     const uint32_t renamed = child(st, s_.mrs_new_service_request_path);
     if (renamed != npos) {
       const Rest_service_name to = rest_service_name(find(renamed, s_.mrs_service_request_path));
       if (iequals(c_.m_current_service.key, svc->name.key)) c_.m_current_service = to;
+      c_.rekey_rest_statements(rest_key_service(svc->name.key), rest_key_service(to.key));
       svc->name = to;
     }
     // Only what the statement writes changes.
@@ -2103,9 +2220,12 @@ bool Catalog_fold::rest(uint32_t n) {
   if (sym == s_.mrs_use_statement) {
     // USE REST SERVICE p, USE REST [SERVICE p] SCHEMA s; USE REST METADATA
     // names neither.
+    // It is the statement of the service and of the schema it names.
+    const bool both = !service.key.empty() && !schema_path.empty();
     if (!service.key.empty()) {
       c_.m_current_service = service;
       c_.m_current_rest_schema.clear();
+      rest_statement(rest_key_service(service.key), "use", find(st, s_.mrs_service_request_path), both);
     }
     if (!schema_path.empty()) {
       if (c_.m_current_service.key.empty()) {
@@ -2113,6 +2233,7 @@ bool Catalog_fold::rest(uint32_t n) {
         return false;
       }
       c_.m_current_rest_schema = schema_path;
+      rest_statement(rest_key_schema(c_.m_current_service.key, schema_path), "use", schema_node, both);
     }
     return false;
   }
@@ -2126,6 +2247,8 @@ bool Catalog_fold::rest(uint32_t n) {
     rs.path = schema_node != npos ? schema_path : "/" + rs.schema;
     rs.origin = origin(schema_node != npos ? schema_node : child(st, s_.mrs_identifier));
     rs.declared = true;
+    rest_statement(rest_key_schema(svc_path->key, rs.path), "create",
+                   schema_node != npos ? schema_node : child(st, s_.mrs_identifier));
     Rest_schema *it = find_rest_schema(svc, rs.path);
     // IF NOT EXISTS keeps a schema the file created as it is, as the shell
     // does.
@@ -2152,10 +2275,12 @@ bool Catalog_fold::rest(uint32_t n) {
       note(Note_kind::unknown_rest_schema, false, what() + ": the file does not name this REST schema");
       return false;
     }
+    rest_statement(rest_key_schema(svc->name.key, rs->path), "alter", schema_node);
     const uint32_t to = child(child(st, s_.mrs_opt_new_request_path), s_.mrs_request_path_identifier);
     if (to != npos) {
       if (iequals(svc->name.key, c_.m_current_service.key) && iequals(rs->path, c_.m_current_rest_schema))
         c_.m_current_rest_schema = text(to);
+      c_.rekey_rest_statements(rest_key_schema(svc->name.key, rs->path), rest_key_schema(svc->name.key, text(to)));
       rs->path = text(to);
     }
     if (const uint32_t db = child(child(st, s_.mrs_opt_from_schema_name), s_.mrs_identifier); db != npos)
@@ -2170,6 +2295,8 @@ bool Catalog_fold::rest(uint32_t n) {
   if (sym == s_.mrs_create_rest_content_set_statement) {
     const auto svc_path = service_named();
     if (!svc_path) return false;
+    const uint32_t p = find(st, s_.mrs_content_set_request_path);
+    rest_statement(rest_key_content_set(svc_path->key, name_at(p)), "create", p);
     named(c_.service(*svc_path).content_sets, s_.mrs_content_set_request_path);
     return true;
   }
@@ -2185,6 +2312,7 @@ bool Catalog_fold::rest(uint32_t n) {
     return true;
   }
   if (sym == s_.mrs_drop_rest_service_statement) {
+    rest_statement(rest_key_service(service.key), "drop", find(st, s_.mrs_service_request_path));
     std::erase_if(c_.m_services, [&](const Rest_service &x) { return iequals(x.name.key, service.key); });
     if (iequals(c_.m_current_service.key, service.key)) {
       c_.m_current_service = {};
@@ -2201,6 +2329,7 @@ bool Catalog_fold::rest(uint32_t n) {
     // (msm's drop of a REST schema a release moved to another database).
     // One only named (no CREATE REST SCHEMA, so no database known) is
     // dropped, as without FOR DATABASE.
+    rest_statement(rest_key_schema(svc_path->key, schema_path), "drop", schema_node);
     const std::string for_db = name_of(child(child(st, s_.mrs_opt_for_database), s_.mrs_identifier));
     Rest_service *svc = c_.find_service(svc_path->key);
     if (const Rest_schema *rs = svc != nullptr ? find_rest_schema(*svc, schema_path) : nullptr;
@@ -2214,6 +2343,8 @@ bool Catalog_fold::rest(uint32_t n) {
   auto drop_object = [&](const char *kind, int path_sym) {
     const auto place = rest_place();
     if (!place) return false;
+    rest_statement(rest_key_object(place->first.key, place->second, kind, text(find(st, path_sym))), "drop",
+                   find(st, path_sym));
     Rest_service *svc = c_.find_service(place->first.key);
     Rest_schema *sch = svc != nullptr ? find_rest_schema(*svc, place->second) : nullptr;
     if (sch == nullptr) return true;
@@ -2227,9 +2358,9 @@ bool Catalog_fold::rest(uint32_t n) {
   if (sym == s_.mrs_drop_rest_content_set_statement) {
     const auto svc_path = service_named();
     if (!svc_path) return false;
-    if (Rest_service *svc = c_.find_service(svc_path->key)) {
-      erase_named(svc->content_sets, name_at(find(st, s_.mrs_content_set_request_path)));
-    }
+    const uint32_t p = find(st, s_.mrs_content_set_request_path);
+    rest_statement(rest_key_content_set(svc_path->key, name_at(p)), "drop", p);
+    if (Rest_service *svc = c_.find_service(svc_path->key)) erase_named(svc->content_sets, name_at(p));
     return true;
   }
   if (sym == s_.mrs_drop_rest_auth_app_statement) {

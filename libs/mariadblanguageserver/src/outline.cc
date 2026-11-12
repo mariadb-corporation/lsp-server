@@ -551,6 +551,7 @@ class Json_outline {
       w_.Bool(svc.declared);
       origin(svc.origin);
       rest_service_settings(svc);
+      rest_statements(c.rest_statements(svc));
       w_.Key("schemas");
       w_.StartArray();
       for (const auto &sch : svc.schemas) {
@@ -561,6 +562,7 @@ class Json_outline {
         w_.Bool(sch.declared);
         origin(sch.origin);
         rest_schema_settings(sch.settings);
+        rest_statements(c.rest_statements(svc, sch));
         w_.Key("objects");
         w_.StartArray();
         for (const auto &o : sch.objects) {
@@ -572,13 +574,23 @@ class Json_outline {
           str("object_name", o.object_name);
           origin(o.origin);
           rest_object_details(o);
+          rest_statements(c.rest_statements(svc, sch, o));
           w_.EndObject();
         }
         w_.EndArray();
         w_.EndObject();
       }
       w_.EndArray();
-      named("content_sets", svc.content_sets);
+      w_.Key("content_sets");
+      w_.StartArray();
+      for (const auto &cs : svc.content_sets) {
+        w_.StartObject();
+        str("name", cs.name);
+        origin(cs.origin);
+        rest_statements(c.rest_content_set_statements(svc, cs));
+        w_.EndObject();
+      }
+      w_.EndArray();
       named("auth_apps", svc.auth_apps);
       w_.EndObject();
     }
@@ -656,6 +668,35 @@ class Json_outline {
     boolean("merge_options", s.merge_options);
     raw_json("metadata", s.metadata);
   }
+  // Feature rest_statements: every statement about a REST item.
+  void rest_statements(const std::vector<Rest_statement> &statements) {
+    w_.Key("statements");
+    w_.StartArray();
+    for (const auto &s : statements) {
+      w_.StartObject();
+      str("kind", s.kind);
+      origin(s.origin);
+      w_.Key("leading_comments");
+      if (s.leading_comments && s.leading_comments->source == s.origin.source) {
+        file_range(*s.leading_comments);
+      } else {
+        w_.Null();
+      }
+      boolean("shared", s.shared);
+      boolean("auth_apps_only", s.auth_apps_only);
+      w_.EndObject();
+    }
+    w_.EndArray();
+  }
+  // The statement range of `o`, in its own file.
+  void file_range(const Origin &o) {
+    if (o.source > 0 && o.source <= includes_.size()) {
+      const auto &inc = includes_[o.source - 1];
+      lsp::write_range(w_, inc.text, inc.lines, o.statement.begin, o.statement.end);
+    } else {
+      lsp::write_range(w_, text_, lines_, o.statement.begin, o.statement.end);
+    }
+  }
   // Feature rest_settings.
   void rest_service_settings(const Rest_service &svc) {
     const Rest_settings &s = svc.settings;
@@ -702,6 +743,7 @@ const std::vector<const char *> &outline_features() {
       "rest_drop_for_database",  // DROP REST SCHEMA ... FOR DATABASE db
       "rest_object_details",  // a REST object's data mapping, PARAMETERS/RESULT, options
       "rest_settings",        // REST services' and schemas' settings, ALTER REST SCHEMA
+      "rest_statements",      // every statement of each REST service, schema, object, content set
   };
   return features;
 }

@@ -1212,4 +1212,63 @@ TEST(Catalog, rest_schema_settings) {
       << json;
 }
 
+// rest_statements: every statement about a REST item, in file order, across
+// DROP / re-CREATE and renames; USE REST SERVICE s SCHEMA p is shared; an
+// ALTER of auth app links alone is marked; banners above come apart.
+TEST(Catalog, rest_statements) {
+  const std::string sql =
+      "-- MSM Section 180: REST\n"                                    // 0
+      "-- -----\n"                                                    // 1
+      "DROP REST SERVICE IF EXISTS /svc;\n"                           // 2
+      "-- The service\n"                                              // 3
+      "CREATE REST SERVICE /svc COMMENT 'one';\n"                     // 4
+      "\n"                                                            // 5
+      "CREATE REST SCHEMA /s ON SERVICE /svc FROM sakila;\n"          // 6
+      "USE REST SERVICE /svc SCHEMA /s;\n"                            // 7
+      "CREATE REST VIEW /v AS t;\n"                                   // 8
+      "ALTER REST SERVICE /svc ADD AUTH APP a REMOVE AUTH APP b;\n"   // 9
+      "ALTER REST SERVICE /svc COMMENT 'two';\n"                      // 10
+      "# banner\n"                                                    // 11
+      "CREATE OR REPLACE REST VIEW /v AS t2;\n"                       // 12
+      "ALTER REST SCHEMA /s NEW REQUEST PATH /s2;\n"                  // 13
+      "CREATE REST CONTENT SET /cs ON SERVICE /svc;\n"                // 14
+      "ALTER REST SERVICE /svc NEW REQUEST PATH /svc2;\n"             // 15
+      "CREATE REST VIEW /w ON SERVICE /svc2 SCHEMA /s2 AS t;\n"       // 16
+      "DROP REST VIEW /w FROM SERVICE /svc2 SCHEMA /s2;\n";           // 17
+  const auto o = outline_of(sql);
+  EXPECT_TRUE(o.notes.empty());
+  const Catalog &c = o.catalog;
+  const auto &svc = c.rest_services().at(0);
+  const auto &rs = svc.schemas.at(0);
+  const Line_map lines(sql);
+  auto line_of = [&](const Rest_statement &s) { return lines.position(sql, s.origin.statement.begin).line; };
+  auto summary = [&](const std::vector<Rest_statement> &v) {
+    std::vector<std::string> out;
+    for (const auto &s : v) {
+      out.push_back(s.kind + "@" + std::to_string(line_of(s)) + (s.shared ? " shared" : "") +
+                    (s.auth_apps_only ? " auth" : "") + (s.leading_comments ? " lc" : ""));
+    }
+    return out;
+  };
+  EXPECT_EQ((std::vector<std::string>{"drop@2", "create@4 lc", "use@7 shared", "alter@9 auth", "alter@10",
+                                      "alter@15"}),
+            summary(c.rest_statements(svc)));
+  EXPECT_EQ((std::vector<std::string>{"create@6", "use@7 shared", "alter@13"}), summary(c.rest_statements(svc, rs)));
+  ASSERT_EQ(1u, rs.objects.size());
+  EXPECT_EQ((std::vector<std::string>{"create@8", "create@12 lc"}),
+            summary(c.rest_statements(svc, rs, rs.objects[0])));
+  EXPECT_EQ((std::vector<std::string>{"create@14"}),
+            summary(c.rest_content_set_statements(svc, svc.content_sets.at(0))));
+  const auto &with_banner = c.rest_statements(svc)[1];
+  EXPECT_EQ(3u, lines.position(sql, with_banner.leading_comments->statement.begin).line);
+
+  const std::string json = outline_json(o, sql, lines);
+  EXPECT_NE(std::string::npos,
+            json.find("{\"kind\":\"use\",\"range\":{\"start\":{\"line\":7,\"character\":0},\"end\":{\"line\":7,"
+                      "\"character\":31}},\"selection_range\":{\"start\":{\"line\":7,\"character\":17},"
+                      "\"end\":{\"line\":7,\"character\":21}},\"leading_comments\":null,\"shared\":true,"
+                      "\"auth_apps_only\":false}"))
+      << json;
+}
+
 }  // namespace mdbls

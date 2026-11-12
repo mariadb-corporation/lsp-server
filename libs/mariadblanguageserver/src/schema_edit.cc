@@ -1671,12 +1671,6 @@ bool is_blank(std::string_view s) {
   return std::all_of(s.begin(), s.end(), [](char c) { return c == ' ' || c == '\t'; });
 }
 
-// A line that holds only a comment.
-bool is_comment_line(std::string_view line) {
-  const auto t = trim(line);
-  return t.substr(0, 2) == "--" || t.substr(0, 1) == "#" || t.substr(0, 2) == "/*" || t.substr(0, 1) == "*";
-}
-
 // The end of the line holding `p`: where its line break starts.
 uint32_t line_end(std::string_view text, uint32_t p) {
   while (p < text.size() && text[p] != '\n') ++p;

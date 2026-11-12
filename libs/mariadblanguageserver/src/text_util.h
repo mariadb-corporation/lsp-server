@@ -178,6 +178,12 @@ inline size_t char_count(std::string_view text) {
   }));
 }
 
+// A line that holds only a comment.
+inline bool is_comment_line(std::string_view line) {
+  const auto t = trim(line);
+  return t.substr(0, 2) == "--" || t.substr(0, 1) == "#" || t.substr(0, 2) == "/*" || t.substr(0, 1) == "*";
+}
+
 // The start of the line holding `offset`.
 inline uint32_t line_begin(std::string_view text, uint32_t offset) {
   while (offset > 0 && text[offset - 1] != '\n') --offset;
