@@ -307,11 +307,52 @@ struct Schema {
   bool empty() const;
 };
 
+// A `key: value @OPTION ... { ... }` pair of a REST object's data mapping.
+struct Rest_field {
+  std::string name;                    // the JSON key, unquoted
+  std::optional<std::string> column;   // the column or parameter; nullopt for a reference
+  bool reference = false;              // `key: [schema.]table { ... }`
+  std::optional<std::string> ref_schema;  // a reference's schema, when qualified
+  std::string ref_table;
+  std::vector<Rest_field> fields;      // a reference's fields
+  std::vector<std::string> options;    // @OPTIONs, upper-case, without @, but DATATYPE
+  std::optional<std::string> datatype; // @DATATYPE("...")'s text
+  std::optional<std::string> json_schema;  // JSON SCHEMA's value, as JSON text
+};
+
+// A routine's PARAMETERS or one of its RESULTs.
+struct Rest_field_set {
+  std::optional<std::string> name;     // the class name written after the keyword
+  std::vector<Rest_field> fields;
+};
+
 struct Rest_object {
   std::string kind;                    // view, procedure, function
   std::string path;
   std::string object;                  // the database object, as written
   Origin origin;
+  // The database object, unquoted; the schema is empty when unqualified.
+  std::string object_schema;
+  std::string object_name;
+  // The statement's details (outline feature rest_object_details); an option
+  // written twice keeps the last.
+  std::optional<std::string> class_name;            // a view's CLASS
+  std::vector<std::string> crud;                    // a view's @OPTIONs after CLASS
+  std::optional<std::vector<Rest_field>> fields;    // a view's { ... }
+  std::optional<Rest_field_set> parameters;         // a routine's PARAMETERS
+  std::vector<Rest_field_set> results;              // a routine's RESULTs
+  std::optional<std::string> enabled;               // ENABLED, DISABLED, PRIVATE
+  std::optional<bool> requires_auth;                // AUTHENTICATION [NOT] REQUIRED
+  std::optional<uint64_t> items_per_page;
+  std::optional<std::string> comment;
+  std::optional<std::string> media_type;
+  bool media_type_autodetect = false;
+  std::optional<std::string> format;                // FEED, ITEM, MEDIA
+  std::optional<std::string> auth_procedure;        // unquoted, schema.name
+  std::optional<std::string> options;               // OPTIONS, as JSON text
+  bool merge_options = false;                       // ... written MERGE OPTIONS
+  std::optional<std::string> metadata;              // METADATA, as JSON text
+  bool force = false;                               // a routine's FORCE
 };
 
 struct Rest_schema {

@@ -566,7 +566,10 @@ class Json_outline {
           str("kind", o.kind);
           str("path", o.path);
           str("object", o.object);
+          str_or_null("object_schema", o.object_schema);
+          str("object_name", o.object_name);
           origin(o.origin);
+          rest_object_details(o);
           w_.EndObject();
         }
         w_.EndArray();
@@ -585,6 +588,76 @@ class Json_outline {
   }
 
  private:
+  // JSON text the catalog built (OPTIONS, METADATA, JSON SCHEMA), or null.
+  void raw_json(const char *key, const std::optional<std::string> &v) {
+    w_.Key(key);
+    if (v) {
+      w_.RawValue(v->data(), v->size(), v->front() == '{' ? rapidjson::kObjectType : rapidjson::kStringType);
+    } else {
+      w_.Null();
+    }
+  }
+  void rest_fields(const std::vector<Rest_field> &fields) {
+    w_.StartArray();
+    for (const auto &f : fields) {
+      w_.StartObject();
+      str("name", f.name);
+      opt_str("column", f.column);
+      w_.Key("reference");
+      if (f.reference) {
+        w_.StartObject();
+        opt_str("schema", f.ref_schema);
+        str("table", f.ref_table);
+        w_.Key("fields");
+        rest_fields(f.fields);
+        w_.EndObject();
+      } else {
+        w_.Null();
+      }
+      strings("options", f.options);
+      opt_str("datatype", f.datatype);
+      raw_json("json_schema", f.json_schema);
+      w_.EndObject();
+    }
+    w_.EndArray();
+  }
+  void rest_field_set(const Rest_field_set &s) {
+    w_.StartObject();
+    opt_str("name", s.name);
+    w_.Key("fields");
+    rest_fields(s.fields);
+    w_.EndObject();
+  }
+  // Feature rest_object_details.
+  void rest_object_details(const Rest_object &o) {
+    opt_str("class", o.class_name);
+    strings("crud", o.crud);
+    w_.Key("fields");
+    if (o.fields) rest_fields(*o.fields); else w_.Null();
+    w_.Key("parameters");
+    if (o.parameters) rest_field_set(*o.parameters); else w_.Null();
+    w_.Key("results");
+    w_.StartArray();
+    for (const auto &r : o.results) rest_field_set(r);
+    w_.EndArray();
+    opt_str("enabled", o.enabled);
+    opt_bool("requires_auth", o.requires_auth);
+    w_.Key("items_per_page");
+    if (o.items_per_page) w_.Uint64(*o.items_per_page); else w_.Null();
+    opt_str("comment", o.comment);
+    opt_str("media_type", o.media_type);
+    w_.Key("media_type_autodetect");
+    w_.Bool(o.media_type_autodetect);
+    opt_str("format", o.format);
+    opt_str("auth_procedure", o.auth_procedure);
+    raw_json("options", o.options);
+    w_.Key("merge_options");
+    w_.Bool(o.merge_options);
+    raw_json("metadata", o.metadata);
+    w_.Key("force");
+    w_.Bool(o.force);
+  }
+
   Writer &w_;
   std::string_view text_;
   const Line_map &lines_;
@@ -600,6 +673,7 @@ const std::vector<const char *> &outline_features() {
       "rest_current_schema",  // USE REST SCHEMA, the shell's current service and schema
       "rest_declared",        // rest.services[].declared, rest.services[].schemas[].declared
       "rest_drop_for_database",  // DROP REST SCHEMA ... FOR DATABASE db
+      "rest_object_details",  // a REST object's data mapping, PARAMETERS/RESULT, options
   };
   return features;
 }
