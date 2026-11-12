@@ -58,11 +58,12 @@ enum class Note_kind {
   rest_none_in_use,      // not applied: a REST statement that names no service or schema
                          // when none is in use, where MariaDB Shell fails
   unknown_rest_service,  // not applied: ALTER REST SERVICE of a service the file does not create
+  unknown_rest_schema,   // not applied: ALTER REST SCHEMA of a schema the file does not name
 };
 constexpr Note_kind k_note_kinds[] = {Note_kind::syntax_error, Note_kind::unsupported_sql_mode,
                                       Note_kind::unknown_table, Note_kind::include_unreadable,
                                       Note_kind::include_nested, Note_kind::rest_none_in_use,
-                                      Note_kind::unknown_rest_service};
+                                      Note_kind::unknown_rest_service, Note_kind::unknown_rest_schema};
 const char *to_string(Note_kind kind);
 
 // A remark on one statement: what the fold could not read, or applied with
@@ -332,6 +333,35 @@ struct Rest_field_set {
   std::vector<Rest_field> fields;
 };
 
+// The settings a REST statement writes (outline features
+// rest_object_details, rest_settings); null where not written.  A service has
+// enabled, published, protocol, comment, the auth_* paths, options and
+// metadata; a schema enabled, requires_auth, items_per_page, comment,
+// options and metadata; an object all but published, protocol and auth_*.
+// An option written twice keeps the last.
+struct Rest_settings {
+  std::optional<std::string> enabled;               // ENABLED, DISABLED, PRIVATE
+  std::optional<bool> published;                    // PUBLISHED, UNPUBLISHED
+  std::optional<std::string> protocol;              // HTTP, HTTPS
+  std::optional<bool> requires_auth;                // AUTHENTICATION [NOT] REQUIRED
+  std::optional<uint64_t> items_per_page;
+  std::optional<std::string> comment;
+  std::optional<std::string> auth_path;             // AUTHENTICATION PATH ...; DEFAULT is null
+  std::optional<std::string> auth_redirection;
+  std::optional<std::string> auth_validation;
+  std::optional<std::string> auth_page_content;
+  std::optional<std::string> media_type;
+  bool media_type_autodetect = false;
+  std::optional<std::string> format;                // FEED, ITEM, MEDIA
+  std::optional<std::string> auth_procedure;        // unquoted, schema.name
+  std::optional<std::string> options;               // OPTIONS, as JSON text
+  // `options` is a JSON merge patch to options the file does not know: an
+  // ALTER ... MERGE OPTIONS of a service or schema the file only names.  A
+  // CREATE stores MERGE OPTIONS as they are, as MariaDB Shell does.
+  bool merge_options = false;
+  std::optional<std::string> metadata;              // METADATA, as JSON text
+};
+
 struct Rest_object {
   std::string kind;                    // view, procedure, function
   std::string path;
@@ -347,19 +377,7 @@ struct Rest_object {
   std::optional<std::vector<Rest_field>> fields;    // a view's { ... }
   std::optional<Rest_field_set> parameters;         // a routine's PARAMETERS
   std::vector<Rest_field_set> results;              // a routine's RESULTs
-  std::optional<std::string> enabled;               // ENABLED, DISABLED, PRIVATE
-  std::optional<bool> requires_auth;                // AUTHENTICATION [NOT] REQUIRED
-  std::optional<uint64_t> items_per_page;
-  std::optional<std::string> comment;
-  std::optional<std::string> media_type;
-  bool media_type_autodetect = false;
-  std::optional<std::string> format;                // FEED, ITEM, MEDIA
-  std::optional<std::string> auth_procedure;        // unquoted, schema.name
-  std::optional<std::string> options;               // OPTIONS, as JSON text
-  // `options` is a patch to options the file does not know (JSON merge
-  // patch); never for a CREATE, which stores MERGE OPTIONS as they are.
-  bool merge_options = false;
-  std::optional<std::string> metadata;              // METADATA, as JSON text
+  Rest_settings settings;
   bool force = false;                               // a routine's FORCE
 };
 
@@ -369,10 +387,26 @@ struct Rest_schema {
   std::vector<Rest_object> objects;
   bool declared = false;               // created by CREATE REST SCHEMA in the file
   Origin origin;
+  Rest_settings settings;
+};
+
+// A REST service's name, `[developer, ...@]/path`.  Services are told apart
+// by request path and developers, as MariaDB Shell does (find_service).
+struct Rest_service_name {
+  std::string path;                    // as written, blanks collapsed
+  std::string request_path;            // unquoted
+  std::vector<std::string> developers; // unquoted, sorted as the shell does
+  // developers,...@request_path: equal (without regard to case) for the
+  // same service; "" for no name.
+  std::string key;
 };
 
 struct Rest_service {
-  std::string path;
+  std::string path;                    // as the statement that made it wrote it
+  std::string request_path;
+  std::vector<std::string> developers;
+  std::string key;                     // Rest_service_name::key
+  Rest_settings settings;
   std::vector<Rest_schema> schemas;
   std::vector<Named_object> content_sets;
   std::vector<Named_object> auth_apps;  // the linked auth apps (ADD AUTH APP)
@@ -418,15 +452,15 @@ class Catalog {
  private:
   Schema &schema(const std::string &name);
   Schema *find_schema(std::string_view name);
-  Rest_service &service(const std::string &path);
-  Rest_service *find_service(std::string_view path);
+  Rest_service &service(const Rest_service_name &name);
+  Rest_service *find_service(std::string_view key);
 
   std::vector<Schema> m_schemas;
   std::string m_current;
   std::vector<Rest_service> m_services;
   // What USE REST SERVICE / SCHEMA set, as MariaDB Shell keeps it: the
-  // current service's path, and the request path of its current schema.
-  std::string m_current_service;
+  // current service, and the request path of its current schema.
+  Rest_service_name m_current_service;
   std::string m_current_rest_schema;
   std::vector<Named_object> m_auth_apps;
   std::vector<Named_object> m_roles;
