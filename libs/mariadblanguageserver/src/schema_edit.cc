@@ -2746,31 +2746,27 @@ class Editor {
     }
     return at;
   }
-  // Where a statement goes at the end of range `r` of the searched text:
+  // Where a statement goes at the end of the searched text up to `end`:
   // after its last statement, else after the comment lines it starts with.
-  Spot end_of_range(Range r, const std::string &eol) const {
+  Spot end_of_range(uint32_t end, const std::string &eol) const {
     std::optional<size_t> last;
-    std::optional<size_t> before;  // the last statement above the section
     for (size_t k = 0; k < index().statements().size(); ++k) {
       const Statement &st = statement(k);
-      if (st.kind != Statement_kind::sql) continue;
-      if (st.begin < r.begin) before = k;
-      else if (st.begin < r.end) last = k;
+      if (st.kind == Statement_kind::sql && st.begin < end) last = k;
     }
     if (last) return after_create(*last, eol);
     const std::string_view t = text();
-    uint32_t p = r.begin;
-    while (p < r.end) {
+    uint32_t p = 0;
+    while (p < end) {
       const uint32_t le = line_end(t, p);
       const uint32_t next = past_line_break(t, le);
       if (next == p || !is_comment_line(t.substr(p, le - p))) break;
       p = next;
     }
     Spot s;
-    s.at = p > r.begin ? line_end(t, p - 1) : r.begin;
+    s.at = p > 0 ? line_end(t, p - 1) : 0;
     s.lead = eol + eol;
-    s.delimiter = before ? index().delimiters()[statement(*before).active_delimiter] : ";";
-    if (s.delimiter.empty()) s.delimiter = ";";
+    s.delimiter = ";";
     return s;
   }
 
@@ -2848,7 +2844,7 @@ class Editor {
     }
     // Before the first object of `before`: at the end of what is above it.
     if (p.anchor.k) p.spot = after_create(*p.anchor.k, style_of(p.anchor).eol);
-    else if (cut) p.spot = end_of_range(within, style_at(std::nullopt, std::nullopt).eol);
+    else if (cut) p.spot = end_of_range(within.end, style_at(std::nullopt, std::nullopt).eol);
     return p;
   }
   // The style new text at `p` is written in: its anchor's, else the
@@ -2875,6 +2871,8 @@ class Editor {
     if (form == "or_replace") return {true, false};
     if (form == "drop_first") return {false, true};
     const Form f = place.anchor.kind == kind ? form_at(*place.anchor.k, place.anchor.name) : Form{};
+    // A view CREATE OR REPLACE needs no DROP before it.
+    if (kind == Kind::view) return {f.or_replace, f.drop && !f.or_replace};
     return {f.or_replace, f.drop.has_value()};
   }
 

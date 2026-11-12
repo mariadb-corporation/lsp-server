@@ -1496,6 +1496,14 @@ TEST(Schema_edit, msm_views_follow_a_view_created_or_replaced) {
             twice(msm_script(k_section_150), k_add_view, R"j({"op": "drop_view", "view": "order_ids"})j"));
 }
 
+TEST(Schema_edit, a_view_after_a_dropped_and_replaced_view_is_not_dropped) {
+  // CREATE OR REPLACE needs no DROP: the new view takes the OR REPLACE only.
+  const auto r = ok(edit("DROP VIEW IF EXISTS v;\nCREATE OR REPLACE VIEW v AS SELECT 1;\n", {},
+                         request("", R"j({"op": "add_view", "view": {"name": "w", "definition": "SELECT 2"}})j")));
+  EXPECT_EQ("DROP VIEW IF EXISTS v;\nCREATE OR REPLACE VIEW v AS SELECT 1;\nCREATE OR REPLACE VIEW w AS SELECT 2;\n",
+            text(r, ""));
+}
+
 TEST(Schema_edit, msm_routines_follow_a_routine_dropped_first) {
   const auto r = ok(edit(msm_script(k_section_150), {}, request("shop", k_add_routine)));
   // After the routine, with the blank line above its DROP.
