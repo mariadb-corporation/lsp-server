@@ -94,7 +94,7 @@ void erase_named(std::vector<T> &v, std::string_view name) {
   std::erase_if(v, [&](const T &x) { return iequals(x.name, name); });
 }
 
-// Removes the elements of v (REST services or schemas) with request path `path`.
+// Removes the REST schemas of v with request path `path`.
 template <typename T>
 void erase_by_path(std::vector<T> &v, std::string_view path) {
   std::erase_if(v, [&](const T &x) { return iequals(x.path, path); });
@@ -297,17 +297,14 @@ Schema &Catalog::schema(const std::string &n) {
 
 Rest_service *Catalog::find_service(std::string_view key) {
   auto it = std::find_if(m_services.begin(), m_services.end(),
-                         [&](const Rest_service &s) { return iequals(s.key, key); });
+                         [&](const Rest_service &s) { return iequals(s.name.key, key); });
   return it == m_services.end() ? nullptr : &*it;
 }
 
 Rest_service &Catalog::service(const Rest_service_name &name) {
   if (Rest_service *s = find_service(name.key)) return *s;
   Rest_service &s = m_services.emplace_back();
-  s.path = name.path;
-  s.request_path = name.request_path;
-  s.developers = name.developers;
-  s.key = name.key;
+  s.name = name;
   return s;
 }
 
@@ -434,9 +431,15 @@ class Catalog_fold {
   }
   // The settings an options list (mrs_rest_service_options,
   // mrs_rest_schema_options, mrs_rest_object_options) writes, applied to
-  // `s`.  `alter`: an ALTER, where MERGE OPTIONS merges; `known`: the file
-  // created what `s` belongs to, so its options are known.
-  void rest_settings(Rest_settings &s, uint32_t list, bool alter, bool known) const;
+  // `s`.
+  enum class Options_write {
+    replace,        // a CREATE: MERGE OPTIONS are the whole options
+    merge,          // an ALTER of what the file creates: MERGE OPTIONS merge into them
+    compose_patch,  // an ALTER of what the file only names: MERGE OPTIONS add to a patch
+  };
+  void rest_settings(Rest_settings &s, uint32_t list, Options_write mode = Options_write::replace) const;
+  // Whether a CREATE statement says IF NOT EXISTS.
+  bool if_not_exists(uint32_t st) const { return find(nth(st, 0), s_.IF_SYM) != npos; }
   // The levels of a left-recursive list (`list: empty | list item...`) in
   // written order; each level's children after the first are one item.
   std::vector<uint32_t> list_levels(uint32_t list) const;
@@ -1853,7 +1856,7 @@ void Catalog_fold::rest_object_details(Rest_object &o, uint32_t st) const {
     for (const uint32_t r : find_all(results, s_.mrs_rest_result))
       o.results.push_back(rest_field_set(r, s_.mrs_rest_result_name));
   }
-  rest_settings(o.settings, child(st, s_.mrs_rest_object_options), false, true);
+  rest_settings(o.settings, child(st, s_.mrs_rest_object_options));
 }
 
 std::vector<uint32_t> Catalog_fold::list_levels(uint32_t list) const {
@@ -1863,7 +1866,8 @@ std::vector<uint32_t> Catalog_fold::list_levels(uint32_t list) const {
   return levels;
 }
 
-void Catalog_fold::rest_settings(Rest_settings &s, uint32_t list, bool alter, bool known) const {
+void Catalog_fold::rest_settings(Rest_settings &s, uint32_t list, Options_write mode) const {
+  uint32_t options = npos;
   for (const uint32_t level : list_levels(list)) {
     const auto ch = t_.children(level);
     const uint32_t item = ch[1];
@@ -1892,19 +1896,7 @@ void Catalog_fold::rest_settings(Rest_settings &s, uint32_t list, bool alter, bo
       const std::string num = text(find(item, s_.mrs_int_number));
       s.items_per_page = std::strtoull(num.c_str(), nullptr, 10);
     } else if (is == s_.mrs_json_options) {
-      std::string value = rest_json(child(item, s_.mrs_json_value));
-      // A CREATE stores MERGE OPTIONS as the whole options, as the shell
-      // does; an ALTER merges them into what is there (JSON_MERGE_PATCH).
-      if (!alter || find(item, s_.MERGE_SYM) == npos) {
-        s.options = std::move(value);
-        s.merge_options = false;
-      } else {
-        // Into options the file knows, else into the patch so far.
-        const bool complete = known || (s.options && !s.merge_options);
-        if (complete || s.options) value = json_merge_patch(s.options, value, !complete);
-        s.options = std::move(value);
-        s.merge_options = !complete;
-      }
+      options = item;  // the last one counts, as in the shell
     } else if (is == s_.mrs_comments) {
       s.comment = rest_string(child(item, s_.TEXT_STRING));
     } else if (is == s_.mrs_metadata) {
@@ -1923,6 +1915,21 @@ void Catalog_fold::rest_settings(Rest_settings &s, uint32_t list, bool alter, bo
       s.auth_procedure = rest_dotted(ch[3]);
     }
   }
+  if (options == npos) return;
+  std::string value = rest_json(child(options, s_.mrs_json_value));
+  // A CREATE stores MERGE OPTIONS as the whole options, as the shell does;
+  // an ALTER merges them into what is there (JSON_MERGE_PATCH), and stores
+  // them as they are where the options are null (set_json_options).
+  const bool merge = mode != Options_write::replace && find(options, s_.MERGE_SYM) != npos;
+  // Into options the file knows, else into the patch so far.
+  const bool complete = mode == Options_write::merge || (s.options && !s.merge_options);
+  if (!merge || (complete && !s.options)) {
+    s.options = std::move(value);
+    s.merge_options = false;
+  } else {
+    s.options = json_merge_patch(s.options, value, !complete);
+    s.merge_options = !complete;
+  }
 }
 
 // [developer, ...@]/path: developers unquoted and sorted as MariaDB Shell's
@@ -1937,10 +1944,28 @@ Rest_service_name Catalog_fold::rest_service_name(uint32_t n) const {
     name.developers.push_back(unquote_any(trim(raw(d))));
   }
   std::sort(name.developers.begin(), name.developers.end(), [](const std::string &a, const std::string &b) {
-    const std::string la = lower(a), lb = lower(b);
-    return la != lb ? la < lb : a < b;
+    const auto ci_less = [](unsigned char x, unsigned char y) { return std::tolower(x) < std::tolower(y); };
+    if (std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end(), ci_less)) return true;
+    if (std::lexicographical_compare(b.begin(), b.end(), a.begin(), a.end(), ci_less)) return false;
+    return a < b;
   });
-  name.key = name.developers.empty() ? name.request_path : join(name.developers, ",") + "@" + name.request_path;
+  // Developers other than [A-Za-z0-9_]+ quoted, as the shell's
+  // sorted_developers, so that `a,b`@/p and a,b@/p differ.
+  std::string devs;
+  for (const std::string &d : name.developers) {
+    if (!devs.empty()) devs += ',';
+    const bool plain = !d.empty() && std::all_of(d.begin(), d.end(), [](unsigned char c) {
+      return std::isalnum(c) || c == '_';
+    });
+    if (plain) {
+      devs += d;
+      continue;
+    }
+    devs += '\'';
+    for (const char c : d) devs += c == '\'' ? std::string("''") : std::string(1, c);
+    devs += '\'';
+  }
+  name.key = devs.empty() ? name.request_path : devs + "@" + name.request_path;
   return name;
 }
 
@@ -1984,10 +2009,10 @@ bool Catalog_fold::rest(uint32_t n) {
     none_in_use("SERVICE");
     return std::nullopt;
   };
-  // The service and schema of a REST object: ON [SERVICE ...] SCHEMA, else
+  // The service and schema of a REST object or ALTER REST SCHEMA: ON [SERVICE ...] SCHEMA, else
   // the current schema.
   // (The grammar names a service only together with a schema.)
-  auto object_place = [&]() -> std::optional<std::pair<Rest_service_name, std::string>> {
+  auto rest_place = [&]() -> std::optional<std::pair<Rest_service_name, std::string>> {
     auto svc = service_named();
     if (!svc) return std::nullopt;
     if (!schema_path.empty()) return std::pair{*svc, schema_path};
@@ -1995,7 +2020,7 @@ bool Catalog_fold::rest(uint32_t n) {
     return std::pair{*svc, c_.m_current_rest_schema};
   };
   auto object = [&](const char *kind, int path_sym) {
-    const auto place = object_place();
+    const auto place = rest_place();
     if (!place) return false;
     Rest_service &svc = c_.service(place->first);
     Rest_schema *it = find_rest_schema(svc, place->second);
@@ -2011,7 +2036,7 @@ bool Catalog_fold::rest(uint32_t n) {
     });
     // IF NOT EXISTS keeps an object the file created at the path, of any
     // kind, as it is, as the shell does (it looks the path up alone).
-    if (find(nth(st, 0), s_.IF_SYM) != npos &&
+    if (if_not_exists(st) &&
         std::any_of(it->objects.begin(), it->objects.end(),
                     [&](const Rest_object &x) { return iequals(x.path, o.path); })) {
       return true;
@@ -2045,15 +2070,14 @@ bool Catalog_fold::rest(uint32_t n) {
     // statement does not name stay.  IF NOT EXISTS keeps it as it is, when
     // the file created it (not when a statement only named it).
     // Its settings are the statement's, as the shell writes them anew.
-    const uint32_t prefix = child(st, s_.mrs_create_rest_service_prefix);
     const Rest_service *had = c_.find_service(service.key);
     const bool existed = had != nullptr;
-    if (existed && had->declared && find(prefix, s_.IF_SYM) != npos) return true;
+    if (existed && had->declared && if_not_exists(st)) return true;
     Rest_service &svc = c_.service(service);
     svc.declared = true;
     svc.origin = origin(find(st, s_.mrs_service_request_path));
     svc.settings = {};
-    rest_settings(svc.settings, child(st, s_.mrs_rest_service_options), false, true);
+    rest_settings(svc.settings, child(st, s_.mrs_rest_service_options));
     link_auth_apps(svc, existed);
     return true;
   }
@@ -2067,14 +2091,12 @@ bool Catalog_fold::rest(uint32_t n) {
     const uint32_t renamed = child(st, s_.mrs_new_service_request_path);
     if (renamed != npos) {
       const Rest_service_name to = rest_service_name(find(renamed, s_.mrs_service_request_path));
-      if (iequals(c_.m_current_service.key, svc->key)) c_.m_current_service = to;
-      svc->path = to.path;
-      svc->request_path = to.request_path;
-      svc->developers = to.developers;
-      svc->key = to.key;
+      if (iequals(c_.m_current_service.key, svc->name.key)) c_.m_current_service = to;
+      svc->name = to;
     }
     // Only what the statement writes changes.
-    rest_settings(svc->settings, child(st, s_.mrs_rest_service_options), true, svc->declared);
+    rest_settings(svc->settings, child(st, s_.mrs_rest_service_options),
+                  svc->declared ? Options_write::merge : Options_write::compose_patch);
     link_auth_apps(*svc);
     return true;
   }
@@ -2104,17 +2126,17 @@ bool Catalog_fold::rest(uint32_t n) {
     rs.path = schema_node != npos ? schema_path : "/" + rs.schema;
     rs.origin = origin(schema_node != npos ? schema_node : child(st, s_.mrs_identifier));
     rs.declared = true;
-    rest_settings(rs.settings, child(st, s_.mrs_rest_schema_options), false, true);
-    if (Rest_schema *it = find_rest_schema(svc, rs.path)) {
-      // IF NOT EXISTS keeps a schema the file created as it is, as the
-      // shell does.
-      if (it->declared && find(child(st, s_.mrs_create_rest_schema_prefix), s_.IF_SYM) != npos)
-        return true;
+    Rest_schema *it = find_rest_schema(svc, rs.path);
+    // IF NOT EXISTS keeps a schema the file created as it is, as the shell
+    // does.
+    if (it != nullptr && it->declared && if_not_exists(st)) return true;
+    rest_settings(rs.settings, child(st, s_.mrs_rest_schema_options));
+    if (it != nullptr) {
       rs.objects = std::move(it->objects);
       *it = std::move(rs);
     } else {
       svc.schemas.push_back(std::move(rs));
-      if (svc.schemas.size() == 1 && iequals(svc.key, c_.m_current_service.key))
+      if (svc.schemas.size() == 1 && iequals(svc.name.key, c_.m_current_service.key))
         c_.m_current_rest_schema = svc.schemas[0].path;
     }
     return true;
@@ -2122,7 +2144,7 @@ bool Catalog_fold::rest(uint32_t n) {
   if (sym == s_.mrs_alter_rest_schema_statement) {
     // ALTER REST SCHEMA [p] [ON SERVICE s] [NEW REQUEST PATH q] [FROM db]
     // options: only what it writes changes, as in the shell.
-    const auto place = object_place();
+    const auto place = rest_place();
     if (!place) return false;
     Rest_service *svc = c_.find_service(place->first.key);
     Rest_schema *rs = svc != nullptr ? find_rest_schema(*svc, place->second) : nullptr;
@@ -2132,13 +2154,14 @@ bool Catalog_fold::rest(uint32_t n) {
     }
     const uint32_t to = child(child(st, s_.mrs_opt_new_request_path), s_.mrs_request_path_identifier);
     if (to != npos) {
-      if (iequals(svc->key, c_.m_current_service.key) && iequals(rs->path, c_.m_current_rest_schema))
+      if (iequals(svc->name.key, c_.m_current_service.key) && iequals(rs->path, c_.m_current_rest_schema))
         c_.m_current_rest_schema = text(to);
       rs->path = text(to);
     }
     if (const uint32_t db = child(child(st, s_.mrs_opt_from_schema_name), s_.mrs_identifier); db != npos)
       rs->schema = name_of(db);
-    rest_settings(rs->settings, child(st, s_.mrs_rest_schema_options), true, rs->declared);
+    rest_settings(rs->settings, child(st, s_.mrs_rest_schema_options),
+                  rs->declared ? Options_write::merge : Options_write::compose_patch);
     return true;
   }
   if (sym == s_.mrs_create_rest_view_statement) return object("view", s_.mrs_view_request_path);
@@ -2162,7 +2185,7 @@ bool Catalog_fold::rest(uint32_t n) {
     return true;
   }
   if (sym == s_.mrs_drop_rest_service_statement) {
-    std::erase_if(c_.m_services, [&](const Rest_service &x) { return iequals(x.key, service.key); });
+    std::erase_if(c_.m_services, [&](const Rest_service &x) { return iequals(x.name.key, service.key); });
     if (iequals(c_.m_current_service.key, service.key)) {
       c_.m_current_service = {};
       c_.m_current_rest_schema.clear();
@@ -2189,7 +2212,7 @@ bool Catalog_fold::rest(uint32_t n) {
     return true;
   }
   auto drop_object = [&](const char *kind, int path_sym) {
-    const auto place = object_place();
+    const auto place = rest_place();
     if (!place) return false;
     Rest_service *svc = c_.find_service(place->first.key);
     Rest_schema *sch = svc != nullptr ? find_rest_schema(*svc, place->second) : nullptr;

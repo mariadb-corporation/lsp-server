@@ -396,16 +396,14 @@ struct Rest_service_name {
   std::string path;                    // as written, blanks collapsed
   std::string request_path;            // unquoted
   std::vector<std::string> developers; // unquoted, sorted as the shell does
-  // developers,...@request_path: equal (without regard to case) for the
-  // same service; "" for no name.
+  // developers,...@request_path, a developer other than [A-Za-z0-9_]+ in
+  // single quotes: equal (without regard to case) for the same service; ""
+  // for no name.
   std::string key;
 };
 
 struct Rest_service {
-  std::string path;                    // as the statement that made it wrote it
-  std::string request_path;
-  std::vector<std::string> developers;
-  std::string key;                     // Rest_service_name::key
+  Rest_service_name name;              // `path` as the statement that made it wrote it
   Rest_settings settings;
   std::vector<Rest_schema> schemas;
   std::vector<Named_object> content_sets;

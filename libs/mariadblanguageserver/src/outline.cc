@@ -546,7 +546,7 @@ class Json_outline {
     w_.StartArray();
     for (const auto &svc : c.rest_services()) {
       w_.StartObject();
-      str("path", svc.path);
+      str("path", svc.name.path);
       w_.Key("declared");
       w_.Bool(svc.declared);
       origin(svc.origin);
@@ -643,10 +643,7 @@ class Json_outline {
     for (const auto &r : o.results) rest_field_set(r);
     w_.EndArray();
     const Rest_settings &s = o.settings;
-    opt_str("enabled", s.enabled);
-    opt_bool("requires_auth", s.requires_auth);
-    opt_uint("items_per_page", s.items_per_page);
-    opt_str("comment", s.comment);
+    access_settings(s);
     opt_str("media_type", s.media_type);
     boolean("media_type_autodetect", s.media_type_autodetect);
     opt_str("format", s.format);
@@ -662,8 +659,8 @@ class Json_outline {
   // Feature rest_settings.
   void rest_service_settings(const Rest_service &svc) {
     const Rest_settings &s = svc.settings;
-    str("request_path", svc.request_path);
-    strings("developers", svc.developers);
+    str("request_path", svc.name.request_path);
+    strings("developers", svc.name.developers);
     std::optional<bool> enabled;
     if (s.enabled) enabled = *s.enabled == "ENABLED";
     opt_bool("enabled", enabled);
@@ -676,11 +673,15 @@ class Json_outline {
     opt_str("auth_page_content", s.auth_page_content);
     json_settings(s);
   }
-  void rest_schema_settings(const Rest_settings &s) {
+  // The settings schemas and objects share, but options and metadata.
+  void access_settings(const Rest_settings &s) {
     opt_str("enabled", s.enabled);
     opt_bool("requires_auth", s.requires_auth);
     opt_uint("items_per_page", s.items_per_page);
     opt_str("comment", s.comment);
+  }
+  void rest_schema_settings(const Rest_settings &s) {
+    access_settings(s);
     json_settings(s);
   }
 

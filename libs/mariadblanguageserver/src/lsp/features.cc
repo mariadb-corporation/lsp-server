@@ -198,7 +198,7 @@ void document_symbols(Json_writer &w, const Snapshot &s, const Outline &outline)
                });
   }
   for (const auto &svc : c.rest_services()) {
-    out.symbol(svc.path, "REST service", k_module, svc.origin, [&] {
+    out.symbol(svc.name.path, "REST service", k_module, svc.origin, [&] {
       for (const auto &rs : svc.schemas) {
         out.symbol(rs.path, "REST schema " + rs.schema, k_package, rs.origin, [&] {
           for (const auto &o : rs.objects)

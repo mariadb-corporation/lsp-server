@@ -311,8 +311,8 @@ A schema:
 
 `MERGE OPTIONS` in a `CREATE` sets the options as written, as in MariaDB Shell. In an `ALTER`
 it is merged into the options there (JSON merge patch, RFC 7396, as the server's
-`JSON_MERGE_PATCH`) when the file creates the service or schema, or wrote its whole `OPTIONS`
-since; otherwise the file does not know the options it patches, and `options` is the patch,
+`JSON_MERGE_PATCH`; where the options are null, they become the patch as written) when the
+file creates the service or schema, or wrote its whole `OPTIONS` since; otherwise the file does not know the options it patches, and `options` is the patch,
 with `merge_options` true.
 
 ### REST object details

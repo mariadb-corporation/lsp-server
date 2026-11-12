@@ -222,7 +222,7 @@ TEST(Catalog, rest_objects) {
       "DROP REST VIEW /actor;\n");
   const auto &svcs = o.catalog.rest_services();
   ASSERT_EQ(1u, svcs.size());
-  EXPECT_EQ("/svc", svcs[0].path);
+  EXPECT_EQ("/svc", svcs[0].name.path);
   ASSERT_EQ(1u, svcs[0].schemas.size());
   EXPECT_EQ("/sch", svcs[0].schemas[0].path);
   EXPECT_EQ("sakila", svcs[0].schemas[0].schema);
@@ -282,7 +282,7 @@ TEST(Catalog, rest_auth_app_links) {
   EXPECT_TRUE(o.notes.empty());
   const auto &svcs = o.catalog.rest_services();
   ASSERT_EQ(2u, svcs.size());
-  EXPECT_EQ("/memo", svcs[0].path);
+  EXPECT_EQ("/memo", svcs[0].name.path);
   std::vector<std::string> names;
   for (const auto &a : svcs[0].auth_apps) names.push_back(a.name);
   EXPECT_EQ((std::vector<std::string>{"Other", "Third", "MRS"}), names);
@@ -315,7 +315,7 @@ TEST(Catalog, rest_current_service_and_schema) {
       "DROP REST SCHEMA /x;\n");
   const auto &svcs = o.catalog.rest_services();
   ASSERT_EQ(1u, svcs.size());
-  EXPECT_EQ("/notes", svcs[0].path);
+  EXPECT_EQ("/notes", svcs[0].name.path);
   ASSERT_EQ(2u, svcs[0].schemas.size());
   EXPECT_EQ("/sakila", svcs[0].schemas[0].path);
   ASSERT_EQ(1u, svcs[0].schemas[0].objects.size());
@@ -368,7 +368,7 @@ TEST(Catalog, rest_current_schema_survives_rename) {
   EXPECT_TRUE(o.notes.empty());
   const auto &svcs = o.catalog.rest_services();
   ASSERT_EQ(1u, svcs.size());
-  EXPECT_EQ("/b", svcs[0].path);
+  EXPECT_EQ("/b", svcs[0].name.path);
   ASSERT_EQ(1u, svcs[0].schemas.size());
   ASSERT_EQ(1u, svcs[0].schemas[0].objects.size());
   EXPECT_EQ("/v", svcs[0].schemas[0].objects[0].path);
@@ -1130,14 +1130,23 @@ TEST(Catalog, rest_service_settings) {
       "CREATE OR REPLACE REST SERVICE /r MERGE OPTIONS {\"x\": null};\n"
       "CREATE REST VIEW /v ON SERVICE /only SCHEMA /s AS a.t;\n"
       "ALTER REST SERVICE /only MERGE OPTIONS {\"p\": 1};\n"
-      "ALTER REST SERVICE /only MERGE OPTIONS {\"q\": null};\n");
+      "ALTER REST SERVICE /only MERGE OPTIONS {\"q\": null};\n"
+      "CREATE REST SERVICE /n;\n"
+      "ALTER REST SERVICE /n MERGE OPTIONS {\"g\": 1} MERGE OPTIONS {\"h\": null};\n"
+      "CREATE REST SERVICE `a,b`@/k;\n"
+      "CREATE REST SERVICE a,b@/k;\n");
   EXPECT_TRUE(o.notes.empty());
   const auto &svcs = o.catalog.rest_services();
-  ASSERT_EQ(3u, svcs.size());
+  ASSERT_EQ(6u, svcs.size());
+  // Options null: MERGE OPTIONS stores them as they are; the last one counts.
+  EXPECT_EQ("{\"h\":null}", svcs[3].settings.options.value_or(""));
+  EXPECT_FALSE(svcs[3].settings.merge_options);
+  EXPECT_EQ((std::vector<std::string>{"a,b"}), svcs[4].name.developers);
+  EXPECT_EQ((std::vector<std::string>{"a", "b"}), svcs[5].name.developers);
   const Rest_service &a = svcs[0];
-  EXPECT_EQ("mike, `anna`@/svc", a.path);
-  EXPECT_EQ("/svc", a.request_path);
-  EXPECT_EQ((std::vector<std::string>{"anna", "mike"}), a.developers);
+  EXPECT_EQ("mike, `anna`@/svc", a.name.path);
+  EXPECT_EQ("/svc", a.name.request_path);
+  EXPECT_EQ((std::vector<std::string>{"anna", "mike"}), a.name.developers);
   EXPECT_EQ("DISABLED", a.settings.enabled.value_or(""));
   EXPECT_EQ(std::optional<bool>(true), a.settings.published);
   EXPECT_EQ("HTTPS", a.settings.protocol.value_or(""));
