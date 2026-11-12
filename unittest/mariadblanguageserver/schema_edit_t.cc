@@ -1427,7 +1427,7 @@ TEST(Schema_edit, a_relationship_and_its_undo) {
 }  // namespace mdbls
 
 // ---------------------------------------------------------------------------
-// MSM sections: Section 150 runs on every deployment
+// MSM scripts without `at`: new objects follow their neighbours
 
 namespace mdbls {
 namespace {
@@ -1485,7 +1485,7 @@ std::string twice(const std::string &script, const std::string &first, const std
 
 }  // namespace
 
-TEST(Schema_edit, msm_views_are_created_or_replaced) {
+TEST(Schema_edit, msm_views_follow_a_view_created_or_replaced) {
   const auto r = ok(edit(msm_script(k_section_150), {}, request("shop", k_add_view)));
   EXPECT_EQ(msm_script(shop_with_in(k_section_150, "    SELECT `id` FROM `customer`%%\n",
                                     "    SELECT `id` FROM `customer`%%\n"
@@ -1496,7 +1496,15 @@ TEST(Schema_edit, msm_views_are_created_or_replaced) {
             twice(msm_script(k_section_150), k_add_view, R"j({"op": "drop_view", "view": "order_ids"})j"));
 }
 
-TEST(Schema_edit, msm_routines_are_dropped_before_they_are_created) {
+TEST(Schema_edit, a_view_after_a_dropped_and_replaced_view_is_not_dropped) {
+  // CREATE OR REPLACE needs no DROP: the new view takes the OR REPLACE only.
+  const auto r = ok(edit("DROP VIEW IF EXISTS v;\nCREATE OR REPLACE VIEW v AS SELECT 1;\n", {},
+                         request("", R"j({"op": "add_view", "view": {"name": "w", "definition": "SELECT 2"}})j")));
+  EXPECT_EQ("DROP VIEW IF EXISTS v;\nCREATE OR REPLACE VIEW v AS SELECT 1;\nCREATE OR REPLACE VIEW w AS SELECT 2;\n",
+            text(r, ""));
+}
+
+TEST(Schema_edit, msm_routines_follow_a_routine_dropped_first) {
   const auto r = ok(edit(msm_script(k_section_150), {}, request("shop", k_add_routine)));
   // After the routine, with the blank line above its DROP.
   EXPECT_EQ(msm_script(shop_with_in(k_section_150, "END%%\n",
@@ -1517,43 +1525,16 @@ TEST(Schema_edit, msm_routines_are_dropped_before_they_are_created) {
             twice(msm_script(k_section_150), k_add_routine, R"j({"op": "drop_routine", "routine": "count_orders"})j"));
 }
 
-TEST(Schema_edit, first_views_and_routines_go_into_section_150) {
-  // A schema without views: not after the last table (Section 140, which an
-  // upgrade does not run), but at the end of Section 150.
-  const std::string no_view =
-      "\n"
-      "DELIMITER %%\n"
-      "\n"
-      "DROP PROCEDURE IF EXISTS `count_customers`%%\n"
-      "CREATE PROCEDURE `count_customers`()\n"
-      "BEGIN\n"
-      "  SELECT COUNT(*) AS `customers` FROM `customer`;\n"
-      "END%%\n"
-      "\n"
-      "DELIMITER ;\n";
-  const auto r = ok(edit(msm_script(no_view), {}, request("shop", k_add_view)));
-  EXPECT_EQ(msm_script(shop_with_in(no_view, "END%%\n",
-                                    "END%%\n\nCREATE OR REPLACE VIEW `order_ids` AS SELECT `id` FROM `orders`%%\n")),
-            text(r, ""));
-  // An empty Section 150: after its banner; a routine gets its own block.
-  const auto e = ok(edit(msm_script(""), {}, request("shop", std::string(k_add_view) + ", " + k_add_routine)));
-  EXPECT_EQ(msm_script("\n"
-                       "CREATE OR REPLACE VIEW `order_ids` AS SELECT `id` FROM `orders`;\n"
-                       "\n"
-                       "DELIMITER $$\n"
-                       "DROP PROCEDURE IF EXISTS `count_orders`$$\n"
-                       "CREATE PROCEDURE `count_orders`()\n"
-                       "BEGIN\n"
-                       "  SELECT COUNT(*) FROM `orders`;\n"
-                       "END$$\n"
-                       "DELIMITER ;\n"),
-            text(e, ""));
-  const View *v = nullptr;
-  if (const Schema *s = e.outline.catalog.find("shop")) v = s->view("order_ids");
-  EXPECT_NE(nullptr, v);
+TEST(Schema_edit, msm_sections_do_not_place_objects) {
+  // msm gives an MSM script's places (`at`); without one a first view
+  // follows the last table, in Section 140, as in any script.
+  const auto r = ok(edit(msm_script(""), {}, request("shop", k_add_view)));
+  const std::string t = text(r, "");
+  EXPECT_NE(std::string::npos, t.find("PRIMARY KEY (`id`)\n);\n\nCREATE VIEW `order_ids` AS SELECT `id` FROM `orders`;\n")) << t;
+  EXPECT_EQ(msm_script(""), twice(msm_script(""), k_add_view, R"j({"op": "drop_view", "view": "order_ids"})j"));
 }
 
-TEST(Schema_edit, msm_tables_go_into_section_140) {
+TEST(Schema_edit, msm_tables_go_after_the_last_table) {
   const std::string script = msm_script(k_section_150);
   const auto r = ok(edit(script, {}, request("shop", R"j({"op": "add_table", "table": {"name": "product", "columns": [{"name": "id", "type": "INT"}]}})j")));
   const std::string t = text(r, "");
@@ -1938,88 +1919,6 @@ TEST(Schema_edit, add_drop_and_rename_event) {
   EXPECT_EQ("unknown-object", failed(edit(script, {}, request("", R"j({"op": "drop_event", "event": "e9"})j"))).kind);
 }
 
-TEST(Schema_edit, msm_triggers_and_events_are_dropped_before_they_are_created) {
-  const auto r = ok(edit(msm_script(k_section_150), {}, request("shop", std::string(k_add_trigger) + ", " + k_add_event)));
-  // After the last routine, the event after the trigger, each with the
-  // blank line above the DROP it follows.
-  EXPECT_EQ(msm_script(shop_with_in(k_section_150, "END%%\n",
-                                    "END%%\n"
-                                    "\n"
-                                    "DROP TRIGGER IF EXISTS `orders_bi`%%\n"
-                                    "CREATE TRIGGER `orders_bi` BEFORE INSERT ON `orders` FOR EACH ROW\n"
-                                    "BEGIN\n"
-                                    "  SET NEW.note = 'new';\n"
-                                    "END%%\n"
-                                    "\n"
-                                    "DROP EVENT IF EXISTS `purge`%%\n"
-                                    "CREATE EVENT `purge` ON SCHEDULE EVERY 1 DAY DO DELETE FROM `orders`%%\n")),
-            text(r, ""));
-  EXPECT_EQ((Tags{"create trigger orders_bi", "create event purge"}), tags(r));
-  EXPECT_EQ(msm_script(k_section_150),
-            twice(msm_script(k_section_150), k_add_trigger, R"j({"op": "drop_trigger", "trigger": "orders_bi"})j"));
-  EXPECT_EQ(msm_script(k_section_150),
-            twice(msm_script(k_section_150), k_add_event, R"j({"op": "drop_event", "event": "purge"})j"));
-  // An empty Section 150.
-  const auto e = ok(edit(msm_script(""), {}, request("shop", k_add_trigger)));
-  EXPECT_EQ(msm_script("\n"
-                       "DELIMITER $$\n"
-                       "DROP TRIGGER IF EXISTS `orders_bi`$$\n"
-                       "CREATE TRIGGER `orders_bi` BEFORE INSERT ON `orders` FOR EACH ROW\n"
-                       "BEGIN\n"
-                       "  SET NEW.note = 'new';\n"
-                       "END$$\n"
-                       "DELIMITER ;\n"),
-            text(e, ""));
-}
-
-TEST(Schema_edit, an_empty_section_ends_above_the_next_ones_banner) {
-  // Section 150 empty, Section 160's banner right after it: new objects go
-  // after Section 150's banner, not between Section 160's top border and its
-  // marker line (msm would no longer find that section).
-  const std::string border = "-- #############################################################################\n";
-  const std::string head = "-- MSM Section 110: Database Schema Creation\nUSE `shop`;\n\n" + border +
-                           "-- MSM Section 140: Non-idempotent Schema Objects\n" + border +
-                           "\nCREATE TABLE `orders` (`id` INT NOT NULL, `note` TEXT);\n\n" + border +
-                           "-- MSM Section 150: Idempotent Schema Objects\n" + border;
-  const std::string tail = border + "-- MSM Section 160: Schema Diagrams\n" + border + "\n\n";
-  const auto r = ok(edit(head + tail, {}, request("shop", std::string(k_add_view) + ", " + k_add_routine + ", " +
-                                                               k_add_trigger + ", " + k_add_event)));
-  const std::string t = text(r, "");
-  EXPECT_EQ(head, t.substr(0, head.size()));
-  EXPECT_EQ(tail, t.substr(t.size() - tail.size()));
-  const Schema *s = r.outline.catalog.find("shop");
-  ASSERT_NE(nullptr, s);
-  EXPECT_EQ(1u, s->views.size());
-  EXPECT_EQ(1u, s->routines.size());
-  EXPECT_EQ(1u, s->triggers.size());
-  EXPECT_EQ(1u, s->events.size());
-  EXPECT_EQ(head + tail, twice(head + tail, k_add_view, R"j({"op": "drop_view", "view": "order_ids"})j"));
-}
-
-TEST(Schema_edit, msm_triggers_go_before_the_events) {
-  // Section 150 with an event only: the trigger goes before it, after the
-  // banner, not at the end of the section.
-  const std::string only_event =
-      "\n"
-      "DROP EVENT IF EXISTS `purge`;\n"
-      "CREATE EVENT `purge` ON SCHEDULE EVERY 1 DAY DO DELETE FROM `orders`;\n";
-  const auto r = ok(edit(msm_script(only_event), {}, request("shop", k_add_trigger)));
-  EXPECT_EQ(msm_script("\n"
-                       "DELIMITER $$\n"
-                       "DROP TRIGGER IF EXISTS `orders_bi`$$\n"
-                       "CREATE TRIGGER `orders_bi` BEFORE INSERT ON `orders` FOR EACH ROW\n"
-                       "BEGIN\n"
-                       "  SET NEW.note = 'new';\n"
-                       "END$$\n"
-                       "DELIMITER ;\n"
-                       "\n"
-                       "DROP EVENT IF EXISTS `purge`;\n"
-                       "CREATE EVENT `purge` ON SCHEDULE EVERY 1 DAY DO DELETE FROM `orders`;\n"),
-            text(r, ""));
-  EXPECT_EQ(msm_script(only_event),
-            twice(msm_script(only_event), k_add_trigger, R"j({"op": "drop_trigger", "trigger": "orders_bi"})j"));
-}
-
 TEST(Schema_edit, rename_table_keeps_its_triggers) {
   const std::string script =
       "CREATE TABLE t (a INT);\n"
@@ -2087,15 +1986,6 @@ TEST(Schema_edit, add_sequence) {
   EXPECT_EQ("name-taken", failed(edit(k_sequences, {}, request("shop", rename_table("u", "S")))).kind);
 }
 
-TEST(Schema_edit, msm_sequences_go_before_the_first_table) {
-  const auto r = ok(edit(msm_script(k_section_150), {}, request("shop", k_add_sequence)));
-  EXPECT_EQ(msm_script(k_section_150).replace(msm_script(k_section_150).find("CREATE TABLE `customer`"), 0,
-                                              "CREATE SEQUENCE `order_ids`;\n\n"),
-            text(r, ""));
-  EXPECT_EQ(msm_script(k_section_150),
-            twice(msm_script(k_section_150), k_add_sequence, R"j({"op": "drop_sequence", "sequence": "order_ids"})j"));
-}
-
 TEST(Schema_edit, drop_sequence) {
   // A column default takes values from it: the CREATE TABLE would fail.
   EXPECT_EQ("referenced", failed(edit(k_sequences, {}, request("shop", R"j({"op": "drop_sequence", "sequence": "s"})j"))).kind);
@@ -2123,6 +2013,27 @@ TEST(Schema_edit, a_sequence_goes_above_the_first_tables_banner) {
   EXPECT_EQ("CREATE SEQUENCE `q`;\n\n" + script, got);
   EXPECT_EQ(script, twice(script, R"j({"op": "add_sequence", "sequence": {"name": "q"}})j",
                           R"j({"op": "drop_sequence", "sequence": "q"})j"));
+}
+
+TEST(Schema_edit, a_sequence_goes_above_the_first_table_with_nothing_of_its_kind) {
+  // No sequence to follow: the end of what is above the first table, or
+  // the script's start, or below its opening comments.
+  const char *const add = R"j({"op": "add_sequence", "sequence": {"name": "q"}})j";
+  const char *const drop = R"j({"op": "drop_sequence", "sequence": "q"})j";
+  auto added = [&](const std::string &script) {
+    EXPECT_EQ(script, twice(script, add, drop)) << script;
+    return text(ok(edit(script, {}, request("", add))), "");
+  };
+  EXPECT_EQ("CREATE SEQUENCE `q`;\n\nCREATE TABLE t (a INT);\n", added("CREATE TABLE t (a INT);\n"));
+  EXPECT_EQ("-- Script header\n\nCREATE SEQUENCE `q`;\n\nCREATE TABLE t (a INT);\n",
+            added("-- Script header\n\nCREATE TABLE t (a INT);\n"));
+  // Above the table's DROP ... IF EXISTS, after the statement above it.
+  EXPECT_EQ("SET NAMES utf8mb4;\nCREATE SEQUENCE `q`;\n\nDROP TABLE IF EXISTS t;\nCREATE TABLE t (a INT);\n",
+            added("SET NAMES utf8mb4;\n\nDROP TABLE IF EXISTS t;\nCREATE TABLE t (a INT);\n"));
+  // The statement above ends a DELIMITER block: in it, with its delimiter.
+  EXPECT_EQ("DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; END$$\nCREATE SEQUENCE `q`$$\nDELIMITER ;\n\n"
+            "CREATE TABLE t (a INT);\n",
+            added("DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; END$$\nDELIMITER ;\n\nCREATE TABLE t (a INT);\n"));
 }
 
 TEST(Schema_edit, a_sequence_set_as_a_default_by_alter_table) {
@@ -2857,12 +2768,12 @@ TEST(Schema_edit, placement_forms) {
 
 TEST(Schema_edit, placement_in_an_msm_script) {
   const std::string script = msm_script(k_section_150);
-  // Without `at`, Section 150's rules: after the view, CREATE OR REPLACE.
+  // Without `at`: after the view, as it is written, CREATE OR REPLACE.
   const auto d = ok(edit_main(script, {}, request("shop", add_view_at("v", R"("form": "create")"))));
   EXPECT_NE(std::string::npos, text(d, "").find("`customer`%%\n\nCREATE VIEW `v` AS SELECT 1%%\n")) << text(d, "");
   const auto f = ok(edit(script, {}, request("shop", R"({"op": "add_view", "view": {"name": "v", "definition": "SELECT 1"}})")));
   EXPECT_NE(std::string::npos, text(f, "").find("CREATE OR REPLACE VIEW `v` AS SELECT 1%%")) << text(f, "");
-  // With `at` and no form: no section rule, a plain CREATE; at the start of
+  // With `at` and no form: a plain CREATE; at the start of
   // Section 170, in no DELIMITER block.
   const size_t line_170 = static_cast<size_t>(std::count(script.begin(), script.begin() + static_cast<std::ptrdiff_t>(script.find("-- MSM Section 170")), '\n')) - 1;
   const auto a = ok(edit_main(script, {}, request("shop", add_view_at("v", at("", static_cast<int>(line_170))))));

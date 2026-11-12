@@ -462,7 +462,8 @@ ADD_EVENT = {"op": "add_event", "event": {"name": "purge", "schedule": "EVERY 1 
 
 class Edit_msm_sections(unittest.TestCase):
     """Section 150 of an MSM script runs on every deployment: what the edits
-    write there must be safe to run again."""
+    write there must be safe to run again.  msm gives the place and form
+    (`at`, `form`); without them a new object follows its neighbour."""
 
     def setUp(self):
         dev = pathlib.Path(tempfile.mkdtemp(prefix="mdbls-msm-"))
@@ -478,6 +479,12 @@ class Edit_msm_sections(unittest.TestCase):
         check = self.p.run("check", "--source-dir", str(self.p.dev), "-")
         self.assertEqual(check.returncode, 0, check.stdout.decode())
         return result
+
+    def line_of(self, text, section):
+        """The 0-based line of the script that starts with `text`, the first
+        in MSM Section `section`."""
+        start = self.p.script.index("-- MSM Section %d" % section)
+        return self.p.script[:self.p.script.index("\n" + text, start) + 1].count("\n")
 
     def section(self, number):
         start = self.p.script.index("-- MSM Section %d" % number)
@@ -501,7 +508,8 @@ class Edit_msm_sections(unittest.TestCase):
         self.assertEqual(self.p.script, MSM_SCRIPT)
 
     def test_a_sequence_goes_before_the_first_table(self):
-        result = self.apply([{"op": "add_sequence", "sequence": {"name": "order_ids"}}])
+        result = self.apply([{"op": "add_sequence", "sequence": {"name": "order_ids"},
+                              "at": {"file": "", "line": self.line_of("CREATE TABLE `customer`", 140)}}])
         section = self.section(140)
         self.assertLess(section.index("CREATE SEQUENCE `order_ids`;"), section.index("CREATE TABLE"))
         self.assertEqual([(m["action"], m["object"], m["name"]) for m in result["migration"]],
@@ -513,7 +521,7 @@ class Edit_msm_sections(unittest.TestCase):
         self.assertEqual(self.p.script, MSM_SCRIPT)
 
     def test_a_trigger_and_an_event_are_dropped_before_their_create(self):
-        result = self.apply([ADD_TRIGGER, ADD_EVENT])
+        result = self.apply([ADD_TRIGGER | {"form": "drop_first"}, ADD_EVENT | {"form": "drop_first"}])
         section = self.section(150)
         self.assertIn("DROP TRIGGER IF EXISTS `orders_bi`%%\nCREATE TRIGGER `orders_bi` BEFORE INSERT ON `orders`",
                       section)
@@ -526,8 +534,9 @@ class Edit_msm_sections(unittest.TestCase):
                     {"op": "drop_trigger", "trigger": "orders_bi", "table": "orders"}])
         self.assertEqual(self.p.script, MSM_SCRIPT)
 
-    def test_a_first_view_goes_into_section_150(self):
-        self.apply([{"op": "drop_view", "view": "customer_ids"}, ADD_VIEW])
+    def test_a_first_view_goes_where_msm_puts_it(self):
+        self.apply([{"op": "drop_view", "view": "customer_ids"}])
+        self.apply([ADD_VIEW | {"at": {"file": "", "line": self.line_of("DELIMITER ;", 150)}, "form": "or_replace"}])
         self.assertIn("CREATE OR REPLACE VIEW `order_ids`", self.section(150))
         self.assertNotIn("order_ids", self.section(140))
 
@@ -742,16 +751,35 @@ class Edit_mrs_project(unittest.TestCase):
         self.assertEqual(self.p.script, script)
         self.assertEqual({f: f.read_bytes() for f in self.p.dev.rglob("*.sql")}, files)
 
-    def test_new_views_and_routines_in_section_150(self):
-        code, result = self.p.edit([ADD_VIEW | {"view": {"name": "view1", "definition": "SELECT 1"}},
-                                    ADD_ROUTINE | {"routine": dict(ADD_ROUTINE["routine"], name="routine1")}],
+    def after_last_in(self, outline, kind, file_name):
+        """`at` after the last object of `kind` in breakout file `file_name`,
+        as msm sends it, and that file's path in the development folder."""
+        schema = next(s for s in outline["schemas"] if s["name"] == "mariadb_rest_service")
+        includes = outline["includes"]
+        last = [o for o in schema[kind] if "source" in o and includes[o["source"]]["file"].endswith(file_name)][-1]
+        return {"file": includes[last["source"]]["file"], "after": last["range"]["end"]}, \
+            next(self.p.dev.rglob(file_name))
+
+    def test_new_views_and_routines_where_msm_puts_them(self):
+        before = self.p.outline()
+        view_at, views = self.after_last_in(before, "views", "150-10_views.sql")
+        routine_at, routines = self.after_last_in(before, "routines", "150-20_procedures_functions.sql")
+        script = self.p.script
+        code, result = self.p.edit([ADD_VIEW | {"view": {"name": "view1", "definition": "SELECT 1"},
+                                                "at": view_at, "form": "or_replace"},
+                                    ADD_ROUTINE | {"routine": dict(ADD_ROUTINE["routine"], name="routine1"),
+                                                   "at": routine_at, "form": "drop_first"}],
                                    "mariadb_rest_service")
         self.assertEqual(code, 0, result)
         self.p.apply(result)
-        views = (self.p.dev / "sections" / "150-10_views.sql").read_text()
-        self.assertRegex(views, r"CREATE OR REPLACE\s.*VIEW `view1`")
-        # After restore_roles, the last routine, which the script drops first.
-        self.assertIn("DROP PROCEDURE IF EXISTS `routine1`%%\nCREATE PROCEDURE `routine1`()", self.p.script)
+        # Each in its breakout file, the script unchanged.
+        self.assertEqual(sorted(f["file"] for f in result["files"]),
+                         sorted(str(f.relative_to(self.p.dev)) for f in (views, routines)))
+        self.assertEqual(self.p.script, script)
+        self.assertIn("CREATE OR REPLACE VIEW `view1` AS SELECT 1;", views.read_text())
+        self.assertRegex(routines.read_text(),
+                         r"DELIMITER (\S+)\n(?:.*\n)*?DROP PROCEDURE IF EXISTS `routine1`\1\nCREATE PROCEDURE `routine1`\(\)")
+        self.assertEqual(self.p.outline(), result["outline"])
 
     def test_add_and_drop(self):
         before = self.p.outline()
