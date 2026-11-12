@@ -84,6 +84,10 @@ constexpr Op_name k_ops[] = {
     {Edit_op::drop_sequence, "drop_sequence"},
     {Edit_op::rename_sequence, "rename_sequence"},
     {Edit_op::rename_schema, "rename_schema"},
+    {Edit_op::replace_view, "replace_view"},
+    {Edit_op::replace_routine, "replace_routine"},
+    {Edit_op::replace_trigger, "replace_trigger"},
+    {Edit_op::replace_event, "replace_event"},
 };
 
 // The longest name the server takes for a table, column or routine.
@@ -908,6 +912,14 @@ std::set<std::string> event_set(std::string_view events) {
   return out;
 }
 
+// Whether a trigger on events `outer` fires on every one of `inner`: what
+// MariaDB needs of the trigger another follows or precedes (error 4031).
+bool events_cover(std::string_view outer, std::string_view inner) {
+  const auto o = event_set(outer);
+  const auto i = event_set(inner);
+  return std::includes(o.begin(), o.end(), i.begin(), i.end());
+}
+
 std::optional<Trigger> read_trigger(Json_reader &r, const Json &v) {
   const std::string what = "\"trigger\"";
   if (!r.object(v, what, {"name", "timing", "events", "table", "body", "order", "definer", "update_columns"})) {
@@ -1133,6 +1145,7 @@ std::variant<Edit_request, Edit_error> parse_edit_request(std::string_view json)
         }
         break;
       case Edit_op::add_view:
+      case Edit_op::replace_view:
         members({"op", "view"});
         if (const Json *v = object("view")) se.new_view = read_view(r, *v);
         if (se.new_view) names_to_check.push_back(se.new_view->name);
@@ -1142,6 +1155,7 @@ std::variant<Edit_request, Edit_error> parse_edit_request(std::string_view json)
         name("view", &se.view);
         break;
       case Edit_op::add_routine:
+      case Edit_op::replace_routine:
         members({"op", "routine"});
         if (const Json *v = object("routine")) se.new_routine = read_routine(r, *v);
         if (se.new_routine) names_to_check.push_back(se.new_routine->name);
@@ -1184,6 +1198,7 @@ std::variant<Edit_request, Edit_error> parse_edit_request(std::string_view json)
         r.strings(e, "columns", &se.columns, true, what);
         break;
       case Edit_op::add_trigger:
+      case Edit_op::replace_trigger:
         members({"op", "trigger"});
         if (const Json *t = object("trigger")) se.new_trigger = read_trigger(r, *t);
         if (se.new_trigger) names_to_check.push_back(se.new_trigger->name);
@@ -1199,6 +1214,7 @@ std::variant<Edit_request, Edit_error> parse_edit_request(std::string_view json)
         name("new_name", &se.new_name);
         break;
       case Edit_op::add_event:
+      case Edit_op::replace_event:
         members({"op", "event"});
         if (const Json *v = object("event")) se.new_event = read_event(r, *v);
         if (se.new_event) names_to_check.push_back(se.new_event->name);
@@ -1731,6 +1747,10 @@ class Editor {
       case Edit_op::drop_sequence: err = drop_sequence(i, e, changes); break;
       case Edit_op::rename_sequence: err = rename_sequence(i, e, changes); break;
       case Edit_op::rename_schema: err = rename_schema(i, e, changes); break;
+      case Edit_op::replace_view: err = replace_view(i, e, changes); break;
+      case Edit_op::replace_routine: err = replace_routine(i, e, changes); break;
+      case Edit_op::replace_trigger: err = replace_trigger(i, e, changes); break;
+      case Edit_op::replace_event: err = replace_event(i, e, changes); break;
       default:
         return error(i, "unsupported", std::string("this binary does not do ") + to_string(e.op) + " yet");
     }
@@ -2338,6 +2358,21 @@ class Editor {
     return s;
   }
 
+  // The delimiter of a new DELIMITER block: the one the script uses
+  // elsewhere, else $$.
+  std::string block_delimiter() const {
+    for (const auto &x : index().delimiters()) {
+      if (!x.empty() && x != ";") return x;
+    }
+    return "$$";
+  }
+  // `statements` (each ending with `d`) in a DELIMITER `d` block that
+  // gives back delimiter `restore`.
+  static std::string in_block(const std::string &d, const std::string &statements, const edit_text::Style &st,
+                              const std::string &restore) {
+    return st.kw("DELIMITER") + " " + d + st.eol + statements + st.eol + st.kw("DELIMITER") + " " + restore;
+  }
+
   // Inserts statement `sql` after searched statement `k`, or at the end of
   // the script when there is none; `wrap`: in a DELIMITER block when the
   // delimiter there is ";".  The file and current offset it went to.
@@ -2354,14 +2389,8 @@ class Editor {
                                                        const std::string &before = "") {
     auto statements = [&](const std::string &d) { return (before.empty() ? "" : before + d + st.eol) + sql + d; };
     auto block = [&](const std::string &restore) {
-      std::string d = "$$";
-      for (const auto &x : index().delimiters()) {
-        if (!x.empty() && x != ";") {
-          d = x;
-          break;
-        }
-      }
-      return st.kw("DELIMITER") + " " + d + st.eol + statements(d) + st.eol + st.kw("DELIMITER") + " " + restore;
+      const std::string d = block_delimiter();
+      return in_block(d, statements(d), st, restore);
     };
     if (spot) {
       const Spot &s = *spot;
@@ -2804,10 +2833,18 @@ class Editor {
     const auto at = insert_at(changes, spot_of(place, st), laid, st, laid.find(';') != std::string::npos, drop);
     if (!at) return error(i, "self-check", "no place for the CREATE of " + what + " was found");
     migrate(i, laid, Migration_action::create, object, name);
-    const char *note_kind = kind == Kind::trigger ? "trigger-created" : kind == Kind::event ? "event-created" : "routine-created";
-    note_at(i, note_kind, at->first, m_s.files()[at->first].log.to_original(at->second),
-            "the migration creates the " + what + ", which cannot run inside a stored procedure: msm or a person must place it");
+    note_created(i, object, *at, what, false);
     return std::nullopt;
+  }
+
+  // The note on the migration's CREATE of a routine, trigger or event
+  // (`object`), which cannot run inside a stored procedure; at the file and
+  // current offset `at`.  `anew`: a replace's.
+  void note_created(size_t i, Obj object, std::pair<size_t, uint32_t> at, const std::string &what, bool anew) {
+    const char *kind = object == Obj::trigger ? "trigger-created" : object == Obj::event ? "event-created" : "routine-created";
+    note_at(i, kind, at.first, m_s.files()[at.first].log.to_original(at.second),
+            "the migration creates the " + what + (anew ? " anew" : "") +
+                ", which cannot run inside a stored procedure: msm or a person must place it");
   }
 
   edit_text::Style style_of(const Anchor &a) const {
@@ -3171,20 +3208,30 @@ class Editor {
 
   // Removes the statements `gone` (with the word their banner names), then
   // notes what still refers to the object and migrates with its DROP.
-  std::optional<Edit_error> drop_statements(size_t i, const std::vector<std::pair<size_t, std::string>> &gone,
-                                            const std::optional<Object_id> &id, const std::string &name,
-                                            const std::string &what, std::string_view rest_kind, Migration_object object,
-                                            Changes &changes) {
+  // Removes searched statements `gone` (each with its banner word, as
+  // remove_statement() takes it) and the DELIMITER blocks they leave empty;
+  // the searched ranges removed, nullopt when one cannot be.
+  std::optional<std::vector<Range>> remove_statements(Changes &changes,
+                                                      const std::vector<std::pair<size_t, std::string>> &gone) {
     std::vector<Range> removed;
     std::set<size_t> ks;
     for (const auto &[k, banner] : gone) {
       const auto r = remove_statement(changes, k, banner);
-      if (!r) return error(i, "self-check", "a statement on `" + name + "` cannot be removed");
+      if (!r) return std::nullopt;
       removed.push_back(*r);
       ks.insert(k);
     }
     remove_emptied_delimiter_blocks(changes, ks);
-    still_referenced(i, id, removed, what);
+    return removed;
+  }
+
+  std::optional<Edit_error> drop_statements(size_t i, const std::vector<std::pair<size_t, std::string>> &gone,
+                                            const std::optional<Object_id> &id, const std::string &name,
+                                            const std::string &what, std::string_view rest_kind, Migration_object object,
+                                            Changes &changes) {
+    const auto removed = remove_statements(changes, gone);
+    if (!removed) return error(i, "self-check", "a statement on `" + name + "` cannot be removed");
+    still_referenced(i, id, *removed, what);
     rest_notes(i, name, rest_kind, what);
     m_old_name = name;
     migrate_drop(i, object, name);
@@ -3675,10 +3722,13 @@ class Editor {
     return std::nullopt;
   }
 
-  std::optional<Edit_error> add_trigger(size_t i, const Schema_edit &e, Changes &changes) {
-    Trigger t = *e.new_trigger;
+  // Checks trigger `t` an add or a replace writes, and spells its table,
+  // update columns and order trigger as the script does; its table in
+  // `table`.  `self`: the trigger it replaces, whose name it keeps and
+  // which it cannot follow or precede.
+  std::optional<Edit_error> check_trigger(size_t i, Trigger &t, const Trigger *self, const Table *&table) {
     const auto l = lookup();
-    const Table *table = l.table(t.table).second;
+    table = l.table(t.table).second;
     if (table == nullptr) {
       if (l.view(t.table).second != nullptr) {
         return error(i, "unknown-object", "`" + t.table + "` is a view: a trigger goes on a table");
@@ -3691,25 +3741,29 @@ class Editor {
       if (col == nullptr) return error(i, "unknown-object", "table `" + table->name + "` has no column `" + c + "`");
       c = col->name;
     }
-    if (const Trigger *x = l.trigger(t.name).second) {
+    if (const Trigger *x = l.trigger(t.name).second; x != nullptr && x != self) {
       return error(i, "name-taken", "a trigger `" + t.name + "` exists on table `" + x->table + "`");
     }
     if (!t.order_kind.empty()) {
       // On the same table, with the same timing, and firing on every event
       // of the new one: else MariaDB refuses it (error 4031).
       const Trigger *o = l.trigger(t.order_trigger).second;
-      auto covers = [&] {
-        const auto theirs = event_set(o->events);
-        const auto ours = event_set(t.events);
-        return std::includes(theirs.begin(), theirs.end(), ours.begin(), ours.end());
-      };
-      if (o == nullptr || !iequals(o->table, table->name) || !iequals(o->timing, t.timing) || !covers()) {
+      if (o == self) o = nullptr;
+      if (o == nullptr || !iequals(o->table, table->name) || !iequals(o->timing, t.timing) ||
+          !events_cover(o->events, t.events)) {
         return error(i, "unknown-object",
                      "there is no trigger `" + t.order_trigger + "` " + t.timing + " " + t.events + " on table `" +
                          table->name + "` to " + lower(t.order_kind));
       }
       t.order_trigger = o->name;
     }
+    return std::nullopt;
+  }
+
+  std::optional<Edit_error> add_trigger(size_t i, const Schema_edit &e, Changes &changes) {
+    Trigger t = *e.new_trigger;
+    const Table *table = nullptr;
+    if (auto err = check_trigger(i, t, nullptr, table)) return err;
     // Before the events, after its table.
     const Place place = place_for(150, {Kind::trigger, Kind::routine, Kind::view, Kind::table}, {Kind::event}, table);
     return insert_create(
@@ -3800,6 +3854,200 @@ class Editor {
     return std::nullopt;
   }
 
+
+  // ---------------------------------------------------------------------
+  // Replacing a view, routine, trigger or event
+
+  // Rewrites the last CREATE of `object` `name` (a view, routine, trigger
+  // or event) in schema `schema` where it stands, in its form: `make`
+  // writes it, given the style and whether it is OR REPLACE, so a CREATE
+  // after its DROP ... IF EXISTS stays one.  A routine's, trigger's or
+  // event's body may hold ";": where ";" is the delimiter it goes into a
+  // new DELIMITER block.  The ALTERs of the object after that CREATE go,
+  // with a note each: the new definition replaces what they change.
+  // Earlier CREATEs stay: the last one decides.  Migrates it as CREATE OR
+  // REPLACE, the object being on a deployed server.  `name` is the
+  // script's spelling, which `make` writes too: a replace renames nothing,
+  // also not in case (view names may tell case apart).  An IF NOT EXISTS
+  // the CREATE has stays.
+  template <typename Make>
+  std::optional<Edit_error> replace_create(size_t i, Obj object, const std::string &name, const std::string &schema,
+                                           Make make, Changes &changes) {
+    const std::string kw = upper(to_string(object));  // VIEW, PROCEDURE, ...
+    const bool compound = object != Obj::view;
+    const std::string what = std::string(to_string(object)) + " `" + name + "`";
+    std::optional<size_t> create;
+    uint32_t name_at = 0;
+    bool if_not_exists = false;
+    std::vector<std::pair<size_t, std::string>> alters;  // with the banner word
+    // A DROP of it after the last CREATE, or an ALTER EVENT ... RENAME TO:
+    // the object the script ends with is not that CREATE's (a RENAME TABLE
+    // or RENAME TO gave it the name).
+    bool not_its = false;
+    for (const size_t k : statements_about(kw, name, schema)) {
+      // statements_about() chose it by this subject.
+      const std::string_view sql = index().text_of(text(), statement(k));
+      const auto subject = subject_of(sql);
+      if (subject->verb == "CREATE") {
+        create = k;
+        name_at = range_of(subject->name_words[0]).begin;
+        alters.clear();
+        not_its = false;
+        // IF NOT EXISTS, before its name.
+        if_not_exists = false;
+        const auto w = words_of(sql, 24);
+        for (size_t j = 0; j + 2 < w.size() && range_of(w[j].text).begin < name_at; ++j) {
+          if (!w[j].quoted && iequals(w[j].text, "IF") && iequals(w[j + 1].text, "NOT") && iequals(w[j + 2].text, "EXISTS")) {
+            if_not_exists = true;
+          }
+        }
+      } else if (subject->verb == "ALTER" && create) {
+        alters.push_back({k, name});
+        if (object == Obj::event) {
+          const auto w = words_of(sql, 4096);
+          // Before its body, which may rename a table.
+          for (size_t j = 0; j + 1 < w.size() && !(!w[j].quoted && iequals(w[j].text, "DO")); ++j) {
+            if (!w[j].quoted && iequals(w[j].text, "RENAME") && !w[j + 1].quoted && iequals(w[j + 1].text, "TO")) {
+              not_its = true;
+            }
+          }
+        }
+      } else if (subject->verb == "DROP" && create) {
+        not_its = true;
+      }
+    }
+    if (!create || not_its) {
+      if (object == Obj::event) {
+        return error(i, "unsupported", "the CREATE EVENT of `" + name +
+                                           "` names it otherwise (ALTER EVENT ... RENAME TO renamed it): rename_event it first");
+      }
+      return error(i, "unsupported", "the CREATE " + kw + " of `" + name + "` names it otherwise (a RENAME gave it its name)");
+    }
+    const Form form = form_at(*create, name);
+    const edit_text::Style st = style_at(*create, name_at);
+    const std::string sql = make(st, form.or_replace);
+    if (const auto p = parse_problem(sql)) return error(i, "bad-request", what + " does not parse (" + *p + ")");
+    const std::string laid = laid_out(sql, st, compound);
+    // Its text before its delimiter.
+    const Statement &s = statement(*create);
+    uint32_t end = s.body_end;
+    std::string with = laid;
+    if (if_not_exists) {
+      // Right after the object's keyword (CREATE ... PROCEDURE IF NOT EXISTS p).
+      const std::string kw_spelled = " " + st.kw(kw) + " ";
+      const size_t at = with.find(kw_spelled);
+      if (at == std::string::npos) return error(i, "self-check", "the CREATE of " + what + " has no " + kw);
+      with.insert(at + kw_spelled.size() - 1, " " + st.kw("IF NOT EXISTS"));
+    }
+    const std::string &delimiter = index().delimiters()[s.active_delimiter];
+    if (compound && (delimiter.empty() || delimiter == ";") && laid.find(';') != std::string::npos) {
+      // In a new DELIMITER block, with the ";" that ended it (none at the
+      // end of the text).
+      if (s.end != s.body_end && text()[s.end - 1] != ';') {
+        return error(i, "self-check", "the end of the CREATE of " + what + " is not found");
+      }
+      end = s.end;
+      const std::string d = block_delimiter();
+      with = in_block(d, laid + d, st, ";");
+      // DELIMITER takes its line: a statement before or after the CREATE on
+      // its line goes on a line of its own.
+      const std::string_view t = text();
+      if (!is_blank(t.substr(line_begin(t, s.begin), s.begin - line_begin(t, s.begin)))) with = st.eol + with;
+      uint32_t q = end;
+      while (q < t.size() && (t[q] == ' ' || t[q] == '\t')) ++q;
+      if (q < t.size() && t[q] != '\n' && t[q] != '\r' && t.substr(q, 2) != "--" && t[q] != '#') with += st.eol;
+    }
+    if (!change(changes, s.begin, end, with)) {
+      // Its text is not one file's: a SOURCE in its body, or a slice's end.
+      return error(i, "edit-outside-slice",
+                   "the CREATE of " + what + " spans more than one file's text (a SOURCE in it?) and cannot be rewritten");
+    }
+    if (!remove_statements(changes, alters)) return error(i, "self-check", "an ALTER of " + what + " cannot be removed");
+    for (const auto &[k, banner] : alters) {
+      if (const auto f = file_at(statement(k).begin)) {
+        note_at(i, "alter-removed", f->first, m_s.files()[f->first].log.to_original(f->second),
+                "an ALTER " + kw + " of " + what + " was removed: the new definition replaces what it changed");
+      }
+    }
+    // OR REPLACE right after CREATE (before a DEFINER), not formatted again.
+    const size_t first = laid.find_first_of(" \t\r\n");
+    migrate(i, form.or_replace ? laid : laid.substr(0, first) + " " + st.kw("OR REPLACE") + laid.substr(first),
+            Act::create, object, name);
+    if (compound) {
+      if (const auto f = file_at(s.begin)) note_created(i, object, *f, what, true);
+    }
+    return std::nullopt;
+  }
+
+  std::optional<Edit_error> replace_view(size_t i, const Schema_edit &e, Changes &changes) {
+    View v = *e.new_view;
+    const auto [schema, view] = lookup().view(v.name);
+    if (view == nullptr) return error(i, "unknown-object", "there is no view `" + v.name + "`");
+    v.name = view->name;
+    return replace_create(
+        i, Obj::view, view->name, schema->name,
+        [&](const edit_text::Style &st, bool or_replace) { return edit_text::create_view_sql(v, st, or_replace); },
+        changes);
+  }
+
+  std::optional<Edit_error> replace_routine(size_t i, const Schema_edit &e, Changes &changes) {
+    Routine r = *e.new_routine;
+    const auto found = lookup().routines(r.name, r.kind);
+    if (found.empty()) return error(i, "unknown-object", "there is no " + r.kind + " `" + r.name + "`");
+    const auto [schema, routine] = found[0];
+    r.name = routine->name;
+    return replace_create(
+        i, routine_object(r.kind), routine->name, schema->name,
+        [&](const edit_text::Style &st, bool or_replace) { return edit_text::create_routine_sql(r, st, or_replace); },
+        changes);
+  }
+
+  std::optional<Edit_error> replace_trigger(size_t i, const Schema_edit &e, Changes &changes) {
+    Trigger t = *e.new_trigger;
+    const auto [schema, old] = lookup().trigger(t.name);
+    if (old == nullptr) return error(i, "unknown-object", "there is no trigger `" + t.name + "`");
+    const Table *table = nullptr;
+    if (auto err = check_trigger(i, t, old, table)) return err;
+    // A trigger that follows or precedes it needs it on its table, with its
+    // timing, firing on each of its events: else that CREATE fails (4031).
+    for (const auto &x : schema->triggers) {
+      if (!iequals(x.order_trigger, old->name) || iequals(x.name, old->name)) continue;
+      if (!iequals(x.table, t.table) || !iequals(x.timing, t.timing) || !events_cover(t.events, x.events)) {
+        return error(i, "referenced", "trigger `" + x.name + "` " + lower(x.order_kind) + " `" + old->name +
+                                          "`, which must stay " + x.timing + " " + x.events + " on `" + x.table + "`");
+      }
+    }
+    // Its CREATE stays where it is: after its table's.
+    const auto kt = statement_of(table->origin);
+    const auto kc = statement_of(old->origin);
+    if (kt && kc && *kt > *kc) {
+      return error(i, "unknown-object", "table `" + table->name + "` is created after trigger `" + old->name + "`");
+    }
+    // And after the trigger it follows or precedes.
+    if (!t.order_kind.empty()) {
+      const Trigger *o = lookup().trigger(t.order_trigger).second;
+      const auto ko = o != nullptr ? statement_of(o->origin) : std::nullopt;
+      if (ko && kc && *ko > *kc) {
+        return error(i, "unknown-object", "trigger `" + o->name + "` is created after trigger `" + old->name + "`");
+      }
+    }
+    t.name = old->name;
+    return replace_create(
+        i, Obj::trigger, old->name, schema->name,
+        [&](const edit_text::Style &st, bool or_replace) { return edit_text::create_trigger_sql(t, st, or_replace); },
+        changes);
+  }
+
+  std::optional<Edit_error> replace_event(size_t i, const Schema_edit &e, Changes &changes) {
+    Event ev = *e.new_event;
+    const auto [schema, event] = lookup().event(ev.name);
+    if (event == nullptr) return error(i, "unknown-object", "there is no event `" + ev.name + "`");
+    ev.name = event->name;
+    return replace_create(
+        i, Obj::event, event->name, schema->name,
+        [&](const edit_text::Style &st, bool or_replace) { return edit_text::create_event_sql(ev, st, or_replace); },
+        changes);
+  }
 
   // ---------------------------------------------------------------------
   // Sequences
@@ -4353,6 +4601,13 @@ class Editor {
     const std::string &old_name = m_old_name;
     const bool case_only = iequals(old_name, e.new_name);
     auto fail = [&](const std::string &what) { return error(i, "self-check", what); };
+    // An add writes the name as the request spells it; a replace keeps the
+    // script's.
+    const bool replace = e.op == Edit_op::replace_view || e.op == Edit_op::replace_routine ||
+                         e.op == Edit_op::replace_trigger || e.op == Edit_op::replace_event;
+    auto renamed = [&](const std::string &have, const std::string &want) {
+      return replace ? !iequals(have, want) : have != want;
+    };
     // A key op's table has one item more (`added`, one that `is_new`
     // accepts) or one fewer than before.
     auto check_keys = [&](const Table &t, const auto &items, const std::string &noun,
@@ -4543,17 +4798,19 @@ class Editor {
         if (primaries != 1 || right != 1) return fail("the primary key of `" + t->name + "` is not on the columns given");
         break;
       }
-      case Edit_op::add_view: {
+      case Edit_op::add_view:
+      case Edit_op::replace_view: {
         const View *v = l.view(e.new_view->name).second;
-        if (v == nullptr || v->name != e.new_view->name) return fail("the edited script has no view `" + e.new_view->name + "`");
+        if (v == nullptr || renamed(v->name, e.new_view->name)) return fail("the edited script has no view `" + e.new_view->name + "`");
         break;
       }
       case Edit_op::drop_view:
         if (l.view(old_name).second != nullptr) return fail("the edited script still has view `" + old_name + "`");
         break;
-      case Edit_op::add_routine: {
+      case Edit_op::add_routine:
+      case Edit_op::replace_routine: {
         const auto now = l.routines(e.new_routine->name, e.new_routine->kind);
-        if (now.size() != 1 || now[0].second->name != e.new_routine->name) {
+        if (now.size() != 1 || renamed(now[0].second->name, e.new_routine->name)) {
           return fail("the edited script has no " + e.new_routine->kind + " `" + e.new_routine->name + "`");
         }
         break;
@@ -4563,10 +4820,11 @@ class Editor {
           return fail("the edited script still has the " + m_routine_kind + " `" + old_name + "`");
         }
         break;
-      case Edit_op::add_trigger: {
+      case Edit_op::add_trigger:
+      case Edit_op::replace_trigger: {
         const Trigger &want = *e.new_trigger;
         const Trigger *t = l.trigger(want.name).second;
-        if (t == nullptr || t->name != want.name || !iequals(t->table, want.table)) {
+        if (t == nullptr || renamed(t->name, want.name) || !iequals(t->table, want.table)) {
           return fail("the edited script has no trigger `" + want.name + "` on `" + want.table + "`");
         }
         break;
@@ -4595,9 +4853,10 @@ class Editor {
         }
         break;
       }
-      case Edit_op::add_event: {
+      case Edit_op::add_event:
+      case Edit_op::replace_event: {
         const Event *ev = l.event(e.new_event->name).second;
-        if (ev == nullptr || ev->name != e.new_event->name) {
+        if (ev == nullptr || renamed(ev->name, e.new_event->name)) {
           return fail("the edited script has no event `" + e.new_event->name + "`");
         }
         break;
