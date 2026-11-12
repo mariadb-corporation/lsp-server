@@ -2921,6 +2921,42 @@ class Editor {
     }
     return a;
   }
+  // The last statement an earlier edit wrote over original offset `o` of
+  // file `file` (a replace_* rewrites a CREATE where it stands, a DELIMITER
+  // block around it maybe), when `o` lies inside that edit's range.
+  std::optional<size_t> rewritten_statement(size_t file, uint32_t o) const {
+    const Edit_log &log = m_s.files()[file].log;
+    for (const Text_edit &x : log.edits()) {
+      if (!(x.begin < o && o < x.end)) continue;
+      const auto b = log.to_current(x.begin, false);
+      if (!b) return std::nullopt;
+      const uint32_t e = *b + static_cast<uint32_t>(x.text.size());
+      std::optional<size_t> last;
+      for (size_t k = 0; k < index().statements().size(); ++k) {
+        const Statement &st = statement(k);
+        if (st.kind != Statement_kind::sql) continue;
+        const auto sb = file_at(st.begin);
+        const auto se = file_at(st.body_end);
+        if (sb && se && sb->first == file && se->first == file && sb->second >= *b && se->second <= e) last = k;
+      }
+      return last;
+    }
+    return std::nullopt;
+  }
+  // The place after searched statement `k`, past what an earlier edit put
+  // there, so adds keep their order.
+  Place after_anchor(size_t k) const {
+    Place place;
+    place.anchor = anchor_of(k);
+    Spot s = after_create(k, style_of(place.anchor).eol);
+    if (const auto fa = file_at(s.at)) {
+      const Edit_log &l = m_s.files()[fa->first].log;
+      const auto c = l.to_current(l.to_original(fa->second), true);
+      if (c && *c > fa->second) s.at += *c - fa->second;
+    }
+    place.spot = s;
+    return place;
+  }
   // The place `at` names, or why it names none.
   std::variant<Place, Edit_error> place_at(size_t i, const Edit_at &at) const {
     const std::string f = at.file.empty() ? std::string("the script") : "\"" + at.file + "\"";
@@ -2944,7 +2980,13 @@ class Editor {
       return error(i, "bad-request", where + " is not a position in that line");
     }
     const auto current = log.to_current(o, at.before_line);
-    if (!current) return error(i, "bad-request", "an earlier edit changed the text at " + where);
+    if (!current) {
+      // After a statement an earlier edit rewrote (replace_*): after what it wrote.
+      if (!at.before_line) {
+        if (const auto k = rewritten_statement(*file, o)) return after_anchor(*k);
+      }
+      return error(i, "bad-request", "an earlier edit changed the text at " + where);
+    }
     const std::string_view ft = log.text();
     // A file's end is the next file's start in the searched text, and a
     // SOURCE directive's line is the included text there: such a line's
@@ -2967,18 +3009,7 @@ class Editor {
         if (st.kind != Statement_kind::sql) continue;
         uint32_t e = st.body_end;
         while (e > st.begin && std::isspace(static_cast<unsigned char>(t[e - 1]))) --e;
-        if (e == *p || st.body_end == *p) {
-          place.anchor = anchor_of(k);
-          Spot s = after_create(k, style_of(place.anchor).eol);
-          // After what an earlier edit put there: adds keep their order.
-          if (const auto fa = file_at(s.at)) {
-            const Edit_log &l = m_s.files()[fa->first].log;
-            const auto c = l.to_current(l.to_original(fa->second), true);
-            if (c && *c > fa->second) s.at += *c - fa->second;
-          }
-          place.spot = s;
-          return place;
-        }
+        if (e == *p || st.body_end == *p) return after_anchor(k);
       }
       return error(i, "bad-request", where + " is not the end of a statement's range");
     }

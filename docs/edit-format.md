@@ -337,12 +337,14 @@ The rest is as for any add: style, layout, the migration (the `CREATE` alone, al
 - A routine, trigger or event whose body holds `;` gets a `DELIMITER` block of its own where
   `;` is the delimiter (its `DROP ... IF EXISTS` inside it), as without `at`.
 - Two adds at one `at` keep the request's order. Positions are in the files as they are on
-  disk, so each `at` may come from the outline msm read before the request.
+  disk, so each `at` may come from the outline msm read before the request. An `after` on a
+  statement an earlier edit of the request rewrote where it stands (a `replace_*`, a
+  `DELIMITER` block it wrote around the statement included) goes after the rewritten one.
 
 `bad-request` when `at` names a file that is neither the script nor one it includes, an
 `after` that is not the end of a statement's range in F, a line past F's last line or one
 that starts inside a statement, a place outside the part of F the script includes or in text
-an earlier edit of the request changed, or a trigger above its table's `CREATE TABLE`; and
+an earlier edit of the request changed (a statement it dropped, say), or a trigger above its table's `CREATE TABLE`; and
 for a `form` the op does not take. `replace_*` (which rewrite a statement where it stands),
 `add_column`, `add_index` and `add_foreign_key` take neither member.
 

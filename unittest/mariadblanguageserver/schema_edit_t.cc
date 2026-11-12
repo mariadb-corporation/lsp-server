@@ -2868,6 +2868,30 @@ TEST(Schema_edit, placement_in_includes) {
             failed(edit_main(script, files, request("", add_view_at("v", at("part.sql", 3))))).message);
 }
 
+TEST(Schema_edit, placement_after_a_statement_a_replace_rewrote) {
+  // msm.set_schema_statements: a replace and an add after the replaced
+  // object, in one request, `at` taken from the outline before it.
+  const std::string views = "CREATE OR REPLACE VIEW v_last AS SELECT 1;\n";
+  const auto v = ok(edit_main(views, {}, request("", R"({"op": "replace_view", "view": {"name": "v_last", "definition": "SELECT 2 AS b"}}, )" +
+                                                         add_view_at("v_new", at("", 0, 41)))));
+  EXPECT_EQ("CREATE OR REPLACE VIEW v_last AS SELECT 2 AS b;\nCREATE OR REPLACE VIEW v_new AS SELECT 1;\n", text(v, ""));
+  // The replace wraps the routine in a DELIMITER block: the add goes after
+  // it, in the block.
+  const std::string routine = "CREATE PROCEDURE p1() SELECT 1;\n";
+  const std::string replace =
+      R"({"op": "replace_routine", "routine": {"name": "p1", "kind": "procedure", "body": "BEGIN SELECT 2; SELECT 3; END"}}, )";
+  const auto r = ok(edit_main(routine, {}, request("", replace + add_procedure_at("p2", at("", 0, 30)))));
+  EXPECT_EQ("DELIMITER $$\n"
+            "CREATE PROCEDURE p1()\nBEGIN\n  SELECT 2;\n  SELECT 3;\nEND$$\n"
+            "CREATE PROCEDURE p2()\nBEGIN\n  SELECT 1;\nEND$$\n"
+            "DELIMITER ;\n",
+            text(r, ""));
+  // A statement an earlier edit dropped is no anchor.
+  EXPECT_EQ("an earlier edit changed the text at (0, 30) of the script",
+            failed(edit_main(routine, {}, request("", R"({"op": "drop_routine", "routine": "p1"}, )" +
+                                                          add_procedure_at("p2", at("", 0, 30))))).message);
+}
+
 TEST(Schema_edit, placement_of_a_trigger_after_its_table) {
   const std::string trigger =
       R"({"op": "add_trigger", "trigger": {"name": "g", "table": "b", "timing": "BEFORE", "events": "INSERT", "body": "SET NEW.id = 1"}, )";
