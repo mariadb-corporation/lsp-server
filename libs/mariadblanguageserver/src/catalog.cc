@@ -21,6 +21,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <optional>
+#include <set>
 #include <span>
 #include <utility>
 #include <rapidjson/document.h>
@@ -330,6 +331,19 @@ std::string rest_key_content_set(std::string_view service_key, std::string_view 
   return rest_key_service(service_key) + k_key_sep + "c" + lower(name);
 }
 
+// Adds the keys of schema `rs` of service `service_key` and of its objects.
+void add_rest_keys(std::set<std::string> &keys, std::string_view service_key, const Rest_schema &rs) {
+  keys.insert(rest_key_schema(service_key, rs.path));
+  for (const Rest_object &o : rs.objects) keys.insert(rest_key_object(service_key, rs.path, o.path));
+}
+
+// Adds the keys of `svc` and of the items under it.
+void add_rest_keys(std::set<std::string> &keys, const Rest_service &svc) {
+  keys.insert(rest_key_service(svc.name.key));
+  for (const Rest_schema &rs : svc.schemas) add_rest_keys(keys, svc.name.key, rs);
+  for (const Named_object &cs : svc.content_sets) keys.insert(rest_key_content_set(svc.name.key, cs.name));
+}
+
 }  // namespace
 
 const std::vector<Rest_statement> &Catalog::rest_statements_of(const std::string &key) const {
@@ -356,15 +370,27 @@ const std::vector<Rest_statement> &Catalog::rest_content_set_statements(const Re
   return rest_statements_of(rest_key_content_set(svc.name.key, cs.name));
 }
 
-void Catalog::rekey_rest_statements(const std::string &from, const std::string &to) {
+void Catalog::rekey_rest_statements(const std::string &from, const std::string &to,
+                                    const std::set<std::string> &live) {
   if (from == to) return;
+  using Entry = decltype(m_rest_statements)::iterator;
+  // The entries of `key` and of the items under it: `key` itself, and the
+  // keys that extend it with k_key_sep, a contiguous range of the map.
+  auto subtree = [&](const std::string &key) {
+    std::vector<Entry> out;
+    if (const auto it = m_rest_statements.find(key); it != m_rest_statements.end()) out.push_back(it);
+    const auto end = m_rest_statements.lower_bound(key + static_cast<char>(k_key_sep + 1));
+    for (auto it = m_rest_statements.lower_bound(key + k_key_sep); it != end; ++it) out.push_back(it);
+    return out;
+  };
+  // Under `to`, the statements of items dropped earlier are no item's any
+  // more: the renamed items do not take them.
+  for (const Entry it : subtree(to))
+    if (!live.contains(it->first)) m_rest_statements.erase(it);
   std::vector<std::pair<std::string, std::vector<Rest_statement>>> moved;
-  for (auto it = m_rest_statements.lower_bound(from); it != m_rest_statements.end();) {
-    const std::string &k = it->first;
-    if (k.compare(0, from.size(), from) != 0) break;
-    if (k.size() > from.size() && k[from.size()] != k_key_sep) { ++it; continue; }
-    moved.emplace_back(to + k.substr(from.size()), std::move(it->second));
-    it = m_rest_statements.erase(it);
+  for (const Entry it : subtree(from)) {
+    moved.emplace_back(to + it->first.substr(from.size()), std::move(it->second));
+    m_rest_statements.erase(it);
   }
   for (auto &[k, v] : moved) {
     auto &dest = m_rest_statements[k];
@@ -372,9 +398,10 @@ void Catalog::rekey_rest_statements(const std::string &from, const std::string &
       dest = std::move(v);
       continue;
     }
-    dest.insert(dest.end(), std::make_move_iterator(v.begin()), std::make_move_iterator(v.end()));
+    // Onto a live item (a rename the shell allows in a disabled service).
     // Offsets are per file, so fold order, not position, keeps file order
     // across files and includes.
+    dest.insert(dest.end(), std::make_move_iterator(v.begin()), std::make_move_iterator(v.end()));
     std::sort(dest.begin(), dest.end(),
               [](const Rest_statement &a, const Rest_statement &b) { return a.order < b.order; });
   }
@@ -2256,13 +2283,16 @@ bool Catalog_fold::rest(uint32_t n) {
       // The shell's metadata fails such a rename ("The request_path is
       // already used by another entity."), and the statement with it; it
       // checks an enabled service's path against enabled services only.
-      if (const Rest_service *other = c_.find_service(to.key);
-          other != nullptr && other != svc && rest_enabled(settings) && rest_enabled(other->settings)) {
+      const Rest_service *other = c_.find_service(to.key);
+      if (other == svc) other = nullptr;
+      if (other != nullptr && rest_enabled(settings) && rest_enabled(other->settings)) {
         note(Note_kind::rest_path_in_use, false, what() + ": REST service " + to.path + " exists");
         return false;
       }
       if (iequals(c_.m_current_service.key, svc->name.key)) c_.m_current_service = to;
-      c_.rekey_rest_statements(rest_key_service(svc->name.key), rest_key_service(to.key));
+      std::set<std::string> live;  // a service there, in a disabled service's rename
+      if (other != nullptr) add_rest_keys(live, *other);
+      c_.rekey_rest_statements(rest_key_service(svc->name.key), rest_key_service(to.key), live);
       svc->name = to;
     }
     svc->settings = std::move(settings);
@@ -2335,14 +2365,18 @@ bool Catalog_fold::rest(uint32_t n) {
       std::string to_path = text(to);
       // As for a service: the shell fails the statement (the schemas of a
       // service that is not enabled do not count).
-      if (const Rest_schema *other = find_rest_schema(*svc, to_path);
-          other != nullptr && other != rs && rest_enabled(svc->settings)) {
+      const Rest_schema *other = find_rest_schema(*svc, to_path);
+      if (other == rs) other = nullptr;
+      if (other != nullptr && rest_enabled(svc->settings)) {
         note(Note_kind::rest_path_in_use, false, what() + ": REST schema " + to_path + " exists");
         return false;
       }
       if (iequals(svc->name.key, c_.m_current_service.key) && iequals(rs->path, c_.m_current_rest_schema))
         c_.m_current_rest_schema = to_path;
-      c_.rekey_rest_statements(rest_key_schema(svc->name.key, rs->path), rest_key_schema(svc->name.key, to_path));
+      std::set<std::string> live;  // a schema there, in a disabled service
+      if (other != nullptr) add_rest_keys(live, svc->name.key, *other);
+      c_.rekey_rest_statements(rest_key_schema(svc->name.key, rs->path), rest_key_schema(svc->name.key, to_path),
+                               live);
       rs->path = std::move(to_path);
     }
     if (const uint32_t db = child(child(st, s_.mrs_opt_from_schema_name), s_.mrs_identifier); db != npos)

@@ -1406,6 +1406,80 @@ TEST(Catalog, rest_plain_create_onto_path_in_use) {
   EXPECT_EQ("other", svcs[1].schemas[0].schema);
 }
 
+// A rename onto the path of an item dropped earlier does not take its
+// statements; a DROP and a new CREATE of one path keep theirs.
+TEST(Catalog, rest_rename_onto_dropped_path) {
+  const auto o = outline_of(
+      "CREATE REST SERVICE /a;\n"
+      "CREATE REST SCHEMA /x ON SERVICE /a FROM sakila;\n"
+      "DROP REST SERVICE /a;\n"
+      "CREATE REST SERVICE /b;\n"
+      "CREATE REST SCHEMA /y ON SERVICE /b FROM sakila;\n"
+      "ALTER REST SERVICE /b NEW REQUEST PATH /a;\n"
+      "ALTER REST SCHEMA /y ON SERVICE /a NEW REQUEST PATH /x;\n"
+      "DROP REST SERVICE /c;\n"
+      "CREATE REST SERVICE /c;\n");
+  EXPECT_TRUE(o.notes.empty());
+  const Catalog &c = o.catalog;
+  ASSERT_EQ(2u, c.rest_services().size());
+  const auto &a = c.rest_services()[0];
+  EXPECT_EQ("/a", a.name.path);
+  std::vector<std::string> kinds;
+  for (const auto &s : c.rest_statements(a)) kinds.push_back(s.kind);
+  EXPECT_EQ((std::vector<std::string>{"create", "alter"}), kinds);  // /b's, not the old /a's
+  ASSERT_EQ(1u, a.schemas.size());
+  kinds.clear();
+  for (const auto &s : c.rest_statements(a, a.schemas[0])) kinds.push_back(s.kind);
+  EXPECT_EQ((std::vector<std::string>{"create", "alter"}), kinds);  // /y's, not the old /a/x's
+  EXPECT_EQ(2u, c.rest_statements(c.rest_services()[1]).size());     // /c: drop, create
+}
+
+// A rename onto a live service (allowed in a disabled one) merges the
+// service's statements, but not those of its schemas dropped earlier.
+TEST(Catalog, rest_rename_onto_live_service_with_dropped_schema) {
+  const auto o = outline_of(
+      "CREATE REST SERVICE /a DISABLED;\n"
+      "CREATE REST SCHEMA /x ON SERVICE /a FROM sakila;\n"
+      "DROP REST SCHEMA /x FROM SERVICE /a;\n"
+      "CREATE REST SERVICE /b;\n"
+      "CREATE REST SCHEMA /x ON SERVICE /b FROM sakila;\n"
+      "ALTER REST SERVICE /b NEW REQUEST PATH /a;\n");
+  EXPECT_TRUE(o.notes.empty());
+  const Catalog &c = o.catalog;
+  ASSERT_EQ(2u, c.rest_services().size());
+  const auto &renamed = c.rest_services()[1];
+  EXPECT_EQ("/a", renamed.name.path);
+  EXPECT_EQ(3u, c.rest_statements(renamed).size());  // both services' creates, the alter
+  ASSERT_EQ(1u, renamed.schemas.size());
+  EXPECT_EQ(1u, c.rest_statements(renamed, renamed.schemas[0]).size());  // /b's /x only
+}
+
+// A schema renamed onto a live schema (in a disabled service): the schema's
+// lists merge, a dropped object's statements under it do not.
+TEST(Catalog, rest_rename_onto_live_schema_with_dropped_object) {
+  const auto o = outline_of(
+      "CREATE REST SERVICE /svc DISABLED;\n"
+      "USE REST SERVICE /svc;\n"
+      "CREATE REST SCHEMA /x FROM sakila;\n"
+      "CREATE REST VIEW /v ON SCHEMA /x AS t;\n"
+      "DROP REST VIEW /v FROM SCHEMA /x;\n"
+      "CREATE REST VIEW /w ON SCHEMA /x AS t;\n"
+      "CREATE REST SCHEMA /y FROM sakila;\n"
+      "CREATE REST VIEW /v ON SCHEMA /y AS t;\n"
+      "CREATE REST VIEW /w ON SCHEMA /y AS t;\n"
+      "ALTER REST SCHEMA /y NEW REQUEST PATH /x;\n");
+  EXPECT_TRUE(o.notes.empty());
+  const Catalog &c = o.catalog;
+  const auto &svc = c.rest_services().at(0);
+  ASSERT_EQ(2u, svc.schemas.size());
+  const auto &renamed = svc.schemas[1];
+  EXPECT_EQ("/x", renamed.path);
+  EXPECT_EQ(3u, c.rest_statements(svc, renamed).size());  // both creates, the alter
+  ASSERT_EQ(2u, renamed.objects.size());
+  EXPECT_EQ(1u, c.rest_statements(svc, renamed, renamed.objects[0]).size());  // /y's /v only
+  EXPECT_EQ(2u, c.rest_statements(svc, renamed, renamed.objects[1]).size());  // live /x's /w and /y's
+}
+
 // A block comment whose opening line is not a comment line, or a statement
 // continued on a line starting with `*`, is not cut into leading comments.
 TEST(Catalog, rest_statements_partial_block_comment_above) {

@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <set>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -495,8 +496,11 @@ class Catalog {
   uint32_t m_rest_statement_count = 0;  // the next Rest_statement::order
   const std::vector<Rest_statement> &rest_statements_of(const std::string &key) const;
   // Moves the statements of `from` and of the items under it to `to` (a
-  // renamed service or schema).
-  void rekey_rest_statements(const std::string &from, const std::string &to);
+  // renamed service or schema).  Under `to`, the lists whose key is not in
+  // `live` (the keys of an item at `to` and of the items under it, a rename
+  // the shell allows in a disabled service) are of items dropped earlier
+  // and are dropped; the others merge.
+  void rekey_rest_statements(const std::string &from, const std::string &to, const std::set<std::string> &live);
   std::vector<Note> m_notes;
   uint32_t m_source = 0;
 
