@@ -327,6 +327,27 @@ class Edit_fixture(unittest.TestCase):
         self.assertIn("CREATE VIEW view1 AS SELECT 1;", routines)
         self.checks()
 
+    def test_replace_a_view_and_a_routine_in_place(self):
+        """msm's set_schema_statements: objects the project has are replaced
+        where they stand, in their included file and DELIMITER block."""
+        code, result = self.p.edit([
+            {"op": "replace_view", "view": {"name": "customer_orders",
+                                            "definition": "SELECT c.id, c.name FROM customer c"}},
+            {"op": "replace_routine", "routine": {"name": "order_count", "kind": "function",
+                                                  "parameters": [{"name": "c", "type": "INT"}],
+                                                  "returns": "INT", "body": "BEGIN\n  RETURN 0;\nEND"}},
+        ], "shop")
+        self.assertEqual(code, 0, result)
+        self.assertEqual([(m["action"], m["object"], m["name"]) for m in result["migration"]],
+                         [("create", "view", "customer_orders"), ("create", "function", "order_count")])
+        self.assertTrue(all(m["sql"].startswith("CREATE OR REPLACE ") for m in result["migration"]))
+        self.p.apply(result)
+        self.assertEqual(self.p.outline(), result["outline"])
+        routines = (self.p.dev / "sections" / "150_routines.sql").read_text()
+        self.assertIn("DELIMITER %%\nCREATE FUNCTION order_count(c INT) RETURNS INT\nBEGIN\n  RETURN 0;\nEND%%\n"
+                      "DELIMITER ;\nCREATE VIEW customer_orders AS SELECT c.id, c.name FROM customer c;", routines)
+        self.checks()
+
     def files(self):
         return {f: f.read_bytes() for f in sorted(self.p.dev.rglob("*.sql"))}
 

@@ -69,6 +69,10 @@ enum class Edit_op {
   drop_sequence,
   rename_sequence,
   rename_schema,
+  replace_view,
+  replace_routine,
+  replace_trigger,
+  replace_event,
 };
 
 // The request's `op` spelling; nullopt for an unknown one.
@@ -101,10 +105,10 @@ struct Schema_edit {
   std::optional<Column> new_column;
   std::string after;   // add_column: the column it goes after, or ""
   bool first = false;  // add_column: first
-  std::optional<View> new_view;        // add_view
-  std::optional<Routine> new_routine;  // add_routine
-  std::optional<Trigger> new_trigger;  // add_trigger
-  std::optional<Event> new_event;      // add_event
+  std::optional<View> new_view;        // add_view, replace_view
+  std::optional<Routine> new_routine;  // add_routine, replace_routine
+  std::optional<Trigger> new_trigger;  // add_trigger, replace_trigger
+  std::optional<Event> new_event;      // add_event, replace_event
   std::optional<Sequence> new_sequence;  // add_sequence
   // set_table_options: outline option name and value; nullopt removes it.
   std::vector<std::pair<std::string, std::optional<std::string>>> options;

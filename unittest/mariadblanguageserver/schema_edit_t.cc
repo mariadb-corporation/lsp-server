@@ -302,7 +302,7 @@ TEST(Schema_edit, supported_ops) {
       "rename_table rename_column rename_view rename_routine add_table drop_table add_column modify_column "
       "drop_column add_index drop_index add_foreign_key drop_foreign_key set_table_options add_view drop_view "
       "add_routine drop_routine set_primary_key add_trigger drop_trigger rename_trigger add_event drop_event rename_event add_sequence "
-      "drop_sequence rename_sequence rename_schema",
+      "drop_sequence rename_sequence rename_schema replace_view replace_routine replace_trigger replace_event",
       supported_edit_ops());
 }
 
@@ -2440,4 +2440,119 @@ TEST(Schema_edit, merge_alter_statements) {
   EXPECT_EQ(2u, merged_sql({alter(0, "t", "ADD COLUMN `c` INT", add_c), alter(1, "T", "ADD INDEX `ic` (`c`)", index_c)}).size());
 }
 
+
+// ---------------------------------------------------------------------------
+// Replacing a view, routine, trigger or event
+
+TEST(Schema_edit, replace_view_keeps_its_form_and_place) {
+  const std::string script =
+      "CREATE TABLE t (id INT, a INT);\n"
+      "CREATE VIEW v AS SELECT id FROM t;\n"
+      "\n"
+      "-- v, again\n"
+      "DROP VIEW IF EXISTS v;\n"
+      "CREATE VIEW v AS SELECT a FROM t;\n"
+      "\n"
+      "-- widen v\n"
+      "ALTER VIEW v AS SELECT id, a FROM t;\n"
+      "CREATE OR REPLACE VIEW w AS SELECT 1;\n";
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "replace_view", "view": {"name": "v", "definition": "SELECT a AS b FROM t"}})j")));
+  // The last CREATE is rewritten after its DROP, the earlier one stays, the
+  // ALTER VIEW goes with its comment.
+  EXPECT_EQ("CREATE TABLE t (id INT, a INT);\n"
+            "CREATE VIEW v AS SELECT id FROM t;\n"
+            "\n"
+            "-- v, again\n"
+            "DROP VIEW IF EXISTS v;\n"
+            "CREATE VIEW v AS SELECT a AS b FROM t;\n"
+            "CREATE OR REPLACE VIEW w AS SELECT 1;\n",
+            text(r, ""));
+  EXPECT_EQ(Tags{"create view v"}, tags(r));
+  EXPECT_EQ(std::vector<std::string>{"CREATE OR REPLACE VIEW v AS SELECT a AS b FROM t"}, migration(r));
+  EXPECT_EQ(std::vector<std::string>{"alter-removed"}, note_kinds(r));
+
+  // OR REPLACE stays.
+  const auto r2 = ok(edit(script, {}, request("", R"j({"op": "replace_view", "view": {"name": "W", "definition": "SELECT 2"}})j")));
+  EXPECT_NE(std::string::npos, text(r2, "").find("CREATE OR REPLACE VIEW W AS SELECT 2;\n"));
+  EXPECT_TRUE(note_kinds(r2).empty());
+
+  EXPECT_EQ("unknown-object", failed(edit(script, {}, request("", R"j({"op": "replace_view", "view": {"name": "x", "definition": "SELECT 1"}})j"))).kind);
+  EXPECT_EQ("bad-request", failed(edit(script, {}, request("", R"j({"op": "replace_view", "view": {"name": "v", "definition": "SELECT FROM"}})j"))).kind);
+}
+
+TEST(Schema_edit, replace_routine_in_or_out_of_a_delimiter_block) {
+  const std::string script =
+      "CREATE TABLE t (a INT);\n"
+      "DELIMITER $$\n"
+      "CREATE PROCEDURE p()\nBEGIN\n  SELECT 1;\nEND$$\n"
+      "DELIMITER ;\n"
+      "ALTER PROCEDURE p COMMENT 'old';\n"
+      "DROP FUNCTION IF EXISTS f;\n"
+      "CREATE FUNCTION f() RETURNS INT RETURN 1;\n";
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "replace_routine", "routine": {"name": "p", "kind": "procedure", "body": "BEGIN\n  SELECT 2;\nEND"}},
+      {"op": "replace_routine", "routine": {"name": "f", "kind": "function", "returns": "INT", "body": "BEGIN\n  RETURN 2;\nEND"}})j")));
+  // p stays in its block; f, whose body now holds ";", gets one after its DROP.
+  EXPECT_EQ("CREATE TABLE t (a INT);\n"
+            "DELIMITER $$\n"
+            "CREATE PROCEDURE p()\nBEGIN\n  SELECT 2;\nEND$$\n"
+            "DELIMITER ;\n"
+            "DROP FUNCTION IF EXISTS f;\n"
+            "DELIMITER $$\n"
+            "CREATE FUNCTION f() RETURNS INT\nBEGIN\n  RETURN 2;\nEND$$\n"
+            "DELIMITER ;\n",
+            text(r, ""));
+  EXPECT_EQ((Tags{"create procedure p", "create function f"}), tags(r));
+  EXPECT_EQ((std::vector<std::string>{"CREATE OR REPLACE PROCEDURE p()\nBEGIN\n  SELECT 2;\nEND",
+                                      "CREATE OR REPLACE FUNCTION f() RETURNS INT\nBEGIN\n  RETURN 2;\nEND"}),
+            migration(r));
+  EXPECT_EQ((std::vector<std::string>{"alter-removed", "routine-created", "routine-created"}), note_kinds(r));
+  // Of its own kind only.
+  EXPECT_EQ("unknown-object",
+            failed(edit(script, {}, request("", R"j({"op": "replace_routine", "routine": {"name": "p", "kind": "function", "returns": "INT", "body": "RETURN 1"}})j"))).kind);
+}
+
+TEST(Schema_edit, replace_routine_in_an_included_file) {
+  const Files files = {{"a.sql", "CREATE TABLE t (a INT);\nCREATE PROCEDURE p() SELECT 1;\n"}};
+  const auto r = ok(edit("SOURCE 'a.sql';\n", files,
+                         request("", R"j({"op": "replace_routine", "routine": {"name": "p", "kind": "procedure", "body": "SELECT 2"}})j")));
+  EXPECT_EQ("CREATE TABLE t (a INT);\nCREATE PROCEDURE p() SELECT 2;\n", text(r, "a.sql"));
+  EXPECT_EQ(0u, edit_count(r, ""));
+}
+
+TEST(Schema_edit, replace_trigger) {
+  const std::string script =
+      "CREATE TABLE t (a INT);\n"
+      "CREATE TABLE u (a INT);\n"
+      "CREATE TRIGGER t1 BEFORE INSERT ON t FOR EACH ROW SET NEW.a = 1;\n"
+      "CREATE TRIGGER t2 BEFORE INSERT ON t FOR EACH ROW FOLLOWS t1 SET NEW.a = 2;\n"
+      "CREATE TABLE late (a INT);\n";
+  auto replace = [&](const std::string &trigger) {
+    return edit(script, {}, request("", R"j({"op": "replace_trigger", "trigger": )j" + trigger + "}"));
+  };
+  const auto r = ok(replace(R"j({"name": "t1", "timing": "BEFORE", "events": "INSERT OR UPDATE", "table": "t", "body": "SET NEW.a = 3"})j"));
+  EXPECT_NE(std::string::npos, text(r, "").find("CREATE TRIGGER t1 BEFORE INSERT OR UPDATE ON t FOR EACH ROW SET NEW.a = 3;\n"));
+  EXPECT_EQ(Tags{"create trigger t1"}, tags(r));
+  EXPECT_EQ(std::vector<std::string>{"trigger-created"}, note_kinds(r));
+  // t2 follows t1: t1 keeps its table, timing and the events of t2.
+  EXPECT_EQ("referenced", failed(replace(R"j({"name": "t1", "timing": "AFTER", "events": "INSERT", "table": "t", "body": "SET @a = 1"})j")).kind);
+  EXPECT_EQ("referenced", failed(replace(R"j({"name": "t1", "timing": "BEFORE", "events": "INSERT", "table": "u", "body": "SET @a = 1"})j")).kind);
+  // Not after itself, nor before its table.
+  EXPECT_EQ("unknown-object", failed(replace(R"j({"name": "t2", "timing": "BEFORE", "events": "INSERT", "table": "t", "body": "SET @a = 1", "order": {"kind": "FOLLOWS", "trigger": "t2"}})j")).kind);
+  EXPECT_EQ("unknown-object", failed(replace(R"j({"name": "t2", "timing": "BEFORE", "events": "INSERT", "table": "late", "body": "SET @a = 1"})j")).kind);
+  EXPECT_EQ("unknown-object", failed(replace(R"j({"name": "t3", "timing": "BEFORE", "events": "INSERT", "table": "t", "body": "SET @a = 1"})j")).kind);
+}
+
+TEST(Schema_edit, replace_event) {
+  const std::string script =
+      "CREATE EVENT e ON SCHEDULE EVERY 1 DAY DO SELECT 1;\n"
+      "ALTER EVENT e DISABLE;\n"
+      "CREATE EVENT old ON SCHEDULE EVERY 1 DAY DO SELECT 1;\n"
+      "ALTER EVENT old RENAME TO renamed;\n";
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "replace_event", "event": {"name": "e", "schedule": "EVERY 2 DAY", "status": "DISABLE", "body": "SELECT 2"}})j")));
+  EXPECT_EQ(0u, text(r, "").find("CREATE EVENT e ON SCHEDULE EVERY 2 DAY DISABLE DO SELECT 2;\nCREATE EVENT old"));
+  EXPECT_EQ((std::vector<std::string>{"alter-removed", "event-created"}), note_kinds(r));
+  // Its CREATE names it otherwise.
+  EXPECT_EQ("unsupported",
+            failed(edit(script, {}, request("", R"j({"op": "replace_event", "event": {"name": "renamed", "schedule": "EVERY 1 DAY", "body": "SELECT 1"}})j"))).kind);
+}
 }  // namespace mdbls
