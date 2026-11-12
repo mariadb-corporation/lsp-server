@@ -18,6 +18,8 @@
 #include "schema_edit_text.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cstdint>
 #include <iterator>
 
 #include "mdbls/keywords.h"
@@ -61,6 +63,60 @@ std::string ids(const std::vector<std::string> &names, const Style &st) {
   return out;
 }
 
+bool is_word_char(char c) {
+  const auto u = static_cast<unsigned char>(c);
+  return std::isalnum(u) || c == '_' || c == '$' || u >= 0x80;
+}
+
+// The first `max` words of `sql`: names, keywords, quoted names, and single
+// punctuation characters.  Comments and strings are skipped; a versioned
+// comment's text is read as if it were not commented (mysqldump writes
+// `/*!50003 CREATE*/ ... TRIGGER`).
+std::vector<Word> words_of(std::string_view sql, size_t max) {
+  std::vector<Word> out;
+  size_t p = 0;
+  bool versioned = false;  // inside /*! ... */
+  auto blank_or_end = [&](size_t q) { return q >= sql.size() || std::isspace(static_cast<unsigned char>(sql[q])); };
+  while (p < sql.size() && out.size() < max) {
+    const char c = sql[p];
+    if (std::isspace(static_cast<unsigned char>(c))) {
+      ++p;
+    } else if (c == '#' || (c == '-' && sql.substr(p, 2) == "--" && blank_or_end(p + 2))) {
+      while (p < sql.size() && sql[p] != '\n') ++p;
+    } else if (sql.substr(p, 3) == "/*!") {
+      p += 3;
+      while (p < sql.size() && std::isdigit(static_cast<unsigned char>(sql[p]))) ++p;
+      versioned = true;
+    } else if (versioned && sql.substr(p, 2) == "*/") {
+      p += 2;
+      versioned = false;
+    } else if (sql.substr(p, 2) == "/*") {
+      const size_t e = sql.find("*/", p + 2);
+      p = e == std::string_view::npos ? sql.size() : e + 2;
+    } else if (c == '`' || c == '"' || c == '\'') {
+      size_t q = p + 1;
+      while (q < sql.size()) {
+        if (sql[q] == c && q + 1 < sql.size() && sql[q + 1] == c) q += 2;
+        else if (sql[q] == c) break;
+        else if (sql[q] == '\\' && c == '\'') q += 2;
+        else ++q;
+      }
+      q = std::min(q + 1, sql.size());
+      if (c != '\'') out.push_back({sql.substr(p, q - p), true, false});
+      p = q;
+    } else if (is_word_char(c)) {
+      size_t q = p;
+      while (q < sql.size() && is_word_char(sql[q])) ++q;
+      out.push_back({sql.substr(p, q - p), false, false});
+      p = q;
+    } else {
+      out.push_back({sql.substr(p, 1), false, true});
+      ++p;
+    }
+  }
+  return out;
+}
+
 namespace {
 
 // NAME=value for engine-defined and other options given by name.
@@ -68,10 +124,27 @@ std::string option_sql(std::string_view name, std::string_view value, const Styl
   return st.kw(upper(name)) + "=" + std::string(value);
 }
 
-// An expression in parentheses: kept as written when it has them.
+// Whether `t` is one parenthesized group: its first "(" closes at its end,
+// not before (as in `(a) OR (b)`).
+bool one_group(std::string_view t) {
+  const auto w = words_of(t, SIZE_MAX);
+  if (w.size() < 2 || !w.front().punct || w.front().text != "(" || w.front().text.data() != t.data() ||
+      !w.back().punct || w.back().text != ")" || w.back().text.data() + 1 != t.data() + t.size()) {
+    return false;
+  }
+  int depth = 0;
+  for (size_t i = 0; i < w.size(); ++i) {
+    if (!w[i].punct) continue;
+    if (w[i].text == "(") ++depth;
+    if (w[i].text == ")" && --depth == 0 && i + 1 < w.size()) return false;
+  }
+  return depth == 0;
+}
+
+// An expression in parentheses: kept as written when it is one group.
 std::string parenthesized(std::string_view e) {
   const std::string_view t = trim(e);
-  if (!t.empty() && t.front() == '(' && t.back() == ')') return std::string(t);
+  if (one_group(t)) return std::string(t);
   return "(" + std::string(t) + ")";
 }
 

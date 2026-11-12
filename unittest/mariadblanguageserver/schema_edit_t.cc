@@ -2560,7 +2560,7 @@ TEST(Schema_edit, replace_event) {
   EXPECT_EQ((std::vector<std::string>{"alter-removed", "event-created"}), note_kinds(r));
   // Its CREATE names it otherwise.
   EXPECT_EQ("unsupported",
-            failed(edit(script, {}, request("", R"j({"op": "replace_event", "event": {"name": "renamed", "schedule": "EVERY 1 DAY", "body": "SELECT 1"}})j"))).kind);
+            failed(edit(script, {}, request("", R"j({"op": "replace_event", "event": {"name": "renamed", "schedule": "EVERY 1 DAY", "body": "SELECT 3"}})j"))).kind);
   // Renamed away and back: its CREATE is not the one to rewrite alone.
   EXPECT_EQ("unsupported",
             failed(edit(script + "ALTER EVENT e RENAME TO e2;\nALTER EVENT e2 RENAME TO e;\n", {},
@@ -2604,5 +2604,50 @@ TEST(Schema_edit, replace_keeps_if_not_exists) {
             text(r, ""));
   EXPECT_EQ((std::vector<std::string>{"CREATE OR REPLACE VIEW v AS SELECT 1 AS b", "CREATE OR REPLACE PROCEDURE p() SELECT 2"}),
             migration(r));
+}
+
+// An object sent as the outline has it changes nothing.
+TEST(Schema_edit, replace_with_the_current_object_changes_nothing) {
+  const std::string script =
+      "CREATE TABLE t (a INT);\n"
+      "CREATE VIEW v AS SELECT a FROM t WITH LOCAL CHECK OPTION;\n"
+      "CREATE PROCEDURE p() SELECT 1;\n"
+      "CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW SET NEW.a = 1;\n"
+      "CREATE EVENT e ON SCHEDULE EVERY 1 DAY DO SELECT 1;\n";
+  const auto r = ok(edit(script, {}, request("", R"j(
+      {"op": "replace_view", "view": {"name": "V", "definition": "SELECT a FROM t WITH LOCAL CHECK OPTION", "check_option": "LOCAL"}},
+      {"op": "replace_routine", "routine": {"name": "p", "kind": "procedure", "body": "SELECT 1"}},
+      {"op": "replace_trigger", "trigger": {"name": "tr", "timing": "BEFORE", "events": "INSERT", "table": "t", "body": "SET NEW.a = 1"}},
+      {"op": "replace_event", "event": {"name": "e", "schedule": "EVERY 1 DAY", "body": "SELECT 1"}})j")));
+  EXPECT_EQ(script, text(r, ""));
+  EXPECT_TRUE(r.migration.empty());
+  EXPECT_EQ((std::vector<std::string>{"unchanged", "unchanged", "unchanged", "unchanged"}), note_kinds(r));
+}
+
+// A view of the outline goes back as it is: its definition's CHECK OPTION
+// is check_option's.
+TEST(Schema_edit, a_views_check_option_is_written_once) {
+  const std::string script = "CREATE TABLE t (a INT);\n";
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "add_view", "view": {"name": "v", "definition": "SELECT a FROM t WITH CASCADED CHECK OPTION", "check_option": "CASCADED"}})j")));
+  EXPECT_EQ("CREATE TABLE t (a INT);\nCREATE VIEW v AS SELECT a FROM t WITH CASCADED CHECK OPTION;\n", text(r, ""));
+  // One of the other level contradicts check_option.
+  EXPECT_EQ("bad-request", failed(edit(script, {}, request("", R"j({"op": "add_view", "view": {"name": "v", "definition": "SELECT a FROM t WITH LOCAL CHECK OPTION", "check_option": "CASCADED"}})j"))).kind);
+}
+
+// An index of the outline, with both "columns" and "key_parts", goes back
+// as it is; the two must agree.
+TEST(Schema_edit, an_index_with_columns_and_key_parts) {
+  const std::string script = "CREATE TABLE t (a INT, b TEXT);\n";
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "add_index", "table": "t", "index": {"name": "ix", "kind": "index", "columns": ["a", "b"], "key_parts": [{"column": "a", "length": null, "order": null, "expression": null}, {"column": "b", "length": 10}]}})j")));
+  EXPECT_EQ("CREATE TABLE t (a INT, b TEXT, INDEX ix (a, b(10)));\n", text(r, ""));
+  EXPECT_EQ("bad-request", failed(edit(script, {}, request("", R"j({"op": "add_index", "table": "t", "index": {"name": "ix", "kind": "index", "columns": ["a"], "key_parts": [{"column": "b"}]}})j"))).kind);
+}
+
+// A CHECK the outline gives as `(a) OR (b)` is written in parentheses of
+// its own: its first "(" closes before its end.
+TEST(Schema_edit, a_check_of_two_groups_is_parenthesized) {
+  const auto r = ok(edit("", {}, request("", R"j({"op": "add_table", "table": {"name": "t", "columns": [{"name": "a", "type": "INT"}, {"name": "b", "type": "INT"}], "checks": [{"name": "c", "expression": "(a > 0) OR (b = ')(')"}, {"name": "d", "expression": "(a < 10)"}]}})j")));
+  EXPECT_NE(std::string::npos, text(r, "").find("CHECK ((a > 0) OR (b = ')('))")) << text(r, "");
+  EXPECT_NE(std::string::npos, text(r, "").find("CHECK (a < 10)")) << text(r, "");
 }
 }  // namespace mdbls

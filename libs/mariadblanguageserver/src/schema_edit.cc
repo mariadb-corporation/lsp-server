@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <iterator>
@@ -46,6 +47,10 @@
 #include "text_util.h"
 
 namespace mdbls {
+
+using edit_text::is_word_char;
+using edit_text::Word;
+using edit_text::words_of;
 
 namespace {
 
@@ -175,11 +180,6 @@ Range with_placeholders(std::string_view text, Range r) {
   while (const size_t n = placeholder_before(text, r.begin)) r.begin -= static_cast<uint32_t>(n);
   while (const size_t n = placeholder_at(text, r.end)) r.end += static_cast<uint32_t>(n);
   return r;
-}
-
-bool is_word_char(char c) {
-  const auto u = static_cast<unsigned char>(c);
-  return std::isalnum(u) || c == '_' || c == '$' || u >= 0x80;
 }
 
 // Whether `text` holds `word` as a whole word, in any case.
@@ -709,9 +709,12 @@ std::optional<Index> read_index(Json_reader &r, const Json &v, const std::string
   if (r.ok() && ix.kind.empty()) r.fail(w + " has no \"kind\"");
   std::vector<std::string> columns;
   r.strings(v, "columns", &columns, false, w);
-  for (auto &c : columns) ix.key_parts.emplace_back().column = std::move(c);
-  if (Json_reader::given(v, "key_parts")) {
-    if (!ix.key_parts.empty()) r.fail(w + " has both \"columns\" and \"key_parts\"");
+  // The outline gives both: "key_parts" then, which must name the same
+  // columns.
+  const bool parts = Json_reader::given(v, "key_parts");
+  if (!parts) {
+    for (auto &c : columns) ix.key_parts.emplace_back().column = std::move(c);
+  } else {
     r.array(v, "key_parts", w, [&](const Json &x, size_t k) {
       const std::string kw = "key part " + std::to_string(k + 1) + " of " + w;
       if (!r.object(x, kw, {"column", "length", "order", "expression"})) return;
@@ -725,6 +728,11 @@ std::optional<Index> read_index(Json_reader &r, const Json &v, const std::string
       if (Json_reader::given(x, "expression")) r.fail(kw + ": MariaDB has no expression key parts");
       ix.key_parts.push_back(std::move(kp));
     });
+    if (r.ok() && !columns.empty() && !ix.key_parts.empty() &&
+        !std::equal(columns.begin(), columns.end(), ix.key_parts.begin(), ix.key_parts.end(),
+                    [](const std::string &c, const Key_part &kp) { return iequals(c, kp.column); })) {
+      r.fail(w + " has \"columns\" and \"key_parts\" naming other columns");
+    }
   }
   if (r.ok() && ix.key_parts.empty()) r.fail(w + " has no \"columns\"");
   r.choice(v, "using", &ix.using_, {"BTREE", "HASH", "RTREE"}, w);
@@ -815,6 +823,26 @@ std::optional<Table> read_table(Json_reader &r, const Json &v) {
   return t;
 }
 
+// The outline's definition of a view ends with the WITH ... CHECK OPTION
+// that `check_option` writes: dropped, so a view of the outline can be
+// sent back as it is.  False when it names the other level than
+// `check_option` (the definition is kept then).
+bool drop_check_option(View &vw) {
+  if (vw.check_option.empty()) return true;
+  const std::string_view d = vw.definition;
+  const auto w = words_of(d, SIZE_MAX);
+  size_t n = w.size();
+  auto is = [&](size_t k, const char *word) { return !w[k].quoted && !w[k].punct && iequals(w[k].text, word); };
+  if (n < 4 || !is(n - 1, "OPTION") || !is(n - 2, "CHECK")) return true;
+  n -= 2;
+  std::string_view level;
+  if (is(n - 1, "LOCAL") || is(n - 1, "CASCADED")) level = w[--n].text;
+  if (n < 2 || !is(n - 1, "WITH")) return true;
+  if (!level.empty() && !iequals(level, vw.check_option)) return false;
+  vw.definition = std::string(trim(d.substr(0, static_cast<size_t>(w[n - 1].text.data() - d.data()))));
+  return true;
+}
+
 std::optional<View> read_view(Json_reader &r, const Json &v) {
   const std::string what = "\"view\"";
   // `reads` (an outline's, derived from the definition) is ignored.
@@ -832,6 +860,10 @@ std::optional<View> read_view(Json_reader &r, const Json &v) {
   r.str(v, "definer", &vw.definer, false, w);
   r.choice(v, "check_option", &vw.check_option, {"LOCAL", "CASCADED"}, w);
   if (!r.ok()) return std::nullopt;
+  if (!drop_check_option(vw)) {
+    r.fail(w + ": its \"definition\" ends with another CHECK OPTION than \"check_option\"");
+    return std::nullopt;
+  }
   return vw;
 }
 
@@ -1556,62 +1588,6 @@ std::vector<uint32_t> find_all_in(const Syntax_tree &t, uint32_t n, int sym) {
   return n == k_npos ? std::vector<uint32_t>{} : t.find_all(n, sym);
 }
 bool has_tokens(const Syntax_tree &t, uint32_t n) { return n != k_npos && t.node(n).token_count > 0; }
-
-// A word of a statement as the subject scanner sees it.
-struct Word {
-  std::string_view text;
-  bool quoted = false;
-  bool punct = false;
-};
-
-// The first `max` words of `sql`: names, keywords, quoted names, and single
-// punctuation characters.  Comments and strings are skipped; a versioned
-// comment's text is read as if it were not commented (mysqldump writes
-// `/*!50003 CREATE*/ ... TRIGGER`).
-std::vector<Word> words_of(std::string_view sql, size_t max) {
-  std::vector<Word> out;
-  size_t p = 0;
-  bool versioned = false;  // inside /*! ... */
-  auto blank_or_end = [&](size_t q) { return q >= sql.size() || std::isspace(static_cast<unsigned char>(sql[q])); };
-  while (p < sql.size() && out.size() < max) {
-    const char c = sql[p];
-    if (std::isspace(static_cast<unsigned char>(c))) {
-      ++p;
-    } else if (c == '#' || (c == '-' && sql.substr(p, 2) == "--" && blank_or_end(p + 2))) {
-      while (p < sql.size() && sql[p] != '\n') ++p;
-    } else if (sql.substr(p, 3) == "/*!") {
-      p += 3;
-      while (p < sql.size() && std::isdigit(static_cast<unsigned char>(sql[p]))) ++p;
-      versioned = true;
-    } else if (versioned && sql.substr(p, 2) == "*/") {
-      p += 2;
-      versioned = false;
-    } else if (sql.substr(p, 2) == "/*") {
-      const size_t e = sql.find("*/", p + 2);
-      p = e == std::string_view::npos ? sql.size() : e + 2;
-    } else if (c == '`' || c == '"' || c == '\'') {
-      size_t q = p + 1;
-      while (q < sql.size()) {
-        if (sql[q] == c && q + 1 < sql.size() && sql[q + 1] == c) q += 2;
-        else if (sql[q] == c) break;
-        else if (sql[q] == '\\' && c == '\'') q += 2;
-        else ++q;
-      }
-      q = std::min(q + 1, sql.size());
-      if (c != '\'') out.push_back({sql.substr(p, q - p), true, false});
-      p = q;
-    } else if (is_word_char(c)) {
-      size_t q = p;
-      while (q < sql.size() && is_word_char(sql[q])) ++q;
-      out.push_back({sql.substr(p, q - p), false, false});
-      p = q;
-    } else {
-      out.push_back({sql.substr(p, 1), false, true});
-      ++p;
-    }
-  }
-  return out;
-}
 
 // What a CREATE, ALTER or DROP statement is about: the kind of object (the
 // keyword: TABLE, VIEW, PROCEDURE, ...), its names (a DROP may list
@@ -3870,12 +3846,20 @@ class Editor {
   // script's spelling, which `make` writes too: a replace renames nothing,
   // also not in case (view names may tell case apart).  An IF NOT EXISTS
   // the CREATE has stays.
+  // `current` is the CREATE the current object (at `origin`) gives, in the
+  // default style: when `make` writes the same, nothing is written or
+  // migrated, and a note says so.
   template <typename Make>
   std::optional<Edit_error> replace_create(size_t i, Obj object, const std::string &name, const std::string &schema,
-                                           Make make, Changes &changes) {
+                                           const std::string &current, const Origin &origin, Make make,
+                                           Changes &changes) {
     const std::string kw = upper(to_string(object));  // VIEW, PROCEDURE, ...
     const bool compound = object != Obj::view;
     const std::string what = std::string(to_string(object)) + " `" + name + "`";
+    if (make(edit_text::Style{}, false) == current) {
+      note(i, "unchanged", origin.source, origin.statement.begin, "the " + what + " is as sent: nothing was changed");
+      return std::nullopt;
+    }
     std::optional<size_t> create;
     uint32_t name_at = 0;
     bool if_not_exists = false;
@@ -3984,8 +3968,10 @@ class Editor {
     const auto [schema, view] = lookup().view(v.name);
     if (view == nullptr) return error(i, "unknown-object", "there is no view `" + v.name + "`");
     v.name = view->name;
+    View current = *view;
+    drop_check_option(current);
     return replace_create(
-        i, Obj::view, view->name, schema->name,
+        i, Obj::view, view->name, schema->name, edit_text::create_view_sql(current, {}), view->origin,
         [&](const edit_text::Style &st, bool or_replace) { return edit_text::create_view_sql(v, st, or_replace); },
         changes);
   }
@@ -3997,7 +3983,8 @@ class Editor {
     const auto [schema, routine] = found[0];
     r.name = routine->name;
     return replace_create(
-        i, routine_object(r.kind), routine->name, schema->name,
+        i, routine_object(r.kind), routine->name, schema->name, edit_text::create_routine_sql(*routine, {}),
+        routine->origin,
         [&](const edit_text::Style &st, bool or_replace) { return edit_text::create_routine_sql(r, st, or_replace); },
         changes);
   }
@@ -4033,7 +4020,7 @@ class Editor {
     }
     t.name = old->name;
     return replace_create(
-        i, Obj::trigger, old->name, schema->name,
+        i, Obj::trigger, old->name, schema->name, edit_text::create_trigger_sql(*old, {}), old->origin,
         [&](const edit_text::Style &st, bool or_replace) { return edit_text::create_trigger_sql(t, st, or_replace); },
         changes);
   }
@@ -4044,7 +4031,7 @@ class Editor {
     if (event == nullptr) return error(i, "unknown-object", "there is no event `" + ev.name + "`");
     ev.name = event->name;
     return replace_create(
-        i, Obj::event, event->name, schema->name,
+        i, Obj::event, event->name, schema->name, edit_text::create_event_sql(*event, {}), event->origin,
         [&](const edit_text::Style &st, bool or_replace) { return edit_text::create_event_sql(ev, st, or_replace); },
         changes);
   }

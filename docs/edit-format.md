@@ -85,7 +85,7 @@ unknown members.
 | `drop_view` | `view` | done | its `CREATE VIEW`, `ALTER VIEW` and `DROP VIEW` statements of it alone |
 | `add_routine` | `routine` (Routine) | done | a `CREATE PROCEDURE` or `FUNCTION` after the schema's last routine (below) |
 | `drop_routine` | `routine`, `kind` (as for `rename_routine`) | done | its `CREATE`, `ALTER` and `DROP` statements of it alone |
-| `add_index` | `table`, `index` (Index: `columns`, or `key_parts` for lengths and order) | done | an element of the `CREATE TABLE` (below) |
+| `add_index` | `table`, `index` (Index: `columns`, or `key_parts` for lengths and order; both, as the outline gives them, when they name the same columns) | done | an element of the `CREATE TABLE` (below) |
 | `drop_index` | `table`, and `name`, `kind: "primary"`, or `columns` (an unnamed index) | done | its element, `ALTER TABLE` change or `CREATE INDEX`, or a column's `PRIMARY KEY` / `UNIQUE` |
 | `set_primary_key` | `table`, `columns` | done | the primary key's columns where it is written; a column's `PRIMARY KEY` becomes an element; added when there is none |
 | `add_foreign_key` | `table`, `foreign_key` (Foreign key) | done | an element of the `CREATE TABLE`, or an `ALTER TABLE ... ADD` (below) |
@@ -196,8 +196,9 @@ has above it (a banner's comment lines not counted); no banner is written.
   statement, or after its banner when it has none). It is written as its neighbouring view
   is: `CREATE OR REPLACE VIEW`, or with a `DROP VIEW IF EXISTS` before it. In Section 150 it is
   always one of the two, `CREATE OR REPLACE` unless the neighbour drops first. Its `definition`
-  is the `SELECT` alone: `check_option` writes the `WITH ... CHECK OPTION` (the outline's
-  definition holds it, so remove it before sending a view of the outline back). A
+  is the `SELECT`: `check_option` writes the `WITH ... CHECK OPTION`, and a trailing one in
+  the `definition` (the outline's holds it) is dropped when `check_option` is set, so a view of
+  the outline can be sent back as it is (`bad-request` when it names the other level). A
   definition that is empty or does not parse is `bad-request`.
 - **A routine** goes after the schema's last routine of either kind, inside its
   `DELIMITER` block; where `;` is the delimiter and the routine holds one, in a new block
@@ -235,6 +236,9 @@ has above it (a banner's comment lines not counted); no banner is written.
   `CREATE TABLE` or `ALTER TABLE` of another table names (a column default, also one a later
   statement changed) cannot be dropped (`referenced`): that statement fails without it
   (MariaDB error 1146).
+- **A replace that changes nothing**: an object sent as it is (the `CREATE` it would write is the
+  current object's, positions aside: one read from the outline and sent back) writes nothing
+  and has no migration; an `unchanged` note says so.
 - **A replaced view, routine, trigger or event** (`replace_*`, which msm sends for an object
   the project has, as `add_*` for a new one) must exist under its name, a routine under its
   `kind` too (`unknown-object`); a different name is not a rename (`rename_*` is), and the
@@ -451,6 +455,7 @@ TABLE` and the other statements are left as they are, without these members. Wit
 | `routine-created` | the same for a routine `add_routine` creates or `replace_routine` writes anew: its `CREATE` in the migration cannot run inside a stored procedure. msm treats it as `routine-recreated` |
 | `trigger-created`, `trigger-recreated` | the same for a trigger `add_trigger` creates (or `replace_trigger` writes anew) or `rename_trigger` drops and creates again: MariaDB refuses `CREATE TRIGGER` inside a stored procedure (error 1303) |
 | `event-created` | the same for an event `add_event` creates or `replace_event` writes anew: MariaDB refuses `CREATE EVENT` with its body inside a stored procedure (error 1576). `ALTER EVENT ... RENAME TO` runs there |
+| `unchanged` | a `replace_*` sent the object as it is: nothing was written or migrated |
 | `alter-removed` | a `replace_*` removed an `ALTER` of the object after its `CREATE`: the new definition replaces what it changed; one note per statement |
 | `still-referenced` | after a drop, a statement still refers to the dropped table, view, routine or column (a view's `SELECT`, a trigger, event or routine body, an `INSERT`); one note per statement |
 | `no-migration` | the edit has no statement for part of it: an option removed by `set_table_options`, an unnamed index or foreign key dropped, an unnamed foreign key around a `modify_column` |
