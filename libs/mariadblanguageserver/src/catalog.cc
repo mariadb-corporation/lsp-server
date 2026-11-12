@@ -2039,11 +2039,20 @@ std::optional<Origin> Catalog_fold::leading_comments() const {
   uint32_t top = first;
   while (top > 0) {
     const uint32_t above = line_begin(text_, top - 1);
-    const std::string_view line = trim(text_.substr(above, top - 1 - above));
+    const std::string_view line = text_.substr(above, top - 1 - above);
     if (!is_comment_line(line)) break;
-    // A run that reaches a section marker is the section's banner.
+    // A run that reaches a section marker (at a line's start, as
+    // schema_edit's msm_section finds it) is the section's banner.
     if (is_msm_marker(line)) return std::nullopt;
     top = above;
+  }
+  // A top line starting with `*` (not `/*`) continues a block comment opened
+  // above the run, or an expression of the statement before: not part of
+  // the comments, else removing them would cut that comment or statement.
+  while (top < first) {
+    const std::string_view line = trim(text_.substr(top, first - top));
+    if (!line.starts_with('*')) break;
+    top = static_cast<uint32_t>(text_.find('\n', top)) + 1;
   }
   if (top == first) return std::nullopt;
   uint32_t end = first - 1;  // the last comment line's break
