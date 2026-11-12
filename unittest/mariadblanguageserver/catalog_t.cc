@@ -1271,4 +1271,17 @@ TEST(Catalog, rest_statements) {
       << json;
 }
 
+// An executable comment above a REST statement is a statement, not its
+// leading comments.
+TEST(Catalog, rest_statements_executable_comment_above) {
+  const std::string sql =
+      "/*!40101 SET NAMES utf8 */;\n"
+      "CREATE REST SERVICE /svc;\n";
+  const auto o = outline_of(sql);
+  const Catalog &c = o.catalog;
+  const auto &statements = c.rest_statements(c.rest_services().at(0));
+  ASSERT_EQ(1u, statements.size());
+  EXPECT_FALSE(statements[0].leading_comments.has_value());
+}
+
 }  // namespace mdbls

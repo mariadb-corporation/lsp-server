@@ -2620,12 +2620,8 @@ class Editor {
     return best;
   }
 
-  // The start of an MSM section's marker line: `-- MSM Section 150: ...`.
-  static constexpr std::string_view k_msm_marker = "-- MSM Section ";
   // A line of a statement's banner: a comment, not an MSM section's marker.
-  static bool is_banner_line(std::string_view line) {
-    return is_comment_line(line) && line.substr(0, k_msm_marker.size()) != k_msm_marker;
-  }
+  static bool is_banner_line(std::string_view line) { return is_comment_line(line) && !is_msm_marker(line); }
   // The start of the banner right above searched offset `at`, a line's
   // start (`at` when it has none, or `at` is inside a line).
   uint32_t banner_top(uint32_t at) const {

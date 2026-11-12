@@ -178,11 +178,18 @@ inline size_t char_count(std::string_view text) {
   }));
 }
 
-// A line that holds only a comment.
+// A line that holds only a comment.  An executable comment (`/*!40101 SET
+// ... */;`, `/*M!...*/`) is a statement, not a comment.
 inline bool is_comment_line(std::string_view line) {
   const auto t = trim(line);
+  if (t.starts_with("/*!") || t.starts_with("/*M!")) return false;
   return t.substr(0, 2) == "--" || t.substr(0, 1) == "#" || t.substr(0, 2) == "/*" || t.substr(0, 1) == "*";
 }
+
+// The start of an MSM section's marker line: `-- MSM Section 150: ...`.
+inline constexpr std::string_view k_msm_marker = "-- MSM Section ";
+// Whether `line` starts with an MSM section's marker.
+inline bool is_msm_marker(std::string_view line) { return line.starts_with(k_msm_marker); }
 
 // The start of the line holding `offset`.
 inline uint32_t line_begin(std::string_view text, uint32_t offset) {

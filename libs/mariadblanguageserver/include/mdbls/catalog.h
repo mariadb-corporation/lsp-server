@@ -423,6 +423,7 @@ struct Rest_statement {
   std::optional<Origin> leading_comments;
   bool shared = false;                 // it is also another item's (USE REST SERVICE s SCHEMA p)
   bool auth_apps_only = false;         // an ALTER REST SERVICE of ADD / REMOVE AUTH APP alone
+  uint32_t order = 0;                  // fold order, across files and includes
 };
 
 // The schema objects a script defines, folded statement by statement in file
@@ -487,6 +488,7 @@ class Catalog {
   // The statements of each REST item by its key (catalog.cc, rest_key_*):
   // a schema's key extends its service's, an object's its schema's.
   std::map<std::string, std::vector<Rest_statement>> m_rest_statements;
+  uint32_t m_rest_statement_count = 0;  // the next Rest_statement::order
   const std::vector<Rest_statement> &rest_statements_of(const std::string &key) const;
   // Moves the statements of `from` and of the items under it to `to` (a
   // renamed service or schema).
