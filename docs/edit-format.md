@@ -237,24 +237,31 @@ has above it (a banner's comment lines not counted); no banner is written.
   (MariaDB error 1146).
 - **A replaced view, routine, trigger or event** (`replace_*`, which msm sends for an object
   the project has, as `add_*` for a new one) must exist under its name, a routine under its
-  `kind` too (`unknown-object`); a different name is not a rename (`rename_*` is). Its last
+  `kind` too (`unknown-object`); a different name is not a rename (`rename_*` is), and the
+  name is written as the script spells it, also when the request spells it in another case
+  (view names may tell case apart). Its last
   `CREATE` is written anew where it stands, in its file (an included one too), with the
-  layout and style of an add, and in its form: `CREATE OR REPLACE` stays one, a `CREATE`
-  after its `DROP ... IF EXISTS` stays after it, one in a `DELIMITER` block stays in it, and
+  layout and style of an add, and in its form: `CREATE OR REPLACE` stays one, `CREATE ... IF NOT
+  EXISTS` too, a `CREATE` after its `DROP ... IF EXISTS` stays after it, one in a `DELIMITER` block stays in it, and
   a body that now holds `;` where `;` is the delimiter gets a block of its own, as an add
   does. An earlier `CREATE` of it stays: the last one decides. The `ALTER` statements of it
   after that `CREATE` (`ALTER VIEW`, which redefines the view, `ALTER PROCEDURE|FUNCTION`
   characteristics, `ALTER EVENT`) go, as a drop removes statements, with an `alter-removed`
   note each: the object sent is whole (one of the outline holds what they changed), and
-  they would change it again. An event an `ALTER EVENT ... RENAME TO` named is
-  `unsupported`: its `CREATE` names it otherwise (`rename_event` it first). A `CREATE` whose
+  they would change it again. An event an `ALTER EVENT ... RENAME TO` named, or renamed
+  after its last `CREATE`, is `unsupported`: its `CREATE` names it otherwise (`rename_event`
+  it first); so is an object whose last `CREATE` a `DROP` of it follows (a `RENAME TABLE`
+  named the view). A `CREATE` whose
   text is not one file's (a routine with a `SOURCE` in its body, as MRS's `restore_roles`) is
   `edit-outside-slice`. A trigger is
   checked as `add_trigger` checks one (it may keep its own name, and not follow or precede
-  itself); its table's `CREATE TABLE` must come before its `CREATE` (`unknown-object`), and a
+  itself); its table's `CREATE TABLE` and the `CREATE` of the trigger it follows or precedes
+  must come before its `CREATE` (`unknown-object`), and a
   trigger that follows or precedes it needs it on its table, with its timing and its events
   (`referenced`: that `CREATE` fails without, error 4031). Tables and sequences have no
-  `replace_*`: their structured ops change them.
+  `replace_*`: their structured ops change them. Not checked: that the tables and views a
+  replaced view's query reads are created before it (the edit succeeds, a fresh deployment
+  fails with error 1146).
 - **A statement removed** (with the `DROP ... IF EXISTS` of the object before it, which is
   also removed) goes with its lines, with the comment lines right above it when
   one of them names the object (a Workbench banner), and the blank lines above it, as

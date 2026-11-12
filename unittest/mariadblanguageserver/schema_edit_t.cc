@@ -2471,9 +2471,11 @@ TEST(Schema_edit, replace_view_keeps_its_form_and_place) {
   EXPECT_EQ(std::vector<std::string>{"CREATE OR REPLACE VIEW v AS SELECT a AS b FROM t"}, migration(r));
   EXPECT_EQ(std::vector<std::string>{"alter-removed"}, note_kinds(r));
 
-  // OR REPLACE stays.
+  // OR REPLACE stays, and the script's spelling of the name: a replace
+  // renames nothing (view names may tell case apart).
   const auto r2 = ok(edit(script, {}, request("", R"j({"op": "replace_view", "view": {"name": "W", "definition": "SELECT 2"}})j")));
-  EXPECT_NE(std::string::npos, text(r2, "").find("CREATE OR REPLACE VIEW W AS SELECT 2;\n"));
+  EXPECT_NE(std::string::npos, text(r2, "").find("CREATE OR REPLACE VIEW w AS SELECT 2;\n"));
+  EXPECT_EQ(Tags{"create view w"}, tags(r2));
   EXPECT_TRUE(note_kinds(r2).empty());
 
   EXPECT_EQ("unknown-object", failed(edit(script, {}, request("", R"j({"op": "replace_view", "view": {"name": "x", "definition": "SELECT 1"}})j"))).kind);
@@ -2540,6 +2542,11 @@ TEST(Schema_edit, replace_trigger) {
   EXPECT_EQ("unknown-object", failed(replace(R"j({"name": "t2", "timing": "BEFORE", "events": "INSERT", "table": "t", "body": "SET @a = 1", "order": {"kind": "FOLLOWS", "trigger": "t2"}})j")).kind);
   EXPECT_EQ("unknown-object", failed(replace(R"j({"name": "t2", "timing": "BEFORE", "events": "INSERT", "table": "late", "body": "SET @a = 1"})j")).kind);
   EXPECT_EQ("unknown-object", failed(replace(R"j({"name": "t3", "timing": "BEFORE", "events": "INSERT", "table": "t", "body": "SET @a = 1"})j")).kind);
+  // Nor before the trigger it follows.
+  EXPECT_EQ("unknown-object", failed(edit("CREATE TABLE t (a INT);\n"
+                                          "CREATE TRIGGER t1 BEFORE INSERT ON t FOR EACH ROW SET NEW.a = 1;\n"
+                                          "CREATE TRIGGER t2 BEFORE INSERT ON t FOR EACH ROW SET NEW.a = 2;\n",
+                                          {}, request("", R"j({"op": "replace_trigger", "trigger": {"name": "t1", "timing": "BEFORE", "events": "INSERT", "table": "t", "body": "SET @a = 1", "order": {"kind": "FOLLOWS", "trigger": "t2"}}})j"))).kind);
 }
 
 TEST(Schema_edit, replace_event) {
@@ -2554,5 +2561,48 @@ TEST(Schema_edit, replace_event) {
   // Its CREATE names it otherwise.
   EXPECT_EQ("unsupported",
             failed(edit(script, {}, request("", R"j({"op": "replace_event", "event": {"name": "renamed", "schedule": "EVERY 1 DAY", "body": "SELECT 1"}})j"))).kind);
+  // Renamed away and back: its CREATE is not the one to rewrite alone.
+  EXPECT_EQ("unsupported",
+            failed(edit(script + "ALTER EVENT e RENAME TO e2;\nALTER EVENT e2 RENAME TO e;\n", {},
+                        request("", R"j({"op": "replace_event", "event": {"name": "e", "schedule": "EVERY 1 DAY", "body": "SELECT 1"}})j"))).kind);
+}
+
+TEST(Schema_edit, replace_what_a_rename_named) {
+  // v is w, renamed: the CREATE VIEW v was dropped.
+  const std::string script =
+      "CREATE TABLE t (a INT);\n"
+      "CREATE VIEW v AS SELECT 1;\n"
+      "DROP VIEW v;\n"
+      "CREATE VIEW w AS SELECT a FROM t;\n"
+      "RENAME TABLE w TO v;\n";
+  EXPECT_EQ("unsupported",
+            failed(edit(script, {}, request("", R"j({"op": "replace_view", "view": {"name": "v", "definition": "SELECT 2"}})j"))).kind);
+}
+
+TEST(Schema_edit, replace_routine_into_a_block_at_the_text_end_or_mid_line) {
+  // No ";" after the last statement; another statement on its line.
+  const auto body = R"j({"op": "replace_routine", "routine": {"name": "p", "kind": "procedure", "body": "BEGIN\n  SELECT 2;\nEND"}})j";
+  const auto r = ok(edit("CREATE TABLE t (a INT);\nCREATE PROCEDURE p() SELECT 1", {}, request("", body)));
+  EXPECT_EQ("CREATE TABLE t (a INT);\nDELIMITER $$\nCREATE PROCEDURE p()\nBEGIN\n  SELECT 2;\nEND$$\nDELIMITER ;",
+            text(r, ""));
+  const auto r2 = ok(edit("CREATE TABLE t (a INT); CREATE PROCEDURE p() SELECT 1; SELECT 3;\n", {}, request("", body)));
+  EXPECT_EQ("CREATE TABLE t (a INT); \nDELIMITER $$\nCREATE PROCEDURE p()\nBEGIN\n  SELECT 2;\nEND$$\nDELIMITER ;\n SELECT 3;\n",
+            text(r2, ""));
+}
+
+// CREATE ... IF NOT EXISTS stays one; the migration replaces.
+TEST(Schema_edit, replace_keeps_if_not_exists) {
+  const std::string script =
+      "CREATE TABLE t (a INT);\n"
+      "CREATE VIEW IF NOT EXISTS v AS SELECT a FROM t;\n"
+      "CREATE PROCEDURE IF NOT EXISTS p() SELECT 1;\n";
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "replace_view", "view": {"name": "v", "definition": "SELECT 1 AS b"}},
+      {"op": "replace_routine", "routine": {"name": "P", "kind": "procedure", "body": "SELECT 2"}})j")));
+  EXPECT_EQ("CREATE TABLE t (a INT);\n"
+            "CREATE VIEW IF NOT EXISTS v AS SELECT 1 AS b;\n"
+            "CREATE PROCEDURE IF NOT EXISTS p() SELECT 2;\n",
+            text(r, ""));
+  EXPECT_EQ((std::vector<std::string>{"CREATE OR REPLACE VIEW v AS SELECT 1 AS b", "CREATE OR REPLACE PROCEDURE p() SELECT 2"}),
+            migration(r));
 }
 }  // namespace mdbls
