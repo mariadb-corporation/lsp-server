@@ -1405,4 +1405,32 @@ TEST(Catalog, rest_plain_create_onto_path_in_use) {
   ASSERT_EQ(1u, svcs[1].schemas.size());
   EXPECT_EQ("other", svcs[1].schemas[0].schema);
 }
+
+// A rename onto the path of an item dropped earlier does not take its
+// statements; a DROP and a new CREATE of one path keep theirs.
+TEST(Catalog, rest_rename_onto_dropped_path) {
+  const auto o = outline_of(
+      "CREATE REST SERVICE /a;\n"
+      "CREATE REST SCHEMA /x ON SERVICE /a FROM sakila;\n"
+      "DROP REST SERVICE /a;\n"
+      "CREATE REST SERVICE /b;\n"
+      "CREATE REST SCHEMA /y ON SERVICE /b FROM sakila;\n"
+      "ALTER REST SERVICE /b NEW REQUEST PATH /a;\n"
+      "ALTER REST SCHEMA /y ON SERVICE /a NEW REQUEST PATH /x;\n"
+      "DROP REST SERVICE /c;\n"
+      "CREATE REST SERVICE /c;\n");
+  EXPECT_TRUE(o.notes.empty());
+  const Catalog &c = o.catalog;
+  ASSERT_EQ(2u, c.rest_services().size());
+  const auto &a = c.rest_services()[0];
+  EXPECT_EQ("/a", a.name.path);
+  std::vector<std::string> kinds;
+  for (const auto &s : c.rest_statements(a)) kinds.push_back(s.kind);
+  EXPECT_EQ((std::vector<std::string>{"create", "alter"}), kinds);  // /b's, not the old /a's
+  ASSERT_EQ(1u, a.schemas.size());
+  kinds.clear();
+  for (const auto &s : c.rest_statements(a, a.schemas[0])) kinds.push_back(s.kind);
+  EXPECT_EQ((std::vector<std::string>{"create", "alter"}), kinds);  // /y's, not the old /a/x's
+  EXPECT_EQ(2u, c.rest_statements(c.rest_services()[1]).size());     // /c: drop, create
+}
 }  // namespace mdbls
