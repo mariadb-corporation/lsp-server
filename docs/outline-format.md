@@ -41,7 +41,8 @@ TABLE ... LIKE t` of such a table (`unknown-table`); the `LIKE` statement is sti
 creates the table. So are a REST statement that names no service or schema when none is in use
 (`rest-none-in-use`), an `ALTER REST SERVICE` of a service the file does not create
 (`unknown-rest-service`) and an `ALTER REST SCHEMA` of a schema it does not name
-(`unknown-rest-schema`), see [REST objects](#rest-objects). A statement that parses but changes nothing (`CREATE`/`DROP USER`, `ROLE` or
+(`unknown-rest-schema`), a REST object statement of the wrong kind (`rest-object-kind`) and a
+REST rename onto a path in use (`rest-path-in-use`), see [REST objects](#rest-objects). A statement that parses but changes nothing (`CREATE`/`DROP USER`, `ROLE` or
 `SERVER`, `CREATE PACKAGE`, an `ALTER` of anything but a database, view, table, procedure,
 function, event or sequence, an `ALTER PROCEDURE`, `FUNCTION`, `EVENT` or `SEQUENCE` of an
 object the file does not create, a `RENAME` of a table, view or sequence the file does not
@@ -119,6 +120,8 @@ an included statement where its directive stands):
 | `rest-none-in-use` | `false` | a REST statement names no service (or no schema) and none is in use, where MariaDB Shell fails ("No REST SERVICE specified.", "No REST schema given."); see [REST objects](#rest-objects) |
 | `unknown-rest-service` | `false` | an `ALTER REST SERVICE` names a service the file does not create |
 | `unknown-rest-schema` | `false` | an `ALTER REST SCHEMA` names a schema the file does not create or name |
+| `rest-object-kind` | `false` | a `DROP REST VIEW`, `PROCEDURE` or `FUNCTION` names a path where the file has an object of another kind, where MariaDB Shell fails; or a `CREATE ... IF NOT EXISTS` of one kind finds an object of another kind there and does nothing, as in the shell; see [REST objects](#rest-objects) |
+| `rest-path-in-use` | `false` | an `ALTER REST SERVICE` or `SCHEMA ... NEW REQUEST PATH` names the path of another service, or another schema of the service, where MariaDB Shell fails ("The request_path is already used by another entity.") |
 
 A kind is never removed or renamed within format 1; new kinds may be added, so a consumer that
 does not know a kind should go by `applied`.
@@ -256,7 +259,9 @@ the file creates changes nothing, as does `CREATE REST SCHEMA IF NOT EXISTS` of 
 of one a statement only named, it creates it. `ALTER REST SERVICE ... NEW REQUEST PATH` renames
 the service. `ALTER REST SCHEMA [p] [ON SERVICE s] [NEW REQUEST PATH q] [FROM db]` renames the
 schema and changes the database schema it exposes; one of a schema the file does not create or
-name is not applied and gets an `unknown-rest-schema` note. `DROP REST AUTH APP`
+name is not applied and gets an `unknown-rest-schema` note. A rename onto the path of another
+service, or of another schema of the service, fails in MariaDB Shell: the statement is not
+applied (nor its other clauses) and gets a `rest-path-in-use` note. `DROP REST AUTH APP`
 also unlinks the app from every service.
 
 The service and schema a statement does not name are resolved as MariaDB Shell's MRS DDL
@@ -268,16 +273,20 @@ statement with `ON SERVICE` or `ON SCHEMA` (`FROM ...` for a `DROP`) uses what i
 current service when it names only a schema; a `CREATE`/`DROP REST VIEW`, `PROCEDURE` or
 `FUNCTION` without one uses the current service and schema. Where there is none, the shell
 fails, and the statement is not applied and gets a `rest-none-in-use` note. A `DROP` removes
-the object of that kind and path from that one schema; a `DROP` of something the file never
+the object at that path from that one schema; where the object there is of another kind (a
+`DROP REST VIEW /v` of a procedure `/v`), the shell fails, and the statement is not applied and
+gets a `rest-object-kind` note; a `DROP` of something the file never
 created, or on a service it never created, changes nothing. `DROP REST SCHEMA p [FROM SERVICE
 s] FOR SCHEMA db` (`FOR DATABASE` is the same) removes `p` only when its `schema` is `db`, names
 compared without regard to case, or when the file only named `p` (its `schema` is null);
 otherwise it changes nothing, and is still applied, with no note. `DROP REST SERVICE` or `SCHEMA` of
 the current one clears it.
 
-A `CREATE OR REPLACE REST VIEW`, `PROCEDURE` or `FUNCTION`, or a plain `CREATE`, of an object
-the file has replaces it with the last statement's definition. `CREATE ... IF NOT EXISTS` at a
-request path where the file has an object, of any kind, changes nothing, as in MariaDB Shell.
+An object is its request path in its schema, of any kind, as in MariaDB Shell. A `CREATE OR
+REPLACE REST VIEW`, `PROCEDURE` or `FUNCTION`, or a plain `CREATE`, at a path where the file has
+an object replaces it with the last statement's definition, also one of another kind.
+`CREATE ... IF NOT EXISTS` at such a path changes nothing; when the object there is of another
+kind, the statement gets a `rest-object-kind` note (it is very likely a mistake).
 
 ### REST statements
 
@@ -299,8 +308,11 @@ REST SCHEMA ... FOR SCHEMA db` that dropped nothing). Naming an item as a place 
 `ON SCHEMA`) does not make a statement that item's. An item lists its own statements only: a
 service's schemas, content sets and the objects of its schemas list theirs. The list follows the
 item across a `DROP` and a new `CREATE` and across a rename (`NEW REQUEST PATH`): it holds the
-statements written under the earlier path too. A statement that is not applied (with a note)
-is no item's.
+statements written under the earlier path too. An object's statements are those at its path,
+of any kind: a `CREATE REST VIEW IF NOT EXISTS /v` that found a procedure `/v` is the
+procedure's. A statement not applied because it names no service or schema, or one the file
+does not have (`rest-none-in-use`, `unknown-rest-service`, `unknown-rest-schema`), is no item's;
+one that fails on an item (`rest-object-kind`, `rest-path-in-use`) is that item's.
 
 ### REST settings
 

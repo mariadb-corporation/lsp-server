@@ -138,6 +138,8 @@ const char *to_string(Note_kind kind) {
     case Note_kind::rest_none_in_use: return "rest-none-in-use";
     case Note_kind::unknown_rest_service: return "unknown-rest-service";
     case Note_kind::unknown_rest_schema: return "unknown-rest-schema";
+    case Note_kind::rest_object_kind: return "rest-object-kind";
+    case Note_kind::rest_path_in_use: return "rest-path-in-use";
   }
   return "";
 }
@@ -311,10 +313,9 @@ std::string rest_key_service(std::string_view service_key) { return lower(servic
 std::string rest_key_schema(std::string_view service_key, std::string_view path) {
   return rest_key_service(service_key) + k_key_sep + "s" + lower(path);
 }
-std::string rest_key_object(std::string_view service_key, std::string_view schema_path,
-                            std::string_view kind, std::string_view path) {
-  return rest_key_schema(service_key, schema_path) + k_key_sep + "o" + std::string(kind) + k_key_sep +
-         lower(path);
+// An object by its path alone, of any kind: the shell looks objects up so.
+std::string rest_key_object(std::string_view service_key, std::string_view schema_path, std::string_view path) {
+  return rest_key_schema(service_key, schema_path) + k_key_sep + "o" + lower(path);
 }
 std::string rest_key_content_set(std::string_view service_key, std::string_view name) {
   return rest_key_service(service_key) + k_key_sep + "c" + lower(name);
@@ -338,7 +339,7 @@ const std::vector<Rest_statement> &Catalog::rest_statements(const Rest_service &
 
 const std::vector<Rest_statement> &Catalog::rest_statements(const Rest_service &svc, const Rest_schema &rs,
                                                             const Rest_object &o) const {
-  return rest_statements_of(rest_key_object(svc.name.key, rs.path, o.kind, o.path));
+  return rest_statements_of(rest_key_object(svc.name.key, rs.path, o.path));
 }
 
 const std::vector<Rest_statement> &Catalog::rest_content_set_statements(const Rest_service &svc,
@@ -2136,17 +2137,17 @@ bool Catalog_fold::rest(uint32_t n) {
     Rest_object o;
     o.kind = kind;
     o.path = text(p);
-    rest_statement(rest_key_object(place->first.key, place->second, kind, o.path), "create", p);
+    rest_statement(rest_key_object(place->first.key, place->second, o.path), "create", p);
     o.object = text(child(st, s_.mrs_qualified_identifier));
     o.origin = origin(p);
-    auto ex = std::find_if(it->objects.begin(), it->objects.end(), [&](const Rest_object &x) {
-      return iequals(x.path, o.path) && x.kind == o.kind;
-    });
-    // IF NOT EXISTS keeps an object the file created at the path, of any
-    // kind, as it is, as the shell does (it looks the path up alone).
-    if (if_not_exists(st) &&
-        std::any_of(it->objects.begin(), it->objects.end(),
-                    [&](const Rest_object &x) { return iequals(x.path, o.path); })) {
+    // The shell looks an object up by its path alone, of any kind: a CREATE
+    // replaces what is there, IF NOT EXISTS keeps it as it is.
+    auto ex = std::find_if(it->objects.begin(), it->objects.end(),
+                           [&](const Rest_object &x) { return iequals(x.path, o.path); });
+    if (ex != it->objects.end() && if_not_exists(st)) {
+      if (ex->kind != o.kind)
+        note(Note_kind::rest_object_kind, false, what() + ": does nothing, " + o.path + " is a REST " +
+                                                     upper(ex->kind));
       return true;
     }
     rest_object_details(o, st);
@@ -2210,6 +2211,12 @@ bool Catalog_fold::rest(uint32_t n) {
                            });
     if (renamed != npos) {
       const Rest_service_name to = rest_service_name(find(renamed, s_.mrs_service_request_path));
+      // The shell's metadata fails such a rename ("The request_path is
+      // already used by another entity."), and the statement with it.
+      if (const Rest_service *other = c_.find_service(to.key); other != nullptr && other != svc) {
+        note(Note_kind::rest_path_in_use, false, what() + ": REST service " + to.path + " exists");
+        return false;
+      }
       if (iequals(c_.m_current_service.key, svc->name.key)) c_.m_current_service = to;
       c_.rekey_rest_statements(rest_key_service(svc->name.key), rest_key_service(to.key));
       svc->name = to;
@@ -2281,6 +2288,11 @@ bool Catalog_fold::rest(uint32_t n) {
     rest_statement(rest_key_schema(svc->name.key, rs->path), "alter", schema_node);
     const uint32_t to = child(child(st, s_.mrs_opt_new_request_path), s_.mrs_request_path_identifier);
     if (to != npos) {
+      // As for a service: the shell fails the statement.
+      if (const Rest_schema *other = find_rest_schema(*svc, text(to)); other != nullptr && other != rs) {
+        note(Note_kind::rest_path_in_use, false, what() + ": REST schema " + text(to) + " exists");
+        return false;
+      }
       if (iequals(svc->name.key, c_.m_current_service.key) && iequals(rs->path, c_.m_current_rest_schema))
         c_.m_current_rest_schema = text(to);
       c_.rekey_rest_statements(rest_key_schema(svc->name.key, rs->path), rest_key_schema(svc->name.key, text(to)));
@@ -2348,11 +2360,19 @@ bool Catalog_fold::rest(uint32_t n) {
     if (!place) return false;
     const uint32_t p = find(st, path_sym);
     const std::string path = text(p);
-    rest_statement(rest_key_object(place->first.key, place->second, kind, path), "drop", p);
+    rest_statement(rest_key_object(place->first.key, place->second, path), "drop", p);
     Rest_service *svc = c_.find_service(place->first.key);
     Rest_schema *sch = svc != nullptr ? find_rest_schema(*svc, place->second) : nullptr;
     if (sch == nullptr) return true;
-    std::erase_if(sch->objects, [&](const Rest_object &o) { return o.kind == kind && iequals(o.path, path); });
+    const auto ex = std::find_if(sch->objects.begin(), sch->objects.end(),
+                                 [&](const Rest_object &o) { return iequals(o.path, path); });
+    if (ex == sch->objects.end()) return true;
+    // The shell fails: it drops an object of the kind the statement names.
+    if (ex->kind != kind) {
+      note(Note_kind::rest_object_kind, false, what() + ": " + path + " is a REST " + upper(ex->kind));
+      return false;
+    }
+    sch->objects.erase(ex);
     return true;
   };
   if (sym == s_.mrs_drop_rest_view_statement) return drop_object("view", s_.mrs_view_request_path);

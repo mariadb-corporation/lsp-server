@@ -60,11 +60,15 @@ enum class Note_kind {
                          // when none is in use, where MariaDB Shell fails
   unknown_rest_service,  // not applied: ALTER REST SERVICE of a service the file does not create
   unknown_rest_schema,   // not applied: ALTER REST SCHEMA of a schema the file does not name
+  rest_object_kind,      // not applied: a REST object statement of one kind at a path where
+                         // the file has an object of another kind
+  rest_path_in_use,      // not applied: a REST rename onto a request path another item has
 };
 constexpr Note_kind k_note_kinds[] = {Note_kind::syntax_error, Note_kind::unsupported_sql_mode,
                                       Note_kind::unknown_table, Note_kind::include_unreadable,
                                       Note_kind::include_nested, Note_kind::rest_none_in_use,
-                                      Note_kind::unknown_rest_service, Note_kind::unknown_rest_schema};
+                                      Note_kind::unknown_rest_service, Note_kind::unknown_rest_schema,
+                                      Note_kind::rest_object_kind, Note_kind::rest_path_in_use};
 const char *to_string(Note_kind kind);
 
 // A remark on one statement: what the fold could not read, or applied with
