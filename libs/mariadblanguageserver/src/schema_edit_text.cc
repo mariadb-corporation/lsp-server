@@ -68,10 +68,37 @@ std::string option_sql(std::string_view name, std::string_view value, const Styl
   return st.kw(upper(name)) + "=" + std::string(value);
 }
 
-// An expression in parentheses: kept as written when it has them.
+// Whether `t` is one parenthesized group: its first "(" closes at its end,
+// not before (as in `(a) OR (b)`).  Strings and quoted names are skipped.
+bool one_group(std::string_view t) {
+  if (t.size() < 2 || t.front() != '(' || t.back() != ')') return false;
+  int depth = 0;
+  for (size_t i = 0; i < t.size(); ++i) {
+    const char c = t[i];
+    if (c == '\'' || c == '"' || c == '`') {
+      // To the closing quote; a doubled one, or a backslash in a string,
+      // escapes.
+      for (++i; i < t.size(); ++i) {
+        if (c != '`' && t[i] == '\\') {
+          ++i;
+        } else if (t[i] == c) {
+          if (i + 1 < t.size() && t[i + 1] == c) ++i;
+          else break;
+        }
+      }
+    } else if (c == '(') {
+      ++depth;
+    } else if (c == ')' && --depth == 0 && i + 1 < t.size()) {
+      return false;
+    }
+  }
+  return depth == 0;
+}
+
+// An expression in parentheses: kept as written when it is one group.
 std::string parenthesized(std::string_view e) {
   const std::string_view t = trim(e);
-  if (!t.empty() && t.front() == '(' && t.back() == ')') return std::string(t);
+  if (one_group(t)) return std::string(t);
   return "(" + std::string(t) + ")";
 }
 

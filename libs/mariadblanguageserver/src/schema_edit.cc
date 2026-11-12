@@ -709,9 +709,12 @@ std::optional<Index> read_index(Json_reader &r, const Json &v, const std::string
   if (r.ok() && ix.kind.empty()) r.fail(w + " has no \"kind\"");
   std::vector<std::string> columns;
   r.strings(v, "columns", &columns, false, w);
-  for (auto &c : columns) ix.key_parts.emplace_back().column = std::move(c);
-  if (Json_reader::given(v, "key_parts")) {
-    if (!ix.key_parts.empty()) r.fail(w + " has both \"columns\" and \"key_parts\"");
+  // The outline gives both: "key_parts" then, which must name the same
+  // columns.
+  const bool parts = Json_reader::given(v, "key_parts");
+  if (!parts) {
+    for (auto &c : columns) ix.key_parts.emplace_back().column = std::move(c);
+  } else {
     r.array(v, "key_parts", w, [&](const Json &x, size_t k) {
       const std::string kw = "key part " + std::to_string(k + 1) + " of " + w;
       if (!r.object(x, kw, {"column", "length", "order", "expression"})) return;
@@ -725,6 +728,11 @@ std::optional<Index> read_index(Json_reader &r, const Json &v, const std::string
       if (Json_reader::given(x, "expression")) r.fail(kw + ": MariaDB has no expression key parts");
       ix.key_parts.push_back(std::move(kp));
     });
+    if (r.ok() && !columns.empty() &&
+        !std::equal(columns.begin(), columns.end(), ix.key_parts.begin(), ix.key_parts.end(),
+                    [](const std::string &c, const Key_part &kp) { return iequals(c, kp.column); })) {
+      r.fail(w + " has \"columns\" and \"key_parts\" naming other columns");
+    }
   }
   if (r.ok() && ix.key_parts.empty()) r.fail(w + " has no \"columns\"");
   r.choice(v, "using", &ix.using_, {"BTREE", "HASH", "RTREE"}, w);
@@ -815,6 +823,25 @@ std::optional<Table> read_table(Json_reader &r, const Json &v) {
   return t;
 }
 
+// The outline's definition of a view ends with the WITH ... CHECK OPTION
+// that `check_option` writes: dropped, so a view of the outline can be
+// sent back as it is.
+void drop_check_option(View &vw) {
+  if (vw.check_option.empty()) return;
+  std::string_view rest = trim(vw.definition);
+  auto last_word = [&] {
+    rest = trim(rest);
+    const size_t p = rest.find_last_of(" \t\r\n");
+    const std::string_view word = p == std::string_view::npos ? rest : rest.substr(p + 1);
+    rest = p == std::string_view::npos ? std::string_view() : rest.substr(0, p);
+    return word;
+  };
+  if (!iequals(last_word(), "OPTION") || !iequals(last_word(), "CHECK")) return;
+  std::string_view word = last_word();
+  if (iequals(word, "LOCAL") || iequals(word, "CASCADED")) word = last_word();
+  if (iequals(word, "WITH") && !trim(rest).empty()) vw.definition = std::string(trim(rest));
+}
+
 std::optional<View> read_view(Json_reader &r, const Json &v) {
   const std::string what = "\"view\"";
   // `reads` (an outline's, derived from the definition) is ignored.
@@ -832,6 +859,7 @@ std::optional<View> read_view(Json_reader &r, const Json &v) {
   r.str(v, "definer", &vw.definer, false, w);
   r.choice(v, "check_option", &vw.check_option, {"LOCAL", "CASCADED"}, w);
   if (!r.ok()) return std::nullopt;
+  drop_check_option(vw);
   return vw;
 }
 
@@ -3979,11 +4007,26 @@ class Editor {
     return std::nullopt;
   }
 
+  // A replace whose object is the current one (the CREATE both write is
+  // the same): nothing to write or migrate, a note says so.
+  bool unchanged(size_t i, const std::string &sent, const std::string &current, const std::string &what,
+                 const Origin &origin) {
+    if (sent != current) return false;
+    note(i, "unchanged", origin.source, origin.statement.begin, "the " + what + " is as sent: nothing was changed");
+    return true;
+  }
+
   std::optional<Edit_error> replace_view(size_t i, const Schema_edit &e, Changes &changes) {
     View v = *e.new_view;
     const auto [schema, view] = lookup().view(v.name);
     if (view == nullptr) return error(i, "unknown-object", "there is no view `" + v.name + "`");
     v.name = view->name;
+    View current = *view;
+    drop_check_option(current);
+    if (unchanged(i, edit_text::create_view_sql(v, {}), edit_text::create_view_sql(current, {}),
+                  "view `" + view->name + "`", view->origin)) {
+      return std::nullopt;
+    }
     return replace_create(
         i, Obj::view, view->name, schema->name,
         [&](const edit_text::Style &st, bool or_replace) { return edit_text::create_view_sql(v, st, or_replace); },
@@ -3996,6 +4039,10 @@ class Editor {
     if (found.empty()) return error(i, "unknown-object", "there is no " + r.kind + " `" + r.name + "`");
     const auto [schema, routine] = found[0];
     r.name = routine->name;
+    if (unchanged(i, edit_text::create_routine_sql(r, {}), edit_text::create_routine_sql(*routine, {}),
+                  r.kind + " `" + routine->name + "`", routine->origin)) {
+      return std::nullopt;
+    }
     return replace_create(
         i, routine_object(r.kind), routine->name, schema->name,
         [&](const edit_text::Style &st, bool or_replace) { return edit_text::create_routine_sql(r, st, or_replace); },
@@ -4032,6 +4079,10 @@ class Editor {
       }
     }
     t.name = old->name;
+    if (unchanged(i, edit_text::create_trigger_sql(t, {}), edit_text::create_trigger_sql(*old, {}),
+                  "trigger `" + old->name + "`", old->origin)) {
+      return std::nullopt;
+    }
     return replace_create(
         i, Obj::trigger, old->name, schema->name,
         [&](const edit_text::Style &st, bool or_replace) { return edit_text::create_trigger_sql(t, st, or_replace); },
@@ -4043,6 +4094,10 @@ class Editor {
     const auto [schema, event] = lookup().event(ev.name);
     if (event == nullptr) return error(i, "unknown-object", "there is no event `" + ev.name + "`");
     ev.name = event->name;
+    if (unchanged(i, edit_text::create_event_sql(ev, {}), edit_text::create_event_sql(*event, {}),
+                  "event `" + event->name + "`", event->origin)) {
+      return std::nullopt;
+    }
     return replace_create(
         i, Obj::event, event->name, schema->name,
         [&](const edit_text::Style &st, bool or_replace) { return edit_text::create_event_sql(ev, st, or_replace); },
