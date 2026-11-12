@@ -1479,4 +1479,30 @@ TEST(Catalog, rest_rename_onto_live_schema_with_dropped_object) {
   EXPECT_EQ(1u, c.rest_statements(svc, renamed, renamed.objects[0]).size());  // /y's /v only
   EXPECT_EQ(2u, c.rest_statements(svc, renamed, renamed.objects[1]).size());  // live /x's /w and /y's
 }
+
+// A block comment whose opening line is not a comment line, or a statement
+// continued on a line starting with `*`, is not cut into leading comments.
+TEST(Catalog, rest_statements_partial_block_comment_above) {
+  const std::string sql =
+      "/*\n"
+      "  The service\n"
+      " */\n"
+      "CREATE REST SERVICE /svc;\n"
+      "SELECT 2\n"
+      " * 3;\n"
+      "-- the schema\n"
+      "CREATE REST SCHEMA /s ON SERVICE /svc FROM sakila;\n";
+  const auto o = outline_of(sql);
+  const Catalog &c = o.catalog;
+  const auto &svc = c.rest_services().at(0);
+  const auto &statements = c.rest_statements(svc);
+  ASSERT_EQ(1u, statements.size());
+  EXPECT_FALSE(statements[0].leading_comments.has_value());
+  const auto &schema = c.rest_statements(svc, svc.schemas.at(0));
+  ASSERT_EQ(1u, schema.size());
+  ASSERT_TRUE(schema[0].leading_comments.has_value());
+  const Line_map lines(sql);
+  EXPECT_EQ(6u, lines.position(sql, schema[0].leading_comments->statement.begin).line);
+}
+
 }  // namespace mdbls
