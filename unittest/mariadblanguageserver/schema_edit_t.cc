@@ -2015,6 +2015,27 @@ TEST(Schema_edit, a_sequence_goes_above_the_first_tables_banner) {
                           R"j({"op": "drop_sequence", "sequence": "q"})j"));
 }
 
+TEST(Schema_edit, a_sequence_goes_above_the_first_table_with_nothing_of_its_kind) {
+  // No sequence to follow: the end of what is above the first table, or
+  // the script's start, or below its opening comments.
+  const char *const add = R"j({"op": "add_sequence", "sequence": {"name": "q"}})j";
+  const char *const drop = R"j({"op": "drop_sequence", "sequence": "q"})j";
+  auto added = [&](const std::string &script) {
+    EXPECT_EQ(script, twice(script, add, drop)) << script;
+    return text(ok(edit(script, {}, request("", add))), "");
+  };
+  EXPECT_EQ("CREATE SEQUENCE `q`;\n\nCREATE TABLE t (a INT);\n", added("CREATE TABLE t (a INT);\n"));
+  EXPECT_EQ("-- Script header\n\nCREATE SEQUENCE `q`;\n\nCREATE TABLE t (a INT);\n",
+            added("-- Script header\n\nCREATE TABLE t (a INT);\n"));
+  // Above the table's DROP ... IF EXISTS, after the statement above it.
+  EXPECT_EQ("SET NAMES utf8mb4;\nCREATE SEQUENCE `q`;\n\nDROP TABLE IF EXISTS t;\nCREATE TABLE t (a INT);\n",
+            added("SET NAMES utf8mb4;\n\nDROP TABLE IF EXISTS t;\nCREATE TABLE t (a INT);\n"));
+  // The statement above ends a DELIMITER block: in it, with its delimiter.
+  EXPECT_EQ("DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; END$$\nCREATE SEQUENCE `q`$$\nDELIMITER ;\n\n"
+            "CREATE TABLE t (a INT);\n",
+            added("DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; END$$\nDELIMITER ;\n\nCREATE TABLE t (a INT);\n"));
+}
+
 TEST(Schema_edit, a_sequence_set_as_a_default_by_alter_table) {
   // ALTER COLUMN ... SET DEFAULT: the deployed default names it too.
   const std::string script =
