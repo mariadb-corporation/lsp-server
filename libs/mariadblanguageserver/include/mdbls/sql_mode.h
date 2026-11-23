@@ -29,7 +29,8 @@ namespace mdbls {
 // given: it decides which versioned comments are read as SQL.
 inline constexpr unsigned long k_default_version_id = 130100;
 
-// The sql_mode flags that change how SQL is split or lexed.  The composite
+// The sql_mode flags that change how SQL is split or lexed, or how a
+// statement's column types read.  The composite
 // names are expanded as the server's expand_sql_mode() does.
 enum Sql_mode_bit : uint32_t {
   k_ansi_quotes = 1u << 0,
@@ -39,6 +40,7 @@ enum Sql_mode_bit : uint32_t {
   k_high_not_precedence = 1u << 4,
   k_oracle = 1u << 5,  // the parser refuses this mode
   k_mssql = 1u << 6,   // the parser refuses this mode
+  k_real_as_float = 1u << 7,  // REAL is FLOAT, not DOUBLE (column types)
 };
 
 // Upper-cases a comma-separated sql_mode list and removes blanks and empty

@@ -34,7 +34,9 @@ uint32_t element_bits(std::string_view e) {
   if (e == "PIPES_AS_CONCAT") return k_pipes_as_concat;
   if (e == "IGNORE_SPACE") return k_ignore_space;
   if (e == "HIGH_NOT_PRECEDENCE") return k_high_not_precedence;
-  if (e == "ANSI" || e == "POSTGRESQL" || e == "DB2" || e == "MAXDB") return k_ansi_like;
+  if (e == "REAL_AS_FLOAT") return k_real_as_float;
+  if (e == "ANSI") return k_ansi_like | k_real_as_float;
+  if (e == "POSTGRESQL" || e == "DB2" || e == "MAXDB") return k_ansi_like;
   if (e == "MYSQL40" || e == "MYSQL323") return k_high_not_precedence;
   if (e == "ORACLE") return k_ansi_like | k_oracle;
   if (e == "MSSQL") return k_ansi_like | k_mssql;

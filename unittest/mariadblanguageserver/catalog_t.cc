@@ -16,7 +16,9 @@
  */
 
 #include <gtest/gtest.h>
+#include <rapidjson/document.h>
 
+#include <optional>
 #include <string>
 
 #include "mdbls/outline.h"
@@ -1503,6 +1505,200 @@ TEST(Catalog, rest_statements_partial_block_comment_above) {
   ASSERT_TRUE(schema[0].leading_comments.has_value());
   const Line_map lines(sql);
   EXPECT_EQ(6u, lines.position(sql, schema[0].leading_comments->statement.begin).line);
+}
+
+// --- column_type (outline feature column_types) ------------------------------
+
+namespace {
+
+// The column_type of t.c in schema db.
+std::optional<std::string> column_type_of(const Outline &o, std::string_view t, std::string_view c,
+                                          std::string_view db = "db") {
+  const Table *tb = table(o, db, t);
+  if (tb == nullptr) return "(no table)";
+  const Column *col = tb->column(c);
+  if (col == nullptr) return "(no column)";
+  return col->column_type;
+}
+
+}  // namespace
+
+// Every type of tests/fixtures/column_types/mariadb-13.1.json gives what the
+// server reported for it, null where it refused the table.
+TEST(Column_types, match_the_server) {
+  const std::string json = test::read_fixture("../column_types/mariadb-13.1.json");
+  rapidjson::Document d;
+  d.Parse(json.data(), json.size());
+  ASSERT_FALSE(d.HasParseError());
+  const auto &types = d["types"].GetArray();
+  ASSERT_GT(types.Size(), 300u);
+  std::string sql = "CREATE DATABASE db CHARACTER SET utf8mb4;\nUSE db;\n";
+  for (rapidjson::SizeType i = 0; i < types.Size(); ++i) {
+    sql += "CREATE TABLE p" + std::to_string(i) + " (c " + types[i][0].GetString() + ");\n";
+  }
+  const auto o = outline_of(sql);
+  for (rapidjson::SizeType i = 0; i < types.Size(); ++i) {
+    const std::string type = types[i][0].GetString();
+    const std::optional<std::string> want =
+        types[i][1].IsNull() ? std::nullopt : std::optional<std::string>(types[i][1].GetString());
+    const Table *tb = table(o, "db", "p" + std::to_string(i));
+    // A table the parser refuses is not in the outline: no column type either.
+    const std::optional<std::string> got =
+        tb == nullptr || tb->columns.empty() ? std::nullopt : tb->columns[0].column_type;
+    EXPECT_EQ(want, got) << type;
+  }
+}
+
+// TEXT(n) and VARCHAR(n) depend on the charset: the column's, else the
+// table's, else the schema's, as it is when the column is added.
+TEST(Column_types, charset_in_force) {
+  const auto o = outline_of(
+      "CREATE DATABASE db CHARACTER SET utf8mb4;\n"
+      "USE db;\n"
+      "CREATE TABLE t (a TEXT(100), b VARCHAR(20000)) DEFAULT CHARSET latin1;\n"
+      "CREATE TABLE u (a TEXT(100)) COLLATE ucs2_bin;\n"
+      "CREATE TABLE v (a TEXT(100), b VARCHAR(20000));\n"
+      "ALTER TABLE t ADD c TEXT(100) CHARACTER SET utf8mb4, ADD d CHAR(5);\n"
+      "CREATE DATABASE other CHARACTER SET latin1;\n"
+      "CREATE TABLE other.w (a TEXT(100));\n");
+  EXPECT_EQ("tinytext", column_type_of(o, "t", "a"));  // 100 bytes in latin1
+  EXPECT_EQ("varchar(20000)", column_type_of(o, "t", "b"));
+  EXPECT_EQ("text", column_type_of(o, "t", "c"));
+  EXPECT_EQ("char(5)", column_type_of(o, "t", "d"));
+  EXPECT_EQ("tinytext", column_type_of(o, "u", "a"));  // 200 bytes in ucs2
+  EXPECT_EQ("text", column_type_of(o, "v", "a"));      // 400 bytes in utf8mb4
+  EXPECT_EQ(std::nullopt, column_type_of(o, "v", "b"));  // past 16383 characters
+  EXPECT_EQ("tinytext", column_type_of(o, "w", "a", "other"));
+}
+
+// With no charset in the script, a type whose result depends on it has none.
+TEST(Column_types, charset_not_known) {
+  const auto o = outline_of(
+      "CREATE TABLE db.t (a TEXT(100), b TEXT(1000), c VARCHAR(16383), d VARCHAR(16384),\n"
+      "  e TEXT(100) CHARACTER SET latin1, f VARCHAR(5) COLLATE latin1_bin, g ENUM('ä', 'ö'),\n"
+      "  h ENUM('a', 'A'), i ENUM('a', 'A') COLLATE latin1_bin);\n");
+  EXPECT_EQ(std::nullopt, column_type_of(o, "t", "a"));  // tinytext in latin1, text in utf8mb4
+  EXPECT_EQ("text", column_type_of(o, "t", "b"));        // text in any
+  EXPECT_EQ("varchar(16383)", column_type_of(o, "t", "c"));
+  EXPECT_EQ(std::nullopt, column_type_of(o, "t", "d"));
+  EXPECT_EQ("tinytext", column_type_of(o, "t", "e"));
+  EXPECT_EQ("varchar(5)", column_type_of(o, "t", "f"));
+  // Whether a collation equates non-ASCII values is not checked here.
+  EXPECT_EQ(std::nullopt, column_type_of(o, "t", "g"));
+  EXPECT_EQ(std::nullopt, column_type_of(o, "t", "h"));  // duplicates under a _ci collation
+  EXPECT_EQ("enum('a','A')", column_type_of(o, "t", "i"));
+}
+
+// REAL_AS_FLOAT (also in ANSI) makes REAL a float; NO_BACKSLASH_ESCAPES
+// keeps a backslash in an ENUM value. As MariaDB 13.1 reports them.
+TEST(Column_types, sql_mode) {
+  const auto o = outline_of(
+      "USE db;\n"
+      "SET sql_mode = 'REAL_AS_FLOAT';\n"
+      "CREATE TABLE m1 (a REAL, b REAL(10,2), c DOUBLE, d FLOAT8);\n"
+      "SET sql_mode = 'ANSI';\n"
+      "CREATE TABLE m2 (a REAL);\n"
+      "SET sql_mode = 'NO_BACKSLASH_ESCAPES';\n"
+      "CREATE TABLE m3 (a ENUM('x\\y', 'it''s'));\n"
+      "SET sql_mode = DEFAULT;\n"
+      "CREATE TABLE m4 (a REAL, b ENUM('x\\\\y', 'x\\'y'));\n");
+  EXPECT_EQ("float", column_type_of(o, "m1", "a"));
+  EXPECT_EQ("float(10,2)", column_type_of(o, "m1", "b"));
+  EXPECT_EQ("double", column_type_of(o, "m1", "c"));
+  EXPECT_EQ("double", column_type_of(o, "m1", "d"));
+  EXPECT_EQ("float", column_type_of(o, "m2", "a"));
+  EXPECT_EQ("enum('x\\\\y','it''s')", column_type_of(o, "m3", "a"));
+  EXPECT_EQ("double", column_type_of(o, "m4", "a"));
+  EXPECT_EQ("enum('x\\\\y','x''y')", column_type_of(o, "m4", "b"));
+}
+
+// ALTER TABLE ... CONVERT TO CHARACTER SET widens TEXT types (latin1 to
+// utf8mb4: text is mediumtext, tinytext text); CHAR and ENUM stay.
+TEST(Column_types, convert_to_character_set) {
+  const auto o = outline_of(
+      "USE db;\n"
+      "CREATE TABLE m6 (a CHAR(10), b VARCHAR(100), c TEXT, d TINYTEXT, e ENUM('a'), f LONGTEXT,\n"
+      "  g VARCHAR(20000), h VARBINARY(10)) DEFAULT CHARSET latin1;\n"
+      "ALTER TABLE m6 CONVERT TO CHARACTER SET utf8mb4;\n");
+  EXPECT_EQ("char(10)", column_type_of(o, "m6", "a"));
+  EXPECT_EQ("varchar(100)", column_type_of(o, "m6", "b"));
+  EXPECT_EQ(std::nullopt, column_type_of(o, "m6", "c"));
+  EXPECT_EQ(std::nullopt, column_type_of(o, "m6", "d"));
+  EXPECT_EQ("enum('a')", column_type_of(o, "m6", "e"));
+  EXPECT_EQ("longtext", column_type_of(o, "m6", "f"));
+  EXPECT_EQ(std::nullopt, column_type_of(o, "m6", "g"));
+  EXPECT_EQ("varbinary(10)", column_type_of(o, "m6", "h"));
+}
+
+// Parameters and RETURNS read as PARAMETERS.DTD_IDENTIFIER does on MariaDB
+// 13.1: without DEFAULT, CHARACTER SET and COLLATE; anchored and ROW types
+// and UDFs have none.
+TEST(Column_types, routines) {
+  const auto o = outline_of(
+      "CREATE DATABASE db CHARACTER SET utf8mb4;\n"
+      "USE db;\n"
+      "CREATE PROCEDURE q1(IN a INT, OUT b BOOL, INOUT c CHAR, d TEXT(100), e JSON,\n"
+      "  f VARCHAR(5) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, g ENUM('x','y'), h DECIMAL,\n"
+      "  i CHAR(5) CHARACTER SET binary, j INT ZEROFILL, k TEXT COMPRESSED, l LONG,\n"
+      "  m DOUBLE PRECISION, n UUID, o VECTOR(3), p TEXT(10), q POINT, t ENUM('a ', 'it''s')) BEGIN END;\n"
+      "CREATE PROCEDURE q2(a INT DEFAULT 5, b VARCHAR(10) DEFAULT 'x') BEGIN END;\n"
+      "CREATE PROCEDURE q3(a TYPE OF db.p.c, b ROW(x INT)) BEGIN END;\n"
+      "CREATE FUNCTION f1() RETURNS BOOL RETURN 1;\n"
+      "CREATE FUNCTION f2() RETURNS VARCHAR(10) CHARSET latin1 COLLATE latin1_bin RETURN 'a';\n"
+      "CREATE FUNCTION f4() RETURNS TEXT(100) RETURN 'a';\n"
+      "CREATE FUNCTION f5() RETURNS TYPE OF db.p.c RETURN 1;\n"
+      "CREATE FUNCTION f6() RETURNS JSON RETURN '{}';\n"
+      "CREATE FUNCTION u RETURNS STRING SONAME 'u.so';\n");
+  const Schema *db = schema(o, "db");
+  ASSERT_NE(nullptr, db);
+  auto routine = [&](std::string_view name) -> const Routine * {
+    for (const auto &r : db->routines) {
+      if (r.name == name) return &r;
+    }
+    return nullptr;
+  };
+  const Routine *q1 = routine("q1");
+  ASSERT_NE(nullptr, q1);
+  const std::vector<std::string> want = {
+      "int(11)",       "tinyint(1)",    "char(1)",    "text",          "longtext",
+      "varchar(5)",    "enum('x','y')", "decimal(10,0)", "binary(5)", "int(10) unsigned zerofill",
+      "text /*M!100301 COMPRESSED*/", "mediumtext", "double", "uuid", "vector(3)",
+      "tinytext",      "point",         "enum('a','it''s')"};
+  ASSERT_EQ(want.size(), q1->parameters.size());
+  for (size_t k = 0; k < want.size(); ++k) {
+    EXPECT_EQ(want[k], q1->parameters[k].column_type) << q1->parameters[k].name;
+  }
+  EXPECT_EQ(std::nullopt, q1->returns_column_type);
+  const Routine *q2 = routine("q2");
+  ASSERT_NE(nullptr, q2);
+  ASSERT_EQ(2u, q2->parameters.size());
+  EXPECT_EQ("int(11)", q2->parameters[0].column_type);  // no DEFAULT
+  EXPECT_EQ("varchar(10)", q2->parameters[1].column_type);
+  const Routine *q3 = routine("q3");
+  ASSERT_NE(nullptr, q3);
+  ASSERT_EQ(2u, q3->parameters.size());
+  EXPECT_EQ(std::nullopt, q3->parameters[0].column_type);
+  EXPECT_EQ(std::nullopt, q3->parameters[1].column_type);
+  EXPECT_EQ("tinyint(1)", routine("f1")->returns_column_type);
+  EXPECT_EQ("varchar(10)", routine("f2")->returns_column_type);
+  EXPECT_EQ("text", routine("f4")->returns_column_type);
+  EXPECT_EQ(std::nullopt, routine("f5")->returns_column_type);
+  EXPECT_EQ("longtext", routine("f6")->returns_column_type);
+  ASSERT_NE(nullptr, routine("u"));
+  EXPECT_EQ(std::nullopt, routine("u")->returns_column_type);
+}
+
+// SERIAL and the attributes after the type: a COLLATE among them counts.
+TEST(Column_types, serial_and_attributes) {
+  const auto o = outline_of(
+      "CREATE DATABASE db CHARACTER SET utf8mb4;\n"
+      "USE db;\n"
+      "CREATE TABLE t (a SERIAL, b TEXT(100) NOT NULL COLLATE latin1_bin, c INT UNSIGNED NOT NULL\n"
+      "  AUTO_INCREMENT PRIMARY KEY, d DECIMAL(10,2) DEFAULT 0 COMMENT 'x');\n");
+  EXPECT_EQ("bigint(20) unsigned", column_type_of(o, "t", "a"));
+  EXPECT_EQ("tinytext", column_type_of(o, "t", "b"));  // latin1, as MariaDB 13.1 reports it
+  EXPECT_EQ("int(10) unsigned", column_type_of(o, "t", "c"));
+  EXPECT_EQ("decimal(10,2)", column_type_of(o, "t", "d"));
 }
 
 }  // namespace mdbls

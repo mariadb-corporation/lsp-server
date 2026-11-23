@@ -30,7 +30,9 @@ TEST(Sql_mode, normalize) {
 TEST(Sql_mode, bits_and_composites) {
   EXPECT_EQ(0u, sql_mode_bits("STRICT_TRANS_TABLES,NO_ZERO_DATE"));
   EXPECT_EQ(k_ansi_quotes, sql_mode_bits("ansi_quotes"));
-  EXPECT_EQ(k_ansi_quotes | k_pipes_as_concat | k_ignore_space, sql_mode_bits("ANSI"));
+  // ANSI also has REAL_AS_FLOAT; the other composite modes do not.
+  EXPECT_EQ(k_ansi_quotes | k_pipes_as_concat | k_ignore_space | k_real_as_float, sql_mode_bits("ANSI"));
+  EXPECT_EQ(k_real_as_float, sql_mode_bits("REAL_AS_FLOAT"));
   EXPECT_EQ(k_ansi_quotes | k_pipes_as_concat | k_ignore_space, sql_mode_bits("POSTGRESQL"));
   EXPECT_EQ(k_high_not_precedence, sql_mode_bits("MYSQL40"));
   EXPECT_EQ(k_no_backslash_escapes | k_high_not_precedence,
