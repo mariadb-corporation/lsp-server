@@ -65,9 +65,10 @@ The ops that add or change an object carry it in the outline's shape
 with the members the outline gives it. A member left out takes the outline's default
 (`nullable` true, `default` null, `comment` null, ...), so `modify_column` with only `name`
 and `type` drops the column's comment. An unknown member is `bad-request`, naming it; the
-positions an outline object carries (`range`, `selection_range`, `source`) and a view's
-`reads` (derived from its `definition`) are ignored, so an object read from an outline can be
-sent back. The ops of the renames do not check for
+positions an outline object carries (`range`, `selection_range`, `source`), a view's
+`reads` (derived from its `definition`) and the `column_type` of columns and parameters and a
+routine's `returns_column_type` (derived from the type) are ignored, so an object read from an
+outline can be sent back. The ops of the renames do not check for
 unknown members. The add ops of objects (`add_table`, `add_sequence`, `add_view`,
 `add_routine`, `add_trigger`, `add_event`) also take `at` and `form`, where the statement goes
 and how it is written ([Placement](#placement)).

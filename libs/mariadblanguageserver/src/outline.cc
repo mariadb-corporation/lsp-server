@@ -90,7 +90,7 @@ void fold_outline(Outline &out, std::string_view text, const Statement_index &in
     } else if (!parsed[k].accepted) {
       out.notes.push_back(
           {at, Note_kind::syntax_error, false, "not read: the statement has a syntax error", source});
-    } else if (out.catalog.apply(parsed[k].tree, text)) {
+    } else if (out.catalog.apply(parsed[k].tree, text, index.modes()[stmts[ddl[k]].mode].bits)) {
       ++out.applied;
     }
   }
@@ -343,6 +343,7 @@ class Json_outline {
       opt_str("generated_storage", c.generated_storage);
       opt_str("generated_row", c.generated_row);
       opt_bool("system_versioning", c.system_versioning);
+      opt_str("column_type", c.column_type);
       options(c.options);
       origin(c.origin);
       w_.EndObject();
@@ -474,10 +475,12 @@ class Json_outline {
         str_or_null("mode", p.mode);
         str("name", p.name);
         str("type", p.type);
+        opt_str("column_type", p.column_type);
         w_.EndObject();
       }
       w_.EndArray();
       str_or_null("returns", r.returns);
+      opt_str("returns_column_type", r.returns_column_type);
       opt_str("body", r.body);
       opt_bool("deterministic", r.deterministic);
       str_or_null("data_access", r.data_access);
@@ -731,6 +734,7 @@ class Json_outline {
 
 const std::vector<const char *> &outline_features() {
   static const std::vector<const char *> features = {
+      "column_types",         // columns[].column_type, parameters[].column_type, returns_column_type
       "view_reads",           // views[].reads
       "rest_auth_app_links",  // rest.services[].auth_apps, ALTER REST SERVICE
       "rest_current_schema",  // USE REST SCHEMA, the shell's current service and schema

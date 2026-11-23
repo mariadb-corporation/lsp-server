@@ -15,6 +15,7 @@ Members added within format 1 are listed as features: `mariadb-lsp outline --fea
 
 | Feature | What it adds |
 | --- | --- |
+| `column_types` | `column_type` on columns and routine parameters, `returns_column_type` on routines: the type as MariaDB reports it ([Column types](#column-types)) |
 | `view_reads` | `views[].reads` |
 | `rest_auth_app_links` | `rest.services[].auth_apps`; `ALTER REST SERVICE` is applied |
 | `rest_declared` | `declared` on REST services and REST schemas |
@@ -189,6 +190,7 @@ i [NOT] IGNORED` sets `ignored`. `ADD INDEX`, `ADD KEY`, `ADD CONSTRAINT ... FOR
 | `invisible` | boolean | the `INVISIBLE` attribute |
 | `system_versioning` | boolean or null | `true` for `WITH SYSTEM VERSIONING`, `false` for `WITHOUT SYSTEM VERSIONING`, null when not written |
 | `options` | object | engine-defined attributes (`ENCRYPTED=YES`) under their lower-cased name, the value as written |
+| `column_type` | string or null | what `information_schema.COLUMNS.COLUMN_TYPE` shows for the column ([Column types](#column-types)) |
 
 ### Index
 
@@ -211,10 +213,60 @@ i [NOT] IGNORED` sets `ignored`. `ADD INDEX`, `ADD KEY`, `ADD CONSTRAINT ... FOR
 | Object | Members |
 | --- | --- |
 | view | `name`, `columns` (the explicit column list, or empty), `definition` (the `SELECT` as written, blanks collapsed, with its `WITH ... CHECK OPTION` when written), `algorithm` (`UNDEFINED`, `MERGE`, `TEMPTABLE`), `security` (`DEFINER`, `INVOKER`), `definer`, `check_option` (`LOCAL`, or `CASCADED` for `WITH [CASCADED] CHECK OPTION`); the last four null when not written; `reads` (see below) |
-| routine | `name`, `kind` (`procedure`, `function`), `parameters: [{mode, name, type}]` (`mode` `IN`, `OUT`, `INOUT`, or null when not written; `type` is everything after the name to the end of the parameter, so with a `DEFAULT` clause when written), `returns` (the `RETURNS` type of a function; null for a procedure; upper-cased for a UDF), `body` (exactly as written, from the first word of the body to its end; null for a UDF), `deterministic` (true for `DETERMINISTIC`, false for `NOT DETERMINISTIC`, null when not written), `data_access` (`CONTAINS SQL`, `NO SQL`, `READS SQL DATA`, `MODIFIES SQL DATA`, or null), `security` (`DEFINER`, `INVOKER`, or null), `definer`, `comment` (the literal's contents, or null), `aggregate` (`CREATE AGGREGATE FUNCTION`), `soname` (a UDF's `SONAME` library, else null) |
+| routine | `name`, `kind` (`procedure`, `function`), `parameters: [{mode, name, type, column_type}]` (`mode` `IN`, `OUT`, `INOUT`, or null when not written; `type` is everything after the name to the end of the parameter, so with a `DEFAULT` clause when written; `column_type` see [Column types](#column-types)), `returns` (the `RETURNS` type of a function; null for a procedure; upper-cased for a UDF), `returns_column_type` (`returns` as a [column type](#column-types); null for a procedure and a UDF), `body` (exactly as written, from the first word of the body to its end; null for a UDF), `deterministic` (true for `DETERMINISTIC`, false for `NOT DETERMINISTIC`, null when not written), `data_access` (`CONTAINS SQL`, `NO SQL`, `READS SQL DATA`, `MODIFIES SQL DATA`, or null), `security` (`DEFINER`, `INVOKER`, or null), `definer`, `comment` (the literal's contents, or null), `aggregate` (`CREATE AGGREGATE FUNCTION`), `soname` (a UDF's `SONAME` library, else null) |
 | trigger | `name`, `timing` (`BEFORE`, `AFTER`), `events` (`INSERT`, `UPDATE OR DELETE`, ...), `table` (the table name, without schema), `update_columns` (the columns of `UPDATE OF a, b`, else empty), `body` (exactly as written), `order` (`{kind, trigger}` for `FOLLOWS t` / `PRECEDES t`, `kind` upper-cased, or null), `definer`; the trigger belongs to the schema of its qualified name, else to the table's |
 | event | `name`, `schedule` (`AT ...` or `EVERY ... [STARTS ...] [ENDS ...]` as written, blanks collapsed), `on_completion_preserve` (true for `ON COMPLETION PRESERVE`, false for `ON COMPLETION NOT PRESERVE`, null when not written), `status` (`ENABLE`, `DISABLE`, `DISABLE ON SLAVE`, or null), `comment` (the literal's contents, or null), `body` (exactly as written), `definer` |
 | sequence | `name`, `type` (`AS INT UNSIGNED` gives `INT UNSIGNED`), `start`, `increment`, `minvalue`, `maxvalue`, `cache` (the numbers as written; null when not written, and `NO MINVALUE`/`NOMINVALUE`, `NO MAXVALUE`/`NOMAXVALUE` give null too, the server's default; `NOCACHE` gives `"0"`), `cycle` (true for `CYCLE`, false for `NOCYCLE`, null when not written), `options` (table options such as `ENGINE`, as for a table) |
+
+### Column types
+
+`column_type` (feature `column_types`) is the type as MariaDB reports it in
+`information_schema.COLUMNS.COLUMN_TYPE`, and for a routine's parameters and `RETURNS` in
+`PARAMETERS.DTD_IDENTIFIER`: lower-case, aliases resolved, defaults filled in, without
+`CHARACTER SET` and `COLLATE` (those are `charset` and `collation`) and without a parameter's
+`DEFAULT`. It is what MariaDB Shell's MRS DDL executor and SDK generator read from a live
+server. Examples:
+
+| Written | `column_type` |
+| --- | --- |
+| `INT`, `INTEGER`, `INT4` | `int(11)` |
+| `INT UNSIGNED`, `INT ZEROFILL` | `int(10) unsigned`, `int(10) unsigned zerofill` |
+| `BOOL`, `BOOLEAN` | `tinyint(1)` |
+| `SERIAL` | `bigint(20) unsigned` |
+| `REAL`, `DOUBLE PRECISION`, `FLOAT8`, `FLOAT(25)` | `double` (`REAL` is `float` under `REAL_AS_FLOAT` or `ANSI`) |
+| `DECIMAL`, `DEC`, `FIXED`, `NUMERIC`, `DECIMAL(8)` | `decimal(10,0)`, `decimal(8,0)` |
+| `YEAR` | `year(4)` |
+| `CHAR`, `NCHAR(5)`, `CHAR(5) CHARACTER SET binary`, `CHAR(5) BYTE` | `char(1)`, `char(5)`, `binary(5)`, `binary(5)` |
+| `VARCHAR(5) CHARACTER SET binary` | `varbinary(5)` |
+| `TEXT(100)` | `tinytext`, `text`, ... by the bytes it needs in its charset (100 in `latin1`, 400 in `utf8mb4`) |
+| `LONG`, `LONG VARCHAR` | `mediumtext` |
+| `JSON` | `longtext` |
+| `VARCHAR(5) COMPRESSED` | `varchar(5) /*M!100301 COMPRESSED*/` |
+| `ENUM('a ', "it's")` | `enum('a','it''s')`: trailing spaces removed, quoted as the server writes them |
+| `UUID`, `INET6`, `POINT`, `VECTOR(3)` | `uuid`, `inet6`, `point`, `vector(3)` |
+
+The charset a type without its own takes is its table's (`DEFAULT CHARSET` or `COLLATE`), else
+its schema's (`CREATE DATABASE` / `ALTER DATABASE`), as they are when the column is added; for
+a parameter, its schema's. Every rule was read off MariaDB 13.1:
+`tests/fixtures/column_types/mariadb-13.1.json` lists 301 types with what the server reported,
+and the unit tests check the outline against it.
+
+`column_type` is null when the server would refuse the type (`INT(256)`, `CHAR(256)`,
+`DECIMAL(10,31)`, `YEAR(2)`, `ENUM('a','A')` under a case-insensitive collation, a `COLLATE` of
+another charset) or when it depends on something the script does not say:
+
+- no charset in the script and a `TEXT(n)` whose size differs between charsets, or a
+  `VARCHAR(n)` longer than 16383 characters (the limit is 65532 bytes);
+- an `ENUM` or `SET` with non-ASCII values under a collation that is not binary (which values a
+  case- and accent-insensitive collation equates is not checked);
+- a character column (`CHAR`, `VARCHAR`, the `TEXT` types, `ENUM`, `SET`) after
+  `ALTER TABLE ... CONVERT TO CHARACTER SET`, which converts it (and may widen it, or make it
+  binary);
+- a type that is not MariaDB's: an unknown name (the grammar reads any name as a type plugin),
+  `TYPE OF` and `ROW` types, Oracle-mode types, a UDF's `RETURNS`.
+
+A reader without `column_types` (an older binary, or a null) can fall back to the lower-cased
+`type`.
 
 ### A view's `reads`
 

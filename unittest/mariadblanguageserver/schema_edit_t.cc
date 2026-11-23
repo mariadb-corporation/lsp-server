@@ -295,6 +295,11 @@ TEST(Schema_edit, request_errors) {
   // A view's `reads` too: the definition says what it reads.
   EXPECT_EQ("ok",
             kind(request("s", R"j({"op": "add_view", "view": {"name": "v2", "definition": "SELECT 1", "reads": [{"kind": "table_or_view", "schema": null, "name": "t"}]}})j")));
+  // And column types (column_types): the type says what they are.
+  EXPECT_EQ("ok",
+            kind(request("s", R"j({"op": "add_column", "table": "t", "column": {"name": "c2", "type": "BOOL", "column_type": "tinyint(1)"}})j")));
+  EXPECT_EQ("ok",
+            kind(request("s", R"j({"op": "add_routine", "routine": {"name": "f2", "kind": "function", "parameters": [{"mode": null, "name": "a", "type": "INT", "column_type": "int(11)"}], "returns": "INT", "returns_column_type": "int(11)", "body": "RETURN a"}})j")));
 }
 
 TEST(Schema_edit, supported_ops) {

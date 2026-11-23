@@ -105,6 +105,10 @@ struct Column {
   std::optional<bool> system_versioning;     // WITH / WITHOUT SYSTEM VERSIONING
   // Engine-defined attributes (ENCRYPTED=YES): lower-cased name, value as written.
   std::vector<std::pair<std::string, std::string>> options;
+  // What information_schema.COLUMNS.COLUMN_TYPE shows for it ("int(11)",
+  // "tinyint(1)" for BOOLEAN); nullopt when the server would refuse the type
+  // or the script does not say enough (column_type.h).
+  std::optional<std::string> column_type;
 
   // "varchar(20) CHARACTER SET utf8mb4 NOT NULL DEFAULT 'x' AUTO_INCREMENT"
   std::string attributes() const;
@@ -182,6 +186,11 @@ struct Table {
   std::string partitioning;            // the PARTITION BY clause as written, or ""
   bool system_versioning = false;      // WITH SYSTEM VERSIONING
   std::vector<Period> periods;
+  // A table created without CHARACTER SET or COLLATE keeps its schema's
+  // charset (or collation) as it was then, "" when not known; a later ALTER
+  // DATABASE does not change it. nullopt when not read from a script. For
+  // column types only, not in the outline.
+  std::optional<std::string> schema_charset;
 
   Column *column(std::string_view name);
   const Column *column(std::string_view name) const;
@@ -215,7 +224,8 @@ struct View {
 struct Parameter {
   std::string mode;                    // IN, OUT, INOUT, or "" (IN)
   std::string name;
-  std::string type;
+  std::string type;                    // as written, with its DEFAULT clause
+  std::optional<std::string> column_type;  // PARAMETERS.DTD_IDENTIFIER, as Column's
 };
 
 struct Routine {
@@ -223,6 +233,7 @@ struct Routine {
   std::string kind;                    // procedure, function
   std::vector<Parameter> parameters;
   std::string returns;                 // functions only
+  std::optional<std::string> returns_column_type;  // as Column::column_type; nullopt for a UDF
   Origin origin;
   bool stub = false;                   // as Table::stub: no parameters yet
   std::optional<std::string> body;     // as written, not collapsed
@@ -441,7 +452,9 @@ class Catalog {
   // Applies one accepted statement.  `tree` is its parse tree; `text` the
   // document its offsets point into.  Returns false for a statement that
   // changes nothing in the catalog.
-  bool apply(const Syntax_tree &tree, std::string_view text);
+  // `mode_bits` (Sql_mode_bit) is the statement's sql_mode: how its string
+  // literals and REAL read.
+  bool apply(const Syntax_tree &tree, std::string_view text, uint32_t mode_bits);
 
   const std::vector<Schema> &schemas() const { return m_schemas; }
   const std::vector<Rest_service> &rest_services() const { return m_services; }

@@ -670,10 +670,12 @@ class Json_reader {
   std::optional<Edit_error> m_bad;
 };
 
+// column_type and returns_column_type (outline feature column_types) are
+// accepted and ignored: they follow from the type.
 std::optional<Column> read_column(Json_reader &r, const Json &v, const std::string &what) {
   if (!r.object(v, what, {"name", "type", "nullable", "default", "auto_increment", "comment", "charset",
                           "collation", "generated", "generated_storage", "generated_row", "on_update",
-                          "invisible", "system_versioning", "options"})) {
+                          "invisible", "system_versioning", "options", "column_type"})) {
     return std::nullopt;
   }
   Column c;
@@ -873,7 +875,7 @@ std::optional<View> read_view(Json_reader &r, const Json &v) {
 std::optional<Routine> read_routine(Json_reader &r, const Json &v) {
   const std::string what = "\"routine\"";
   if (!r.object(v, what, {"name", "kind", "parameters", "returns", "body", "deterministic", "data_access",
-                          "security", "definer", "comment", "aggregate", "soname"})) {
+                          "security", "definer", "comment", "aggregate", "soname", "returns_column_type"})) {
     return std::nullopt;
   }
   Routine rt;
@@ -883,7 +885,7 @@ std::optional<Routine> read_routine(Json_reader &r, const Json &v) {
   if (r.ok() && rt.kind.empty()) r.fail(w + " has no \"kind\"");
   r.array(v, "parameters", w, [&](const Json &x, size_t k) {
     const std::string pw = "parameter " + std::to_string(k + 1) + " of " + w;
-    if (!r.object(x, pw, {"mode", "name", "type"})) return;
+    if (!r.object(x, pw, {"mode", "name", "type", "column_type"})) return;
     Parameter p;
     r.choice(x, "mode", &p.mode, {"IN", "OUT", "INOUT"}, pw);
     if (r.ok() && rt.kind == "function" && !p.mode.empty() && p.mode != "IN") {
