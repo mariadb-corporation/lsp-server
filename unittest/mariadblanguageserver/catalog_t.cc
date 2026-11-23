@@ -1612,22 +1612,21 @@ TEST(Column_types, sql_mode) {
   EXPECT_EQ("enum('x\\\\y','x''y')", column_type_of(o, "m4", "b"));
 }
 
-// ALTER TABLE ... CONVERT TO CHARACTER SET widens TEXT types (latin1 to
-// utf8mb4: text is mediumtext, tinytext text); CHAR and ENUM stay.
+// ALTER TABLE ... CONVERT TO CHARACTER SET converts every character column
+// (to binary, CHAR(5) is binary(5); latin1 to utf8mb4 widens text to
+// mediumtext): their column types are no longer known. Others stay.
 TEST(Column_types, convert_to_character_set) {
   const auto o = outline_of(
       "USE db;\n"
       "CREATE TABLE m6 (a CHAR(10), b VARCHAR(100), c TEXT, d TINYTEXT, e ENUM('a'), f LONGTEXT,\n"
-      "  g VARCHAR(20000), h VARBINARY(10)) DEFAULT CHARSET latin1;\n"
+      "  g SET('x'), h VARBINARY(10), i INT, j BLOB) DEFAULT CHARSET latin1;\n"
       "ALTER TABLE m6 CONVERT TO CHARACTER SET utf8mb4;\n");
-  EXPECT_EQ("char(10)", column_type_of(o, "m6", "a"));
-  EXPECT_EQ("varchar(100)", column_type_of(o, "m6", "b"));
-  EXPECT_EQ(std::nullopt, column_type_of(o, "m6", "c"));
-  EXPECT_EQ(std::nullopt, column_type_of(o, "m6", "d"));
-  EXPECT_EQ("enum('a')", column_type_of(o, "m6", "e"));
-  EXPECT_EQ("longtext", column_type_of(o, "m6", "f"));
-  EXPECT_EQ(std::nullopt, column_type_of(o, "m6", "g"));
+  for (const char *c : {"a", "b", "c", "d", "e", "f", "g"}) {
+    EXPECT_EQ(std::nullopt, column_type_of(o, "m6", c)) << c;
+  }
   EXPECT_EQ("varbinary(10)", column_type_of(o, "m6", "h"));
+  EXPECT_EQ("int(11)", column_type_of(o, "m6", "i"));
+  EXPECT_EQ("blob", column_type_of(o, "m6", "j"));
 }
 
 // Parameters and RETURNS read as PARAMETERS.DTD_IDENTIFIER does on MariaDB
@@ -1699,6 +1698,42 @@ TEST(Column_types, serial_and_attributes) {
   EXPECT_EQ("tinytext", column_type_of(o, "t", "b"));  // latin1, as MariaDB 13.1 reports it
   EXPECT_EQ("int(10) unsigned", column_type_of(o, "t", "c"));
   EXPECT_EQ("decimal(10,2)", column_type_of(o, "t", "d"));
+}
+
+}  // namespace mdbls
+
+namespace mdbls {
+
+// A table created without a charset keeps its schema's as it was then; an
+// ALTER TABLE's own DEFAULT CHARSET applies to the columns it adds.
+TEST(Column_types, table_charset_at_creation) {
+  const auto o = outline_of(
+      "CREATE DATABASE db CHARACTER SET latin1;\n"
+      "USE db;\n"
+      "CREATE TABLE r1 (a INT);\n"
+      "ALTER DATABASE db CHARACTER SET utf8mb4;\n"
+      "ALTER TABLE r1 ADD b TEXT(100);\n"
+      "CREATE TABLE r2 (a INT) DEFAULT CHARSET utf8mb4;\n"
+      "ALTER TABLE r2 ADD b TEXT(100), DEFAULT CHARSET latin1;\n");
+  EXPECT_EQ("tinytext", column_type_of(o, "r1", "b"));
+  EXPECT_EQ("tinytext", column_type_of(o, "r2", "b"));
+}
+
+// Refused on the server: an unknown CHARACTER SET, 65 SET members, a
+// collation named as a charset. Accepted: values an _ai_cs collation tells
+// apart (MariaDB 13.1).
+TEST(Column_types, refused_members_and_charsets) {
+  std::string set = "SET(";
+  for (int i = 1; i <= 65; ++i) set += (i > 1 ? ",'" : "'") + std::to_string(i) + "'";
+  set += ")";
+  const auto o = outline_of(
+      "USE db;\n"
+      "CREATE TABLE r3 (a VARCHAR(10) CHARACTER SET nosuch, b ENUM('a','\xc3\xa1') COLLATE uca1400_ai_cs,\n"
+      "  c " + set + ", d CHAR(2) CHARACTER SET latin1_bin) DEFAULT CHARSET utf8mb4;\n");
+  for (const char *c : {"a", "c", "d"}) {
+    EXPECT_EQ(std::nullopt, column_type_of(o, "r3", c)) << c;
+  }
+  EXPECT_EQ("enum('a','\xc3\xa1')", column_type_of(o, "r3", "b"));
 }
 
 }  // namespace mdbls

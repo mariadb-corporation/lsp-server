@@ -46,7 +46,7 @@ struct Type_spec {
   std::string base;
   // The numbers in the parentheses after the type as written: (M) or (M,D).
   std::vector<std::string> args;
-  bool is_unsigned = false;
+  bool is_unsigned = false;            // also set by ZEROFILL
   bool zerofill = false;
   bool compressed = false;
   // With the type: CHARACTER SET (BYTE is binary, ASCII latin1, UNICODE
@@ -57,11 +57,19 @@ struct Type_spec {
   std::optional<std::vector<std::string>> values;
 };
 
+// The charset a type without CHARACTER SET or COLLATE takes: a column's
+// table's, else its schema's; a parameter's schema's. Resolved once per
+// table or routine.
+struct Charset_default {
+  std::string charset;          // canonical name, "" when not known
+  bool case_sensitive = false;  // its collation is binary, _bin or _cs (not _ai_cs)
+};
+
+// The default from a charset or collation name ("" when not known).
+Charset_default charset_default(std::string_view charset_or_collation);
+
 // The column type of `t`, lower-case as the server writes it, or nullopt.
-// `default_charset` is the charset a type without CHARACTER SET or COLLATE
-// takes (a column's table, else its schema; a parameter's schema): its name,
-// or a collation's, "" when not known.
-std::optional<std::string> column_type(const Type_spec &t, std::string_view default_charset);
+std::optional<std::string> column_type(const Type_spec &t, const Charset_default &def);
 
 // The bytes per character of a charset (MariaDB's CHARACTER_SETS.MAXLEN),
 // 0 for a name the server does not have. utf8 is utf8mb3.

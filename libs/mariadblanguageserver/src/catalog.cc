@@ -598,22 +598,34 @@ class Catalog_fold {
   void add_period(uint32_t n, Table &t);
   static void rename_column_refs(Table &t, const std::string &from, const std::string &to);
   void engine_option(uint32_t n, std::vector<std::pair<std::string, std::string>> &opts) const;
-  void field_list_items(uint32_t n, Table &t);
-  void column_def(uint32_t n, Table &t, std::optional<size_t> at = std::nullopt);
-  Column column(uint32_t field_spec, Table &t);
-  Column column_parts(uint32_t field_spec, Table &t);
+  // `d`: the charset a column without its own takes (defaults_for()).
+  void field_list_items(uint32_t n, Table &t, const Charset_default &d);
+  void column_def(uint32_t n, Table &t, const Charset_default &d, std::optional<size_t> at = std::nullopt);
+  Column column(uint32_t field_spec, Table &t, const Charset_default &d);
+  Column column_parts(uint32_t field_spec, Table &t, Type_spec &type);
 
   // --- column types (column_type.h)
   // The type under a qualified_field_type, field_type_all or
-  // field_type_all_with_typedefs node.
+  // field_type_all_with_typedefs node, without its charset (with_charset()).
   Type_spec type_spec(uint32_t n) const;
   void type_args(uint32_t n, Type_spec &t) const;
-  void type_charset(uint32_t binary, Type_spec &t) const;
+  // The CHARACTER SET, BYTE, ASCII, UNICODE and COLLATE of a `binary` node.
+  struct Charset_clause {
+    std::optional<std::string> charset;    // CHARACTER SET x; ASCII latin1, UNICODE ucs2
+    std::optional<std::string> collation;  // COLLATE y; "default" for COLLATE DEFAULT
+    bool byte = false;                     // BYTE
+    bool collate_binary = false;           // COLLATE BINARY (the MySQL form)
+    std::vector<uint32_t> nodes;           // what names charset and collation (not BYTE, BINARY)
+  };
+  Charset_clause charset_clause(uint32_t binary) const;
+  static void with_charset(Type_spec &t, const Charset_clause &c);
   std::optional<std::vector<std::string>> enum_values(uint32_t string_list) const;
   std::optional<std::string> decode_string(uint32_t text_string) const;
-  // The charset (or collation) a type without its own takes: the table's,
-  // else its schema's; "" when neither says.
-  std::string default_charset(const Table *t, const std::string &schema);
+  // The charset a type without its own takes: the table's, else its
+  // schema's as it was when the table was created, else its schema's.
+  Charset_default defaults_for(const Table *t, const std::string &schema) const;
+  std::string schema_charset(const std::string &schema) const;
+  static std::string options_charset(const std::vector<std::pair<std::string, std::string>> &opts);
   void key_def(uint32_t n, Table &t);
   void check_def(uint32_t n, Table &t);
   Foreign_key references(uint32_t refs, std::string name, std::vector<std::string> columns,
@@ -634,7 +646,6 @@ class Catalog_fold {
   const Syms &s_;
   uint32_t mode_bits_;  // Sql_mode_bit of the statement
   Range stmt_;
-  std::string table_schema_;  // the schema of the table being created or altered
 };
 
 bool Catalog_fold::run() {
@@ -1152,9 +1163,11 @@ bool Catalog_fold::create_table(uint32_t n) {
   tb.origin = origin(id);
   // The options first: the columns' types take the table's charset.
   if (table_options(child(body, s_.opt_create_table_options), tb.options)) tb.system_versioning = true;
-  table_schema_ = schema_name;
+  // Without its own charset the table keeps the schema's as it is now
+  // (LIKE: the source table's).
+  if (!tb.schema_charset && options_charset(tb.options).empty()) tb.schema_charset = schema_charset(schema_name);
   if (const uint32_t list = child(body, s_.create_field_list_parens); list != npos) {
-    field_list_items(list, tb);
+    field_list_items(list, tb, defaults_for(&tb, schema_name));
   }
   if (const uint32_t p = find(child(body, s_.opt_create_partitioning), s_.partitioning); p != npos) {
     tb.partitioning = text(p);
@@ -1165,34 +1178,29 @@ bool Catalog_fold::create_table(uint32_t n) {
   return true;
 }
 
-void Catalog_fold::field_list_items(uint32_t n, Table &tb) {
+void Catalog_fold::field_list_items(uint32_t n, Table &tb, const Charset_default &d) {
   for (const uint32_t item : find_all(n, s_.field_list_item)) {
     const auto ch = t_.children(item);
     if (ch.empty()) continue;
     const int sym = t_.node(ch[0]).symbol;
-    if (sym == s_.column_def) column_def(ch[0], tb);
+    if (sym == s_.column_def) column_def(ch[0], tb, d);
     else if (sym == s_.key_def) key_def(ch[0], tb);
     else if (sym == s_.constraint_def) check_def(ch[0], tb);
     else if (sym == s_.period_for_system_time || sym == s_.PERIOD_SYM) add_period(item, tb);
   }
 }
 
-Column Catalog_fold::column(uint32_t spec, Table &tb) {
-  Column c = column_parts(spec, tb);
-  const uint32_t type = child(spec, s_.field_type_or_serial);
+Column Catalog_fold::column(uint32_t spec, Table &tb, const Charset_default &d) {
   Type_spec t;
-  if (const uint32_t q = child(type, s_.qualified_field_type); q != npos) {
-    t = type_spec(q);
-    // A COLLATE among the attributes counts too (c.collation is the last one).
-    if (c.collation) t.collation = c.collation;
-  } else {
-    t.base = "serial";
-  }
-  c.column_type = column_type(t, default_charset(&tb, table_schema_));
+  Column c = column_parts(spec, tb, t);
+  // A COLLATE among the attributes counts too (c.collation is the last one).
+  if (c.collation) t.collation = c.collation;
+  c.column_type = column_type(t, d);
   return c;
 }
 
-Column Catalog_fold::column_parts(uint32_t spec, Table &tb) {
+// The column, and its type for column_type().
+Column Catalog_fold::column_parts(uint32_t spec, Table &tb, Type_spec &t) {
   Column c;
   const uint32_t id = child(spec, s_.field_ident);
   c.name = name_of(id);
@@ -1202,34 +1210,14 @@ Column Catalog_fold::column_parts(uint32_t spec, Table &tb) {
   if (const uint32_t q = child(type, s_.qualified_field_type); q != npos) {
     // CHARACTER SET x, ASCII, UNICODE and COLLATE y go to charset and
     // collation; BINARY and BYTE stay in the type.
-    std::vector<uint32_t> cut;
-    if (const uint32_t bin = find(q, s_.binary); bin != npos) {
-      bool after_collate = false;
-      for (const uint32_t ch : t_.children(bin)) {
-        const int sym = t_.node(ch).symbol;
-        if (sym == s_.charset_or_alias) {
-          cut.push_back(ch);
-          if (const uint32_t cn = child(ch, s_.charset_name); cn != npos) {
-            c.charset = charset_name(cn);
-          } else if (has_child(ch, s_.ASCII_SYM)) {
-            c.charset = "latin1";
-          } else if (has_child(ch, s_.UNICODE_SYM)) {
-            c.charset = "ucs2";
-          }
-        } else if (sym == s_.COLLATE_SYM) {
-          cut.push_back(ch);
-          after_collate = true;
-        } else if (after_collate && sym == s_.collation_name) {
-          cut.push_back(ch);
-          c.collation = charset_name(ch);
-        } else if (after_collate && sym == s_.DEFAULT) {
-          cut.push_back(ch);
-          c.collation = "default";
-        }
-      }
-    }
-    c.type = text_without(q, cut);
+    const Charset_clause cc = charset_clause(find(q, s_.binary));
+    c.charset = cc.charset;
+    c.collation = cc.collation;
+    c.type = text_without(q, cc.nodes);
+    t = type_spec(q);
+    with_charset(t, cc);
   } else {
+    t.base = "serial";
     // SERIAL: BIGINT UNSIGNED NOT NULL AUTO_INCREMENT UNIQUE
     c.type = "SERIAL";
     c.nullable = false;
@@ -1298,9 +1286,9 @@ Column Catalog_fold::column_parts(uint32_t spec, Table &tb) {
   return c;
 }
 
-void Catalog_fold::column_def(uint32_t n, Table &tb, std::optional<size_t> at) {
+void Catalog_fold::column_def(uint32_t n, Table &tb, const Charset_default &d, std::optional<size_t> at) {
   const uint32_t spec = child(n, s_.field_spec);
-  Column c = column(spec, tb);
+  Column c = column(spec, tb, d);
   if (tb.column(c.name) != nullptr) drop_column_checks(tb, c.name);  // redefined
   column_check(spec, c.name, tb);
   if (const uint32_t refs = child(n, s_.references); refs != npos) {
@@ -1493,6 +1481,13 @@ bool Catalog_fold::create_routine(uint32_t n) {
   r.name = name_of(id);
   r.origin = origin(id);
   r.definer = definer_of(n);
+  const Charset_default defaults = defaults_for(nullptr, schema_name);
+  auto routine_type = [&](uint32_t type) -> std::optional<std::string> {
+    if (type == npos) return std::nullopt;
+    Type_spec t = type_spec(type);
+    with_charset(t, charset_clause(find(type, s_.binary)));
+    return column_type(t, defaults);
+  };
   for (const uint32_t p : find_all(params, s_.sp_param_default)) {
     Parameter prm;
     const uint32_t nm = find(p, s_.sp_param_name_and_mode);
@@ -1500,12 +1495,10 @@ bool Catalog_fold::create_routine(uint32_t n) {
     prm.name = name_of(find(nm, s_.ident));
     prm.type = text_span(t_.end(nm), p);
     const uint32_t pt = child(child(p, s_.sp_param_init_vars), s_.field_type_all_with_typedefs);
-    if (pt != npos) prm.column_type = column_type(type_spec(pt), default_charset(nullptr, schema_name));
+    if (pt != npos) prm.column_type = routine_type(pt);
     r.parameters.push_back(std::move(prm));
   }
-  if (returns_type != npos && !r.soname) {
-    r.returns_column_type = column_type(type_spec(returns_type), default_charset(nullptr, schema_name));
-  }
+  r.returns_column_type = routine_type(returns_type);  // none for a UDF: no sf_return_type
   Schema &sc = c_.schema(schema_name);
   auto it = std::find_if(sc.routines.begin(), sc.routines.end(), [&](const Routine &x) {
     return iequals(x.name, r.name) && x.kind == r.kind;
@@ -1575,13 +1568,30 @@ bool Catalog_fold::alter(uint32_t n) {
   auto [schema_name, id] = qualified(child(n, s_.table_ident));
   Schema *sc = &c_.schema(schema_name);
   Table *tb = sc->table(name_of(id));
-  table_schema_ = schema_name;
   if (tb == nullptr) {
     note(Note_kind::unknown_table, false,
          "ALTER TABLE " + name_of(id) + ": the script does not create this table");
     return false;
   }
-  for (const uint32_t item : find_all(child(n, s_.alter_commands), s_.alter_list_item)) {
+  const auto items = find_all(child(n, s_.alter_commands), s_.alter_list_item);
+  // A column the statement adds or changes takes the statement's DEFAULT
+  // CHARSET, wherever that is written.
+  std::vector<uint32_t> option_items;
+  for (const uint32_t item : items) {
+    const auto ch = t_.children(item);
+    if (!ch.empty() && t_.node(ch[0]).symbol == s_.create_table_options_space_separated) {
+      option_items.push_back(ch[0]);
+    }
+  }
+  auto column_defaults = [&] {
+    if (option_items.empty()) return defaults_for(tb, schema_name);
+    Table probe;
+    probe.options = tb->options;
+    probe.schema_charset = tb->schema_charset;
+    for (const uint32_t o : option_items) table_options(o, probe.options);
+    return defaults_for(&probe, schema_name);
+  };
+  for (const uint32_t item : items) {
     const auto ch = t_.children(item);
     if (ch.empty()) continue;
     const int first = t_.node(ch[0]).symbol;
@@ -1596,9 +1606,9 @@ bool Catalog_fold::alter(uint32_t n) {
     };
     if (first == s_.add_column) {
       if (const uint32_t cd = child(item, s_.column_def); cd != npos) {
-        column_def(cd, *tb, place(child(item, s_.opt_place)));
+        column_def(cd, *tb, column_defaults(), place(child(item, s_.opt_place)));
       } else {
-        field_list_items(child(item, s_.create_field_list), *tb);
+        field_list_items(child(item, s_.create_field_list), *tb, column_defaults());
       }
     } else if (first == s_.ADD) {
       if (const uint32_t kd = child(item, s_.key_def); kd != npos) {
@@ -1618,7 +1628,7 @@ bool Catalog_fold::alter(uint32_t n) {
       }
     } else if (first == s_.CHANGE || first == s_.MODIFY_SYM) {
       const uint32_t spec = child(item, s_.field_spec);
-      Column c = column(spec, *tb);
+      Column c = column(spec, *tb, column_defaults());
       const std::string old = first == s_.CHANGE ? name_of(child(item, s_.field_ident)) : c.name;
       // The column's own CHECK is part of its definition.
       drop_column_checks(*tb, old);
@@ -1708,15 +1718,15 @@ bool Catalog_fold::alter(uint32_t n) {
         if (it != tb->indexes.end()) it->name = name_of(ids[1]);
       }
     } else if (first == s_.CONVERT_SYM) {
-      // The server converts the character columns and widens a TEXT type
-      // (or a VARCHAR past the new charset's limit) to keep its length;
-      // those column types are no longer known. CHAR stays.
+      // The server converts every character column to the new charset:
+      // CHAR may become BINARY, TEXT widen, an ENUM's values collide. Their
+      // column types are no longer known.
       for (Column &col : tb->columns) {
         if (!col.column_type) continue;
-        const std::string &ct = *col.column_type;
-        const bool long_varchar = ct.starts_with("varchar(") && std::atoll(ct.c_str() + 8) > 16383;
-        if (long_varchar || ct.starts_with("tinytext") || ct.starts_with("text") ||
-            ct.starts_with("mediumtext")) {
+        const std::string_view ct = *col.column_type;
+        const std::string_view base = ct.substr(0, ct.find_first_of("( "));
+        if (base == "char" || base == "varchar" || base.ends_with("text") || base == "enum" ||
+            base == "set") {
           col.column_type.reset();
         }
       }
@@ -2561,84 +2571,65 @@ Type_spec Catalog_fold::type_spec(uint32_t n) const {
     if (udt == npos) return t;
     t.base = lower(name_of(udt));
     type_args(child(n, s_.float_options), t);
-    type_charset(find(n, s_.binary), t);
     return t;
   }
-  const uint32_t k = nth(builtin, 0);
-  if (k == npos) return t;
-  const int group = t_.node(k).symbol;
+  const uint32_t k = nth(builtin, 0);  // field_type_numeric, _temporal, _string, _lob, _misc
   const uint32_t first = nth(k, 0);
   if (first == npos) return t;
   const int f = t_.node(first).symbol;
-  // The token of a one-token nonterminal (int_type, real_type's first).
-  auto token_of = [&](uint32_t x) { const uint32_t c = nth(x, 0); return c == npos ? -1 : t_.node(c).symbol; };
+  // A one-token nonterminal's token (int_type, real_type, char).
+  const uint32_t inner = nth(first, 0);
+  const int token = inner == npos ? -1 : t_.node(inner).symbol;
 
-  if (group == s_.field_type_numeric) {
-    if (f == s_.int_type) {
-      const int tok = token_of(first);
-      if (tok == s_.TINYINT) t.base = "tinyint";
-      else if (tok == s_.SMALLINT) t.base = "smallint";
-      else if (tok == s_.MEDIUMINT) t.base = "mediumint";
-      else if (tok == s_.INT_SYM) t.base = "int";
-      else if (tok == s_.BIGINT) t.base = "bigint";
-    } else if (f == s_.real_type) {
-      t.base = token_of(first) == s_.REAL && (mode_bits_ & k_real_as_float) != 0 ? "float" : "double";
-    } else if (f == s_.FLOAT_SYM) {
-      t.base = "float";
-    } else if (f == s_.BIT_SYM) {
-      t.base = "bit";
-    } else if (f == s_.BOOL_SYM || f == s_.BOOLEAN_SYM) {
-      t.base = "boolean";
-    } else if (f == s_.DECIMAL_SYM || f == s_.NUMERIC_SYM || f == s_.FIXED_SYM) {
-      t.base = "decimal";
-    }  // NUMBER: Oracle mode
-  } else if (group == s_.field_type_temporal) {
-    if (f == s_.YEAR_SYM) t.base = "year";
-    else if (f == s_.DATE_SYM) t.base = "date";
-    else if (f == s_.TIME_SYM) t.base = "time";
-    else if (f == s_.TIMESTAMP) t.base = "timestamp";
-    else if (f == s_.DATETIME) t.base = "datetime";
-  } else if (group == s_.field_type_string) {
-    if (f == s_.varchar) {
-      t.base = "varchar";
-    } else if (f == s_.nvarchar) {
-      t.base = "varchar";
-      t.charset = "utf8mb3";  // the national charset
-    } else if (f == s_.nchar) {
-      t.base = "char";
-      t.charset = "utf8mb3";
-    } else if (f == s_.BINARY) {
-      t.base = "binary";
-    } else if (f == s_.VARBINARY) {
-      t.base = "varbinary";
-    } else if (token_of(first) == s_.CHAR_SYM) {
-      t.base = "char";
-    }  // VARCHAR2, RAW: Oracle mode
-  } else if (group == s_.field_type_lob) {
-    if (f == s_.TINYBLOB) t.base = "tinyblob";
-    else if (f == s_.BLOB_MARIADB_SYM) t.base = "blob";
-    else if (f == s_.MEDIUMBLOB) t.base = "mediumblob";
-    else if (f == s_.LONGBLOB) t.base = "longblob";
-    else if (f == s_.TINYTEXT) t.base = "tinytext";
-    else if (f == s_.TEXT_SYM) t.base = "text";
-    else if (f == s_.MEDIUMTEXT) t.base = "mediumtext";
-    else if (f == s_.LONGTEXT) t.base = "longtext";
-    else if (f == s_.JSON_SYM) t.base = "json";
-    else if (f == s_.LONG_SYM) t.base = has_child(k, s_.VARBINARY) ? "mediumblob" : "mediumtext";
-  } else if (group == s_.field_type_misc) {
-    t.base = f == s_.ENUM ? "enum" : "set";
-    t.values = enum_values(child(k, s_.string_list));
+  // The first symbol of the type, or of int_type, and the base it reads as.
+  // The terminals are the lexer's, so aliases (INT4, MIDDLEINT, DEC) are in.
+  struct Base {
+    int Syms::*symbol;
+    const char *base;
+  };
+  static constexpr Base k_bases[] = {
+      {&Syms::TINYINT, "tinyint"},       {&Syms::SMALLINT, "smallint"},   {&Syms::MEDIUMINT, "mediumint"},
+      {&Syms::INT_SYM, "int"},           {&Syms::BIGINT, "bigint"},       {&Syms::FLOAT_SYM, "float"},
+      {&Syms::BIT_SYM, "bit"},           {&Syms::BOOL_SYM, "boolean"},    {&Syms::BOOLEAN_SYM, "boolean"},
+      {&Syms::DECIMAL_SYM, "decimal"},   {&Syms::NUMERIC_SYM, "decimal"}, {&Syms::FIXED_SYM, "decimal"},
+      {&Syms::YEAR_SYM, "year"},         {&Syms::DATE_SYM, "date"},       {&Syms::TIME_SYM, "time"},
+      {&Syms::TIMESTAMP, "timestamp"},   {&Syms::DATETIME, "datetime"},   {&Syms::varchar, "varchar"},
+      {&Syms::BINARY, "binary"},         {&Syms::VARBINARY, "varbinary"}, {&Syms::TINYBLOB, "tinyblob"},
+      {&Syms::BLOB_MARIADB_SYM, "blob"}, {&Syms::MEDIUMBLOB, "mediumblob"}, {&Syms::LONGBLOB, "longblob"},
+      {&Syms::TINYTEXT, "tinytext"},     {&Syms::TEXT_SYM, "text"},       {&Syms::MEDIUMTEXT, "mediumtext"},
+      {&Syms::LONGTEXT, "longtext"},     {&Syms::JSON_SYM, "json"},       {&Syms::ENUM, "enum"},
+      {&Syms::SET, "set"},
+  };
+  const int key = f == s_.int_type ? token : f;
+  for (const auto &b : k_bases) {
+    if (s_.*b.symbol == key) {
+      t.base = b.base;
+      break;
+    }
   }
-  if (t.base.empty()) return t;
-  if (group != s_.field_type_misc) type_args(k, t);
+  if (t.base.empty()) {
+    if (f == s_.real_type) {
+      t.base = token == s_.REAL && (mode_bits_ & k_real_as_float) != 0 ? "float" : "double";
+    } else if (f == s_.nvarchar || f == s_.nchar) {
+      t.base = f == s_.nvarchar ? "varchar" : "char";
+      t.charset = "utf8mb3";  // the national charset
+    } else if (token == s_.CHAR_SYM) {  // the `char` nonterminal
+      t.base = "char";
+    } else if (f == s_.LONG_SYM) {  // LONG [VARCHAR], LONG VARBINARY
+      t.base = has_child(k, s_.VARBINARY) ? "mediumblob" : "mediumtext";
+    } else {
+      return t;  // Oracle-mode types: NUMBER, VARCHAR2, RAW, CLOB, BLOB(n)
+    }
+  }
+  if (t.base == "enum" || t.base == "set") t.values = enum_values(child(k, s_.string_list));
+  type_args(k, t);
   if (const uint32_t o = find(k, s_.field_options); o != npos) {
     for (const uint32_t c : t_.children(o)) {
       if (t_.node(c).symbol == s_.UNSIGNED) t.is_unsigned = true;
-      if (t_.node(c).symbol == s_.ZEROFILL) t.zerofill = true;
+      if (t_.node(c).symbol == s_.ZEROFILL) t.zerofill = t.is_unsigned = true;
     }
   }
   t.compressed = find(k, s_.compressed) != npos;
-  type_charset(find(k, s_.binary), t);
   return t;
 }
 
@@ -2652,38 +2643,49 @@ void Catalog_fold::type_args(uint32_t n, Type_spec &t) const {
   }
 }
 
-// CHARACTER SET, BYTE, ASCII, UNICODE and COLLATE of a `binary` node.
-void Catalog_fold::type_charset(uint32_t binary, Type_spec &t) const {
-  if (binary == npos) return;
+Catalog_fold::Charset_clause Catalog_fold::charset_clause(uint32_t binary) const {
+  Charset_clause c;
+  if (binary == npos) return c;
   bool after_collate = false;
-  bool has_charset = false;
   for (const uint32_t ch : t_.children(binary)) {
     const int sym = t_.node(ch).symbol;
     if (sym == s_.BYTE_SYM) {
-      t.charset = "binary";
-      has_charset = true;
+      c.byte = true;
     } else if (sym == s_.charset_or_alias) {
-      has_charset = true;
-      if (const uint32_t cn = child(ch, s_.charset_name); cn != npos) t.charset = charset_name(cn);
-      else if (has_child(ch, s_.ASCII_SYM)) t.charset = "latin1";
-      else if (has_child(ch, s_.UNICODE_SYM)) t.charset = "ucs2";
+      c.nodes.push_back(ch);
+      if (const uint32_t cn = child(ch, s_.charset_name); cn != npos) c.charset = charset_name(cn);
+      else if (has_child(ch, s_.ASCII_SYM)) c.charset = "latin1";
+      else if (has_child(ch, s_.UNICODE_SYM)) c.charset = "ucs2";
     } else if (sym == s_.COLLATE_SYM) {
+      c.nodes.push_back(ch);
       after_collate = true;
-    } else if (after_collate && sym == s_.collation_name) {
-      t.collation = charset_name(ch);
-    } else if (after_collate && sym == s_.BINARY && !has_charset) {
-      t.collation = "binary";  // COLLATE BINARY alone: the binary charset
+    } else if (sym == s_.collation_name) {
+      c.nodes.push_back(ch);
+      c.collation = charset_name(ch);
+    } else if (after_collate && sym == s_.DEFAULT) {
+      c.nodes.push_back(ch);
+      c.collation = "default";
+    } else if (after_collate && sym == s_.BINARY) {
+      c.collate_binary = true;
     }
   }
+  return c;
+}
+
+// A type's charset and collation: BYTE is the binary charset, and so is
+// COLLATE BINARY without a CHARACTER SET (with one, its _bin collation).
+void Catalog_fold::with_charset(Type_spec &t, const Charset_clause &c) {
+  if (c.byte) t.charset = "binary";
+  else if (c.charset) t.charset = c.charset;
+  t.collation = c.collation;
+  if (!t.collation && c.collate_binary && !t.charset) t.collation = "binary";
 }
 
 // ENUM / SET values, nullopt when one is not a plain string or hex literal.
 std::optional<std::vector<std::string>> Catalog_fold::enum_values(uint32_t list) const {
   if (list == npos) return std::nullopt;
-  auto items = find_all(list, s_.text_string);
-  std::sort(items.begin(), items.end(), [&](uint32_t a, uint32_t b) { return t_.begin(a) < t_.begin(b); });
   std::vector<std::string> out;
-  for (const uint32_t it : items) {
+  for (const uint32_t it : find_all(list, s_.text_string)) {  // in text order
     auto v = decode_string(it);
     if (!v) return std::nullopt;
     out.push_back(std::move(*v));
@@ -2762,22 +2764,31 @@ std::optional<std::string> Catalog_fold::decode_string(uint32_t n) const {
   return out;
 }
 
-std::string Catalog_fold::default_charset(const Table *t, const std::string &schema) {
-  auto from = [](const std::vector<std::pair<std::string, std::string>> &opts) -> std::string {
-    std::string charset, collation;
-    for (const auto &[k, v] : opts) {
-      if (k == "charset" && v != "default") charset = v;
-      if (k == "collation" && v != "default") collation = v;
-    }
-    // A collation names its charset; the charset alone otherwise.
-    if (!collation.empty() && !charset_of_collation(collation).empty()) return collation;
-    return charset;
-  };
+Charset_default Catalog_fold::defaults_for(const Table *t, const std::string &schema) const {
+  std::string cs;
   if (t != nullptr) {
-    if (auto cs = from(t->options); !cs.empty()) return cs;
+    cs = options_charset(t->options);
+    if (cs.empty() && t->schema_charset) return charset_default(*t->schema_charset);
   }
-  if (const Schema *sc = c_.find_schema(schema)) return from(sc->options);
-  return "";
+  if (cs.empty()) cs = schema_charset(schema);
+  return charset_default(cs);
+}
+
+std::string Catalog_fold::schema_charset(const std::string &schema) const {
+  const Schema *sc = c_.find_schema(schema);
+  return sc != nullptr ? options_charset(sc->options) : "";
+}
+
+// The charset or collation table or schema options name, "" when none:
+// a collation names its charset; the charset alone otherwise.
+std::string Catalog_fold::options_charset(const std::vector<std::pair<std::string, std::string>> &opts) {
+  std::string charset, collation;
+  for (const auto &[k, v] : opts) {
+    if (k == "charset" && v != "default") charset = v;
+    if (k == "collation" && v != "default") collation = v;
+  }
+  if (!collation.empty() && !charset_of_collation(collation).empty()) return collation;
+  return charset;
 }
 
 bool Catalog::apply(const Syntax_tree &tree, std::string_view text, uint32_t mode_bits) {

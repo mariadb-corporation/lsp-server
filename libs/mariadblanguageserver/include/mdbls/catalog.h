@@ -186,6 +186,11 @@ struct Table {
   std::string partitioning;            // the PARTITION BY clause as written, or ""
   bool system_versioning = false;      // WITH SYSTEM VERSIONING
   std::vector<Period> periods;
+  // A table created without CHARACTER SET or COLLATE keeps its schema's
+  // charset (or collation) as it was then, "" when not known; a later ALTER
+  // DATABASE does not change it. nullopt when not read from a script. For
+  // column types only, not in the outline.
+  std::optional<std::string> schema_charset;
 
   Column *column(std::string_view name);
   const Column *column(std::string_view name) const;
@@ -449,7 +454,7 @@ class Catalog {
   // changes nothing in the catalog.
   // `mode_bits` (Sql_mode_bit) is the statement's sql_mode: how its string
   // literals and REAL read.
-  bool apply(const Syntax_tree &tree, std::string_view text, uint32_t mode_bits = 0);
+  bool apply(const Syntax_tree &tree, std::string_view text, uint32_t mode_bits);
 
   const std::vector<Schema> &schemas() const { return m_schemas; }
   const std::vector<Rest_service> &rest_services() const { return m_services; }

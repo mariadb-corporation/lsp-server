@@ -259,8 +259,9 @@ another charset) or when it depends on something the script does not say:
   `VARCHAR(n)` longer than 16383 characters (the limit is 65532 bytes);
 - an `ENUM` or `SET` with non-ASCII values under a collation that is not binary (which values a
   case- and accent-insensitive collation equates is not checked);
-- a `TEXT` or long `VARCHAR` column after `ALTER TABLE ... CONVERT TO CHARACTER SET`, which may
-  widen it;
+- a character column (`CHAR`, `VARCHAR`, the `TEXT` types, `ENUM`, `SET`) after
+  `ALTER TABLE ... CONVERT TO CHARACTER SET`, which converts it (and may widen it, or make it
+  binary);
 - a type that is not MariaDB's: an unknown name (the grammar reads any name as a type plugin),
   `TYPE OF` and `ROW` types, Oracle-mode types, a UDF's `RETURNS`.
 
