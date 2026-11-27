@@ -233,7 +233,8 @@ Notes (`{edit, kind, source?, start, message}`, the edit goes on):
 ### 2.10 Self-check
 
 After each edit, the outline is rebuilt from the session texts and must show the edit:
-`rename_*`: the new name present, the old absent; `add_table`: a table of that name with the
+`rename_*`: the new name present, the old absent (for `rename_column`, from its table's
+keys, foreign keys, CHECKs, generated columns, defaults and PARTITION BY too); `add_table`: a table of that name with the
 requested column names, index and foreign key count; `drop_table`: absent; `add_column`: the
 column present at the position requested (index in `columns`); `modify_column`: the column's
 members equal the request's (type and expressions compared collapsed, case-insensitively);
@@ -615,3 +616,17 @@ columns, keys and checks; with Homebrew LLVM 22 the fuzzers need
 that selects a renamed column is not created again by the migration (as with `rename_column`);
 msm needs nothing more: every deployment, updates too, runs Section 150 after the table
 changes, which creates the view again from its rewritten text.
+
+**A column's name in its table's expressions, 2026-11-27 (found reviewing `replace_table`):**
+`rename_column` (and `modify_column`'s rename, and so `replace_table`'s renames) left a
+column's name in its table's own `CHECK`s, generated columns, `DEFAULT (expr)`s and
+`PARTITION BY` as it was, so the edited script named a column that no longer existed; the
+self-check did not see it (the outline does not resolve expressions). MariaDB 12.3 renames
+the column in all of them with `RENAME COLUMN` and `CHANGE COLUMN`. The cause was in
+`sql_names`: an unqualified column there has no table in scope, so the reference search did
+not resolve it. Such a column of a `CREATE TABLE` or `ALTER TABLE`, outside a query, a
+routine and a trigger body, now has the statement's table as its owner, as a key part does;
+the language server's references, rename and hover get it too. `replace_table` loses the
+stopgaps of #55 (the `rename_in_checks` step, the refusal to rename a column a generated
+column or `DEFAULT` names) and compares the table's expressions with the renames made
+(`as_sent`), a generated expression without its outer parentheses.

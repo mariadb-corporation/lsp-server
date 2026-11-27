@@ -217,6 +217,20 @@ TEST(Navigation, references_to_a_column_skip_key_names_in_alter_table) {
   EXPECT_EQ(d.references(), (std::vector<std::string>{"k*", "k", "k", "k"}));
 }
 
+// A column named in its table's own expressions: CHECKs, generated
+// columns, defaults, PARTITION BY, in CREATE TABLE and ALTER TABLE; not a
+// column of another table's, nor of a query.
+TEST(Navigation, references_to_a_column_in_its_tables_expressions) {
+  Doc d(
+      "CREATE TABLE t (a| INT CHECK (a > 0), g INT AS (a + 1), d INT DEFAULT (a * 2), CHECK (a < 9))\n"
+      "  PARTITION BY HASH (a);\n"
+      "ALTER TABLE t ADD CONSTRAINT c CHECK (a <> 5), ADD COLUMN h INT AS (a - 1);\n"
+      "CREATE TABLE u (a INT CHECK (a > 0));\n"
+      "CREATE TABLE w AS SELECT a FROM u;\n",
+      false);
+  EXPECT_EQ(d.references(), (std::vector<std::string>{"a*", "a", "a", "a", "a", "a", "a", "a"}));
+}
+
 TEST(Navigation, references_to_a_routine_include_its_drop) {
   Doc d(
       "CALL refresh_a|ll(NOW(), @n);\n"

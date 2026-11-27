@@ -983,9 +983,14 @@ class Replace_table_on_a_server(unittest.TestCase):
                          ["ALTER TABLE `t` RENAME COLUMN `q` TO `qty`, CHANGE COLUMN `nm` `name` VARCHAR(40)"])
         self.assertEqual(self.server.query("SELECT CONCAT(name, qty) FROM migrated.t"), "n2")
 
-    def test_renamed_columns_in_checks(self):
-        # MariaDB renames a column in the table's CHECKs itself: they stay.
+    def test_renamed_columns_in_expressions(self):
+        # MariaDB renames a column in the table's CHECKs, generated columns,
+        # defaults and PARTITION BY itself: they stay, renamed in the script.
         for old, new in [
+                ("CREATE TABLE t (id INT, a INT, g INT AS (a + 1), d INT DEFAULT (a * 2)) PARTITION BY HASH (a);\n",
+                 "CREATE TABLE t (id INT, b INT, g INT AS (b + 1), d INT DEFAULT (b * 2)) PARTITION BY HASH (b);\n"),
+                ("CREATE TABLE t (id INT, a INT, g INT AS (a + 1) PERSISTENT);\n",
+                 "CREATE TABLE t (id INT, b BIGINT, g INT AS (b + 1) PERSISTENT);\n"),
                 ("CREATE TABLE t (id INT PRIMARY KEY, a INT, CHECK (a > 0));\n",
                  "CREATE TABLE t (id INT PRIMARY KEY, b INT, CHECK (b > 0));\n"),
                 ("CREATE TABLE t (id INT PRIMARY KEY, a INT, CHECK (a > 0));\n",
@@ -993,7 +998,7 @@ class Replace_table_on_a_server(unittest.TestCase):
                 ("CREATE TABLE t (id INT PRIMARY KEY, a INT CHECK (a > 0), CONSTRAINT c CHECK (a < 100));\n",
                  "CREATE TABLE t (id INT PRIMARY KEY, b BIGINT CHECK (b > 0), CONSTRAINT c CHECK (b < 100));\n")]:
             with self.subTest(new=new):
-                result = self.replace(old, new, "t", rows="INSERT INTO t VALUES (1, 5);", renames={"a": "b"})
+                result = self.replace(old, new, "t", rows="INSERT INTO t (id, a) VALUES (1, 5);", renames={"a": "b"})
                 self.assertEqual(result["notes"], [])
                 self.assertTrue(all("CONSTRAINT" not in m["sql"] for m in result["migration"]), result["migration"])
 

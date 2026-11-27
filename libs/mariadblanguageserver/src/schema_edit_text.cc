@@ -141,14 +141,13 @@ bool one_group(std::string_view t) {
   return depth == 0;
 }
 
-// An expression in parentheses: kept as written when it is one group.
+}  // namespace
+
 std::string parenthesized(std::string_view e) {
   const std::string_view t = trim(e);
   if (one_group(t)) return std::string(t);
   return "(" + std::string(t) + ")";
 }
-
-}  // namespace
 
 std::vector<Check> column_checks(const Table &t, std::string_view column) {
   std::vector<Check> out;
