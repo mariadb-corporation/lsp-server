@@ -433,6 +433,26 @@ TEST(Schema_edit, rename_column_in_its_tables_expressions) {
             "  PARTITION BY HASH (b);\n"
             "ALTER TABLE t ADD CONSTRAINT c CHECK (`b` <> 5);\n",
             text(r, ""));
+  // One the reference search does not resolve (a schema it cannot place)
+  // would be left behind: refused.
+  const auto f = failed(edit("CREATE TABLE t (a INT, CHECK (test.t.a > 0));\n", {},
+                             request("", R"j({"op": "rename_column", "table": "t", "column": "a", "new_name": "b"})j")));
+  EXPECT_EQ("self-check: a check of `t` still names `a`", f.kind + ": " + f.message);
+  // A keyword or a type spelled like it is no reference to it.
+  const auto k = ok(edit("CREATE TABLE t (year INT, d DATE DEFAULT (CURRENT_DATE + INTERVAL 1 YEAR),\n"
+                         "  e DATE DEFAULT (CAST('2020-01-01' AS date)));\n",
+                         {}, request("", R"j({"op": "rename_column", "table": "t", "column": "year", "new_name": "date"})j")));
+  EXPECT_EQ("CREATE TABLE t (date INT, d DATE DEFAULT (CURRENT_DATE + INTERVAL 1 YEAR),\n"
+            "  e DATE DEFAULT (CAST('2020-01-01' AS date)));\n",
+            text(k, ""));
+  // Another table's column or a query's alias of the table's name is not
+  // the table's: no refusal.
+  const auto o = ok(edit("CREATE TABLE t (year INT, d DATE DEFAULT (CURRENT_DATE + INTERVAL 1 YEAR));\n"
+                         "CREATE TABLE u (year INT);\nCREATE VIEW v AS SELECT t.year FROM u AS t;\n",
+                         {}, request("", R"j({"op": "rename_column", "table": "t", "column": "year", "new_name": "yr"})j")));
+  EXPECT_EQ("CREATE TABLE t (yr INT, d DATE DEFAULT (CURRENT_DATE + INTERVAL 1 YEAR));\n"
+            "CREATE TABLE u (year INT);\nCREATE VIEW v AS SELECT t.year FROM u AS t;\n",
+            text(o, ""));
 }
 
 TEST(Schema_edit, quoting_follows_each_token) {
@@ -3233,6 +3253,51 @@ TEST(Schema_edit, replace_table_renames_in_expressions) {
             text(r, ""));
   EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `t` RENAME COLUMN `a` TO `b`"}, migration(r));
   EXPECT_TRUE(r.notes.empty());
+  // A renamed column whose expression names another renamed one: both
+  // plain renames, in whichever order.
+  const auto r2 = ok(edit("CREATE TABLE t (a INT, c INT AS (a + 1));\n", {},
+                          request("", replace_table(R"j({"name": "t", "columns": [{"name": "b", "type": "INT"},
+                              {"name": "d", "type": "INT", "generated": "b + 1"}]})j", R"({"c": "d", "a": "b"})"))));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `t` RENAME COLUMN `c` TO `d`, RENAME COLUMN `a` TO `b`"}, migration(r2));
+  // A column changed before the one it names is renamed (by its CHANGE
+  // COLUMN): written with the name the server has then.
+  const auto r3 = ok(edit("CREATE TABLE t (g INT AS (a + 1), a INT);\n", {},
+                          request("", replace_table(R"j({"name": "t", "columns": [{"name": "g", "type": "BIGINT", "generated": "b + 1"},
+                              {"name": "b", "type": "BIGINT"}]})j", R"({"a": "b"})"))));
+  EXPECT_EQ("CREATE TABLE t (g BIGINT AS (b + 1), b BIGINT);\n", text(r3, ""));
+  EXPECT_EQ((std::vector<std::string>{"ALTER TABLE `t` MODIFY COLUMN `g` BIGINT AS (a + 1)",
+                                      "ALTER TABLE `t` CHANGE COLUMN `a` `b` BIGINT"}),
+            migration(r3));
+  // An unnamed CHECK that changes, naming a column renamed later: dropped as written.
+  const auto r4 = ok(edit("CREATE TABLE t (a INT, n INT, CHECK (n > a));\n", {},
+                          request("", replace_table(R"j({"name": "t", "columns": [{"name": "b", "type": "BIGINT"}, {"name": "n", "type": "INT"}],
+                              "checks": [{"expression": "n < b"}]})j", R"({"a": "b"})"))));
+  EXPECT_EQ("CREATE TABLE t (b BIGINT, n INT, CONSTRAINT chk_t CHECK (n < b));\n", text(r4, ""));
+  // PARTITION BY KEY names the column too; a function of its name does not.
+  const auto r5 = ok(edit("CREATE TABLE t (year INT, d DATE, g INT AS (year(d))) PARTITION BY KEY (year);\n", {},
+                          request("", replace_table(R"j({"name": "t", "columns": [{"name": "yr", "type": "INT"}, {"name": "d", "type": "DATE"},
+                              {"name": "g", "type": "INT", "generated": "year(d)"}], "partitioning": "PARTITION BY KEY (yr)"})j",
+                                                    R"({"year": "yr"})"))));
+  EXPECT_EQ("CREATE TABLE t (yr INT, d DATE, g INT AS (year(d))) PARTITION BY KEY (yr);\n", text(r5, ""));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `t` RENAME COLUMN `year` TO `yr`"}, migration(r5));
+  // A keyword spelled like a renamed column (INTERVAL 1 YEAR) is no
+  // reference to it: not written under its name now, not a change.
+  const auto r6 = ok(edit("CREATE TABLE t (yr INT, n INT);\n", {},
+                          request("", replace_table(R"j({"name": "t", "columns": [{"name": "d", "type": "DATE", "default": "(CURRENT_DATE + INTERVAL 1 YEAR)"},
+                              {"name": "year", "type": "BIGINT"}, {"name": "n", "type": "INT"}]})j", R"({"yr": "year"})"))));
+  EXPECT_EQ("CREATE TABLE t (d DATE DEFAULT (CURRENT_DATE + INTERVAL 1 YEAR), year BIGINT, n INT);\n", text(r6, ""));
+  const auto r7 = ok(edit("CREATE TABLE t (year INT, d0 DATE, d DATE AS (d0 + INTERVAL 1 YEAR) STORED);\n", {},
+                          request("", replace_table(R"j({"name": "t", "columns": [{"name": "yr", "type": "INT"}, {"name": "d0", "type": "DATE"},
+                              {"name": "d", "type": "DATE", "generated": "d0 + INTERVAL 1 YEAR", "generated_storage": "STORED"}]})j", R"({"year": "yr"})"))));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `t` RENAME COLUMN `year` TO `yr`"}, migration(r7));
+}
+
+TEST(Schema_edit, replace_table_renames_qualified_names_in_checks) {
+  // `t`.`a` in a CHECK is the column too: the check stays.
+  const auto r = ok(edit("CREATE TABLE t (a INT, n INT, CHECK (`t`.`a` > n));\n", {},
+                         request("", replace_table(R"j({"name": "t", "columns": [{"name": "b", "type": "INT"}, {"name": "n", "type": "INT"}],
+                             "checks": [{"expression": "`t`.`b` > n"}]})j", R"({"a": "b"})"))));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `t` RENAME COLUMN `a` TO `b`"}, migration(r));
 }
 
 TEST(Schema_edit, replace_table_check_names_avoid_column_checks) {

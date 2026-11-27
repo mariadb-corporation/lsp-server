@@ -1905,12 +1905,25 @@ std::string renamed_in(std::string_view expr, const std::vector<std::pair<std::s
     }
     const std::string_view token = expr.substr(k, e - k);
     const std::string_view name = quoted && token.size() >= 2 ? token.substr(1, token.size() - 2) : token;
-    const auto r = std::find_if(renames.begin(), renames.end(), [&](const auto &x) { return iequals(x.first, name); });
+    // A bare name before "(" is a function's (YEAR(d)), not a column's.
+    size_t next = e;
+    while (next < expr.size() && std::isspace(static_cast<unsigned char>(expr[next]))) ++next;
+    const bool call = !quoted && next < expr.size() && expr[next] == '(';
+    const auto r = call ? renames.end()
+                        : std::find_if(renames.begin(), renames.end(), [&](const auto &x) { return iequals(x.first, name); });
     if (r == renames.end()) out.append(token);
     else out += quoted ? "`" + r->second + "`" : r->second;
     k = e;
   }
   return out;
+}
+
+// A column's expressions: generated, DEFAULT, ON UPDATE.
+std::array<std::optional<std::string> *, 3> column_expressions(Column &c) {
+  return {&c.generated, &c.default_value, &c.on_update};
+}
+std::array<const std::optional<std::string> *, 3> column_expressions(const Column &c) {
+  return {&c.generated, &c.default_value, &c.on_update};
 }
 
 // The column-level CHECKs of column `c` of `t`, as expressions; with `c`
@@ -1938,18 +1951,12 @@ std::string column_difference(const Table &ta, const Column &a, const Table &tb,
   if (!same_word(a.charset, b.charset)) return "charset";
   if (!same_word(a.collation, b.collation)) return "collation";
   // Written in parentheses either way (edit_text::column_sql).
-  const auto expression = [](const std::optional<std::string> &g) -> std::optional<std::string> {
-    if (!g) return g;
-    std::string k = sql_key(*g);
-    int depth = 0;
-    bool outer = k.size() >= 2 && k.front() == '(' && k.back() == ')';
-    for (size_t n = 0; outer && n + 1 < k.size(); ++n) {
-      depth += k[n] == '(' ? 1 : k[n] == ')' ? -1 : 0;
-      if (depth == 0) outer = false;  // the first group closes before the end
-    }
-    return outer ? k.substr(1, k.size() - 2) : k;
+  const auto in_parens = [](const std::optional<std::string> &g) {
+    std::optional<std::string> out;
+    if (g) out = edit_text::parenthesized(*g);
+    return out;
   };
-  if (expression(a.generated) != expression(b.generated)) return "generated";
+  if (!same_sql_opt(in_parens(a.generated), in_parens(b.generated))) return "generated";
   const auto storage = [](const std::optional<std::string> &s) {
     return s && iequals(*s, "STORED") ? std::optional<std::string>("PERSISTENT") : s;
   };
@@ -2106,6 +2113,7 @@ std::string table_difference(const Table &have, const Table &want) {
   }
   if (hc.size() != wc.size()) return "a check the table sent does not have";
   if (const auto changes = option_changes(have, want); !changes.empty()) return "option " + changes[0].first;
+  if (!same_sql(have.partitioning, want.partitioning)) return "the PARTITION BY clause";
   return "";
 }
 
@@ -3051,6 +3059,78 @@ class Editor {
     ro.version_id = m_s.options().index.version_id;
     ro.initial_schema = m_s.options().schema;
     return find_references(text(), index(), id, 0, m_s.view(), m_s.pool(), ro);
+  }
+
+  // `expr` with the columns of `renames` renamed in it: the names the parse
+  // tree takes for columns, not a keyword or a type spelled like one
+  // (INTERVAL 1 YEAR, CAST(x AS date)) nor a function's name; as
+  // renamed_in when it does not parse.
+  std::string columns_renamed_in(std::string_view expr, const std::vector<std::pair<std::string, std::string>> &renames) {
+    std::string by_words = renamed_in(expr, renames);
+    if (by_words == expr) return by_words;
+    const std::string prefix = "CREATE TABLE x (y INT CHECK (";
+    const std::string sql = prefix + std::string(expr) + "))";
+    mdbp_parser *p = m_s.cache().get(m_s.options().index.sql_mode, m_s.options().index.version_id, true);
+    if (p == nullptr) return by_words;
+    const Statement_names names(p, sql, 0);
+    if (!names.accepted()) return by_words;
+    std::vector<std::pair<Range, std::string>> at;  // in `expr`
+    for (const auto &[from, to] : renames) {
+      for (const auto &ref : names.names(from)) {
+        // Qualified too: an expression of a table names only its columns.
+        if (ref.kind != Name_kind::column || ref.defining) continue;
+        if (ref.range.begin < prefix.size() || ref.range.end > prefix.size() + expr.size()) continue;
+        const Range r{static_cast<uint32_t>(ref.range.begin - prefix.size()), static_cast<uint32_t>(ref.range.end - prefix.size())};
+        const bool quoted = expr[r.begin] == '`';
+        at.emplace_back(r, quoted ? "`" + to + "`" : to);
+      }
+    }
+    std::sort(at.begin(), at.end(), [](const auto &a, const auto &b) { return a.first.begin < b.first.begin; });
+    std::string out;
+    size_t k = 0;
+    for (const auto &[r, with] : at) {
+      if (r.begin < k) continue;
+      out.append(expr.substr(k, r.begin - k));
+      out += with;
+      k = r.end;
+    }
+    out.append(expr.substr(k));
+    return out;
+  }
+
+  // Whether a statement of table `t`'s own (its CREATE TABLE, an ALTER
+  // TABLE its columns or checks come from) still names its column
+  // `column`: a name the parse tree takes for that column, one the
+  // reference search did not resolve to it included (`s.t.a` of a schema
+  // it cannot place).  Not another table's, nor a query's alias.
+  bool names_column(const Table &t, const std::string &column) {
+    std::vector<Range> own;
+    const auto add = [&](const Origin &o) {
+      if (const auto r = searched_range(o.source, o.statement)) own.push_back(*r);
+    };
+    add(t.origin);
+    for (const auto &c : t.columns) {
+      add(c.origin);
+      if (c.default_origin) add(*c.default_origin);
+    }
+    for (const auto &ck : t.checks) add(ck.origin);
+    const std::string &table = t.name;
+    for (const Statement &st : index().statements()) {
+      const bool is_own = std::any_of(own.begin(), own.end(), [&](const Range &r) { return r.begin < st.end && st.begin < r.end; });
+      if (!is_own) continue;
+      const std::string_view sql = index().text_of(text(), st);
+      if (st.kind != Statement_kind::sql || !icontains(sql, column)) continue;
+      mdbp_parser *p = m_s.cache().get(index().modes()[st.mode].mode, m_s.options().index.version_id, true);
+      if (p == nullptr) continue;
+      const Statement_names names(p, sql, st.begin);
+      for (const auto &ref : names.names(column)) {
+        if (ref.kind != Name_kind::column || ref.defining) continue;
+        if (ref.has_owner ? iequals(ref.owner, table) : !ref.qualifiers.empty() && iequals(ref.qualifiers.back(), table)) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   // A note on every statement that still refers to `id` outside the
@@ -5438,14 +5518,12 @@ class Editor {
       const auto fix = [&](std::string &c) { c = sent_name(c); };
       // MariaDB renames columns in the table's expressions with RENAME and
       // CHANGE COLUMN, as the renames rename them in the script.
-      const auto fix_in = [&](std::optional<std::string> &expr) {
-        if (expr) *expr = renamed_in(*expr, e.renames);
-      };
+      const auto ren = [&](std::string &x) { x = columns_renamed_in(x, e.renames); };
       for (auto &c : t.columns) {
         fix(c.name);
-        fix_in(c.generated);
-        fix_in(c.default_value);
-        fix_in(c.on_update);
+        for (auto *x : column_expressions(c)) {
+          if (*x) ren(**x);
+        }
       }
       for (auto &ix : t.indexes) {
         for (auto &kp : ix.key_parts) fix(kp.column);
@@ -5458,17 +5536,47 @@ class Editor {
       }
       for (auto &ck : t.checks) {
         if (!ck.column.empty()) fix(ck.column);
-        ck.expression = renamed_in(ck.expression, e.renames);
+        ren(ck.expression);
       }
+      t.partitioning = renamed_in(t.partitioning, e.renames);
       return t;
     };
     const auto checks_of = [&](const std::string &column) { return edit_text::column_checks(want, column); };
+    // Step `s` writing a column of `t` (named `now` there) as sent, with
+    // the other columns not renamed yet under their names now in its
+    // expressions: the server has no column of the sent name before the
+    // step that renames it, which then renames it there too.
+    const auto in_names_now = [&](const Table &t, const std::string &now, Schema_edit s) {
+      std::vector<std::pair<std::string, std::string>> back;
+      for (const auto &[from, to] : e.renames) {
+        const Column *c = t.column(from);
+        if (c != nullptr && !iequals(c->name, to) && !iequals(c->name, now)) back.emplace_back(to, c->name);
+      }
+      if (back.empty()) return s;
+      for (auto *x : column_expressions(*s.new_column)) {
+        if (*x) **x = columns_renamed_in(**x, back);
+      }
+      if (s.new_checks) {
+        for (auto &ck : *s.new_checks) ck.expression = columns_renamed_in(ck.expression, back);
+      }
+      return s;
+    };
     const size_t first_statement = m_result.migration.size();
-    bool changed = false;
+    size_t steps = 0;
     const auto step = [&](Schema_edit s) {
-      changed = true;
+      ++steps;
       s.table = name;
       return run_step(i, s);
+    };
+    // current() as_sent, made again only after a step.
+    std::optional<Table> sent_now;
+    size_t sent_now_steps = 0;
+    const auto current_as_sent = [&]() -> const Table & {
+      if (!sent_now || sent_now_steps != steps) {
+        sent_now = as_sent(current());
+        sent_now_steps = steps;
+      }
+      return *sent_now;
     };
     possible_renames(i, *found, want, e);
     // For each of `have` (the script's, as_sent) that the table sent does not
@@ -5491,7 +5599,10 @@ class Editor {
       const Column *c = t.column(from);
       const Column *w = want.column(to);
       if (c == nullptr || c->name == to) continue;
-      if (!column_difference(t, *c, want, *w, false).empty()) continue;
+      // Compared as MariaDB keeps it after the renames (step 8 too).
+      const Table &ts = current_as_sent();
+      const Column *cs = ts.column(to);
+      if (cs == nullptr || !column_difference(ts, *cs, want, *w, false).empty()) continue;
       Schema_edit s;
       s.op = Edit_op::rename_column;
       s.column = c->name;
@@ -5511,12 +5622,14 @@ class Editor {
     }
     // 3. Table-level CHECKs that go or change.
     {
-      const Table ts = as_sent(current());
+      const Table t = current();
+      const Table ts = as_sent(t);
       const auto have = table_checks(ts);
+      const auto have_now = table_checks(t);  // as written: drop_check finds it so
       for (const auto &[h, match] : stale(have, table_checks(want), same_check)) {
         Schema_edit s;
         s.op = Edit_op::drop_check;
-        s.new_check = *have[h];
+        s.new_check = *have_now[h];
         if (auto err = step(s)) return err;
       }
     }
@@ -5525,7 +5638,7 @@ class Editor {
     for (const auto &c : before_ai.columns) {
       const Column *w = want.column(sent_name(c.name));
       if (!c.auto_increment || w == nullptr || w->auto_increment) continue;
-      if (auto err = step(modify_step(c.name, *w, checks_of(w->name)))) return err;
+      if (auto err = step(in_names_now(current(), c.name, modify_step(c.name, *w, checks_of(w->name))))) return err;
     }
     // 5. Indexes that go or change (step 10 adds the new definition); one
     // that a foreign key or an AUTO_INCREMENT column still needs waits for
@@ -5576,7 +5689,7 @@ class Editor {
       s.new_checks = checks_of(w.name);
       if (k == 0) s.first = true;
       else s.after = now_name(t, want.columns[k - 1].name);
-      if (auto err = step(s)) return err;
+      if (auto err = step(in_names_now(t, w.name, s))) return err;
     }
     // 7. Columns that go.
     const Table before_drops = current();
@@ -5620,13 +5733,12 @@ class Editor {
         }
         // Compared as MariaDB keeps it after the renames: an expression
         // naming a column renamed later (by its CHANGE COLUMN) is alike.
-        const Table ts = as_sent(tk);
-        const Column *cs = ts.column(w.name);
-        const bool renamed = c->name != w.name;
-        if (!moved && !says_not_null && !renamed && cs != nullptr && column_difference(ts, *cs, want, w).empty()) {
-          continue;
+        if (!moved && !says_not_null && c->name == w.name) {
+          const Table &ts = current_as_sent();
+          const Column *cs = ts.column(w.name);
+          if (cs != nullptr && column_difference(ts, *cs, want, w).empty()) continue;
         }
-        Schema_edit s = modify_step(c->name, w, checks_of(w.name));
+        Schema_edit s = in_names_now(tk, c->name, modify_step(c->name, w, checks_of(w.name)));
         if (moved) {
           if (k == 0) s.first = true;
           else s.after = now_name(tk, want.columns[k - 1].name);
@@ -5720,7 +5832,7 @@ class Editor {
       }
     }
 
-    if (!changed) {
+    if (steps == 0) {
       // No step ran: `found` is the table still.
       note(i, "unchanged", found->origin.source, found->origin.statement.begin,
            "the table `" + name + "` is as sent: nothing was changed");
@@ -6062,6 +6174,21 @@ class Editor {
             }
           }
         }
+        // MariaDB renames it in the table's expressions too: none may still
+        // name it.  The words first, then the parse tree, which tells a
+        // column from a keyword (INTERVAL 1 YEAR) or a function's name.
+        const auto names_old = [&](std::string_view expr) { return renamed_in(expr, {{old_name, e.new_name}}) != expr; };
+        std::string left;
+        for (const auto &x : t->columns) {
+          for (const auto *expr : column_expressions(x)) {
+            if (left.empty() && *expr && names_old(**expr)) left = "the expression of column `" + x.name + "`";
+          }
+        }
+        for (const auto &ck : t->checks) {
+          if (left.empty() && names_old(ck.expression)) left = "a check of `" + t->name + "`";
+        }
+        if (left.empty() && names_old(t->partitioning)) left = "the PARTITION BY clause of `" + t->name + "`";
+        if (!left.empty() && names_column(*t, old_name)) return fail(left + " still names `" + old_name + "`");
         break;
       }
       case Edit_op::rename_routine: {

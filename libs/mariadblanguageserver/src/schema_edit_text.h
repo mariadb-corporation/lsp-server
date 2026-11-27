@@ -65,6 +65,9 @@ bool plugin_type(std::string_view name);
 // NUL) escaped unless `backslash_escapes` is false (NO_BACKSLASH_ESCAPES).
 std::string sql_string(std::string_view value, bool backslash_escapes = true);
 
+// An expression in parentheses: kept as written when it is one group.
+std::string parenthesized(std::string_view e);
+
 // The column-level CHECKs of column `column` of `t`.
 std::vector<Check> column_checks(const Table &t, std::string_view column);
 

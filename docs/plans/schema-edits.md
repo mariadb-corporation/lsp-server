@@ -233,7 +233,8 @@ Notes (`{edit, kind, source?, start, message}`, the edit goes on):
 ### 2.10 Self-check
 
 After each edit, the outline is rebuilt from the session texts and must show the edit:
-`rename_*`: the new name present, the old absent; `add_table`: a table of that name with the
+`rename_*`: the new name present, the old absent (for `rename_column`, from its table's
+keys, foreign keys, CHECKs, generated columns, defaults and PARTITION BY too); `add_table`: a table of that name with the
 requested column names, index and foreign key count; `drop_table`: absent; `add_column`: the
 column present at the position requested (index in `columns`); `modify_column`: the column's
 members equal the request's (type and expressions compared collapsed, case-insensitively);

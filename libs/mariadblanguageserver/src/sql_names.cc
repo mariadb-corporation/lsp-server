@@ -46,7 +46,7 @@ struct Name_syms {
   S(optionally_qualified_column_ident) S(key_or_index) S(FOREIGN) S(CONSTRAINT) S(opt_ident)
   S(sp_handler) S(PROCEDURE_SYM) S(FUNCTION_SYM) S(create_routine) S(show_param) S(opt_ev_rename_to)
   S(grant_ident) S(ident_or_empty) S(mrs_qualified_identifier) S(mrs_create_rest_schema_statement)
-  S(mrs_opt_from_schema_name)
+  S(mrs_opt_from_schema_name) S(part_field_item) S(sub_part_field_item)
   // scopes and tables
   S(query_specification) S(query_expression_body_ext) S(update) S(insert) S(replace)
   S(table_primary_ident) S(table_primary_derived) S(table_name_with_opt_use_partition)
@@ -429,10 +429,10 @@ Name_ref Statement_names::classify(uint32_t token) const {
     if (ref.kind == Name_kind::column && ref.qualifiers.empty() && !ref.has_owner &&
         ancestor(a, s.query_specification) == npos && ancestor(a, s.trigger_tail) == npos &&
         ancestor(a, s.create_routine) == npos) {
-      uint32_t owner = ancestor(a, s.alter);
-      if (owner == npos) owner = ancestor(a, s.create);
-      if (owner != npos && m_tree.child(owner, s.TABLE_SYM) != npos && m_tree.child(owner, s.INDEX_SYM) == npos) {
-        set_owner(m_tree.child(owner, s.table_ident), &ref);
+      const uint32_t table = ddl_table();
+      const uint32_t stmt = table == npos ? npos : m_tree.node(table).parent;
+      if (stmt != npos && m_tree.child(stmt, s.TABLE_SYM) != npos && m_tree.child(stmt, s.INDEX_SYM) == npos) {
+        set_owner(table, &ref);
       }
     }
     return ref;
@@ -457,6 +457,13 @@ Name_ref Statement_names::classify(uint32_t token) const {
     ref.kind = key_item(a) ? Name_kind::index : Name_kind::column;
     const uint32_t r = ancestor(a, s.references);
     set_owner(r != npos ? m_tree.child(r, s.table_ident) : ddl_table(), &ref);
+    return ref;
+  }
+  // PARTITION BY KEY (a), RANGE|LIST COLUMNS (a), SUBPARTITION BY KEY (a):
+  // a column of the statement's table, renamed with it by MariaDB.
+  if (sym == s.part_field_item || sym == s.sub_part_field_item) {
+    ref.kind = Name_kind::column;
+    set_owner(ddl_table(), &ref);
     return ref;
   }
   if (sym == s.using_list || sym == s.view_list) {
