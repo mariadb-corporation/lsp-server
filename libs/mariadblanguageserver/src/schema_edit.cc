@@ -5562,9 +5562,9 @@ class Editor {
       return s;
     };
     const size_t first_statement = m_result.migration.size();
-    size_t steps = 0;
+    size_t steps_run = 0;
     const auto step = [&](Schema_edit s) {
-      ++steps;
+      ++steps_run;
       s.table = name;
       return run_step(i, s);
     };
@@ -5572,9 +5572,9 @@ class Editor {
     std::optional<Table> sent_now;
     size_t sent_now_steps = 0;
     const auto current_as_sent = [&]() -> const Table & {
-      if (!sent_now || sent_now_steps != steps) {
+      if (!sent_now || sent_now_steps != steps_run) {
         sent_now = as_sent(current());
-        sent_now_steps = steps;
+        sent_now_steps = steps_run;
       }
       return *sent_now;
     };
@@ -5832,7 +5832,7 @@ class Editor {
       }
     }
 
-    if (steps == 0) {
+    if (steps_run == 0) {
       // No step ran: `found` is the table still.
       note(i, "unchanged", found->origin.source, found->origin.statement.begin,
            "the table `" + name + "` is as sent: nothing was changed");
