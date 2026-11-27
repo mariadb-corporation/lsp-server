@@ -3023,6 +3023,26 @@ TEST(Schema_edit, replace_table_renames) {
   EXPECT_EQ("the column `orders`.`note` is dropped and `remark` added with its definition: if it is a rename, send "
             "\"renames\": {\"columns\": {\"note\": \"remark\"}}, else the migration drops its data",
             r3.notes[0].message);
+  EXPECT_EQ("orders", r3.notes[0].table);
+  EXPECT_EQ("note", r3.notes[0].column);
+  EXPECT_EQ("remark", r3.notes[0].new_name);
+  EXPECT_TRUE(r3.notes[1].table.empty());
+  // In the output, as the script and the table sent spell them.
+  const std::string script = "CREATE TABLE `Orders` (id INT, Note TEXT);\n";
+  const auto r4 = ok(edit(script, {}, request("", replace_table(R"j({"name": "orders", "columns": [{"name": "id", "type": "INT"},
+      {"name": "Remark", "type": "TEXT"}]})j"))));
+  rapidjson::Document d;
+  d.Parse(edit_result_json(r4, "-", k_dir).c_str());
+  ASSERT_TRUE(d.IsObject() && d["notes"].IsArray() && d["notes"].Size() == 1u);
+  const auto &n = d["notes"][0];
+  EXPECT_STREQ("possible-rename", n["kind"].GetString());
+  EXPECT_STREQ("Orders", n["table"].GetString());
+  EXPECT_STREQ("Note", n["column"].GetString());
+  EXPECT_STREQ("Remark", n["new_name"].GetString());
+  // Other notes have none of them.
+  rapidjson::Document d3;
+  d3.Parse(edit_result_json(r3, "-", k_dir).c_str());
+  EXPECT_FALSE(d3["notes"][1].HasMember("table"));
 }
 
 TEST(Schema_edit, replace_table_request_errors) {

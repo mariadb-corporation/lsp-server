@@ -195,6 +195,11 @@ struct Edit_note {
   std::optional<size_t> include;   // the first include of that file
   uint32_t at = 0;                 // offset in that file's original text
   std::string message;
+  // possible-rename: the table and column as the script spells them, and
+  // the column's name in the table sent; "" for other kinds.
+  std::string table;
+  std::string column;
+  std::string new_name;
 };
 
 // What a migration statement does (docs/edit-format.md, Migration):

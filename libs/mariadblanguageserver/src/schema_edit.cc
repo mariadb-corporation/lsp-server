@@ -5780,6 +5780,12 @@ class Editor {
            "the column `" + found.name + "`.`" + d->name + "` is dropped and `" + a->name +
                "` added with its definition: if it is a rename, send \"renames\": {\"columns\": {\"" + d->name +
                "\": \"" + a->name + "\"}}, else the migration drops its data");
+      if (!m_result.notes.empty() && m_result.notes.back().kind == "possible-rename") {
+        Edit_note &last = m_result.notes.back();
+        last.table = found.name;
+        last.column = d->name;
+        last.new_name = a->name;
+      }
     }
   }
 
@@ -6390,6 +6396,9 @@ std::string edit_result_json(const Edit_result &result, std::string_view script_
     const auto &f = result.files[n.file];
     lsp::write_position(w, lines[n.file].position(f.original, n.at));
     str(w, "message", n.message);
+    if (!n.table.empty()) str(w, "table", n.table);
+    if (!n.column.empty()) str(w, "column", n.column);
+    if (!n.new_name.empty()) str(w, "new_name", n.new_name);
     w.EndObject();
   }
   w.EndArray();
