@@ -110,6 +110,7 @@ and how it is written ([Placement](#placement)).
 | `replace_routine` | `routine` (Routine) | done | the routine's last `CREATE PROCEDURE` or `FUNCTION`, of its `kind`, where it stands; its `ALTER` statements after it go |
 | `replace_trigger` | `trigger` (Trigger) | done | the trigger's last `CREATE TRIGGER`, where it stands |
 | `replace_event` | `event` (Event) | done | the event's last `CREATE EVENT`, where it stands; its `ALTER EVENT` statements after it go |
+| `replace_table` | `table` (Table); `renames` optional: `{"columns": {"old": "new", ...}}` | done | what differs between the table and the one sent, made as the ops above make it, wherever its statements write it ([Replacing a table](#replacing-a-table)) |
 
 An op this binary does not do, or does not know (one added after it was built), is refused
 with `unsupported`. `mariadb-lsp edit --ops` lists the ops the binary does as JSON (see
@@ -295,6 +296,125 @@ has above it (a banner's comment lines not counted); no banner is written.
   request removed that key or table: undo sends the inverse ops in reverse order. The last
   column of a table cannot be dropped (`bad-request`).
 
+### Replacing a table
+
+`replace_table` is msm's op for a `CREATE TABLE` an agent sends for a table the project has
+(`add_table` is for a new one). `table` is the whole table as it is to be, as the outline
+writes one (`mariadb-lsp outline` of the agent's `CREATE TABLE`, positions and all); a member
+left out takes the outline's default, so a column without `comment` has none. The table must
+exist under its name, compared without regard to case, and keeps the script's spelling
+(`unknown-object`); renaming the table itself is `rename_table`, sent before it.
+
+The table sent is compared with the script's, and what differs is changed as the ops above
+change it: in the `CREATE TABLE` and in every `ALTER TABLE`, `CREATE INDEX` and `DROP INDEX`
+statement that defines a part of it, with their layout, comments and quoting. Nothing that
+is alike is touched. A table sent as it is writes nothing, has no migration, and gets an
+`unchanged` note, as a `replace_*` of a view does.
+
+What is alike:
+
+- **Columns** by name, in any case. Every member is compared: `type` (when both sides have
+  a `column_type`, that instead, so `INT` and `int(11)`, `BOOLEAN` and `tinyint(1)` are one
+  type), `nullable` (the outline makes a primary key's columns `NOT NULL`), `default`,
+  `auto_increment`, `comment`, `charset`, `collation`, `generated` and its storage (`STORED`
+  is `PERSISTENT`), `generated_row`, `on_update`, `invisible`, `system_versioning`, `options`,
+  and the column's own `CHECK`s. SQL text (a type, a default, an expression) compares with
+  blanks collapsed and in any case outside string literals: `DEFAULT 'A'` and `DEFAULT 'a'`
+  differ, `current_timestamp()` and `CURRENT_TIMESTAMP()` do not.
+- **Indexes, foreign keys and table-level `CHECK`s** by name, in any case; one sent without a
+  name is the first one of the table that is alike in all but its name, named or not (an
+  agent rarely names its foreign keys, so `FOREIGN KEY (a) REFERENCES p (id)` matches
+  `fk_t_p` of the same definition and nothing changes). An index compares kind, key parts
+  (`ASC` is no order), `using`, `comment`, `ignored`, `without_overlaps` and options; a
+  foreign key its columns, referenced schema, table and columns, `match`, and `on_delete`,
+  `on_update` (none is `RESTRICT`); a check its expression. A key changed under its name is
+  dropped and added again; a new one without a name is named as `add_index` and
+  `add_foreign_key` name one, a new check `chk_<table>` (`_2`, `_3`, ... when taken).
+- **Table options** as `set_table_options` writes them: each option sent replaces or adds
+  one; one the table has and the table sent leaves out is removed, with a `no-migration`
+  note, as no statement takes the server back to its default. The `AUTO_INCREMENT` counter
+  is the exception: left out, it stays. So an agent should write `ENGINE`, `CHARSET` and the
+  like as the file has them.
+
+The changes run in this order, each reading the table as the ones before left it, so that
+every statement runs on MariaDB alone as well as merged:
+
+1. columns renamed (`renames`) with nothing else changed: `rename_column`;
+2. foreign keys that go or change: `drop_foreign_key`;
+3. table-level `CHECK`s that go or change: dropped;
+4. columns that lose `AUTO_INCREMENT`: `modify_column`, before the index they lead goes;
+5. indexes that go or change, the primary key when the table sent has none: `drop_index`;
+   one that a foreign key or an `AUTO_INCREMENT` column still needs waits for step 10;
+6. columns that come: `add_column`, each after the column before it in the table sent (or
+   `first`); before the drops, so that a `CREATE TABLE` keeps a column;
+7. columns that go: `drop_column`;
+8. columns that change, renamed and changed (one `CHANGE COLUMN`), or move: `modify_column`;
+9. the primary key: `set_primary_key`, with its whole definition;
+10. indexes that come; then those of step 5 that had to wait: one changed under its name is
+    written anew where it stands, `DROP INDEX i, ADD INDEX i (...)` in one statement;
+11. columns that gain `AUTO_INCREMENT` and had no index leading them before step 9 or 10;
+12. table-level `CHECK`s that come;
+13. foreign keys that come: `add_foreign_key`;
+14. table options: `set_table_options`.
+
+**Renames.** A column of the script missing from the table sent is dropped, and a column of
+the table sent missing from the script added, with its data lost on deployment; `replace_table`
+never guesses a rename. `renames.columns` maps a column's name in the script to its name in
+the table sent: renamed and otherwise alike it is `RENAME COLUMN`, renamed and changed one
+`CHANGE COLUMN`; either way every reference to it follows, as `rename_column` rewrites them.
+The old name must be a column of the table (`unknown-object`), the new one a column of the
+table sent that is not also still sending the old one (`bad-request`), and no other column of
+the table may have the new name (`name-taken`: rename that one first). MariaDB renames the
+column in the table's `CHECK`s itself, so they compare with the rename made, are renamed in the
+script's text too, and have no migration; a column's own `CHECK` is written with it (`CHANGE
+COLUMN`). A renamed column that another column's generated expression or `DEFAULT` names is
+`unsupported`: the reference search does not reach those expressions. A column the table
+sent drops that is alike, but for its name, to one it adds, each the other's only such
+column, gets a `possible-rename` note naming the `renames` that would keep its data; the edit
+still drops and adds it. msm refuses such an edit unless the agent sends `renames` or
+confirms the drop.
+
+**Column order.** The columns end in the order sent. The fewest columns move: those outside
+the longest common order of the script's columns and the table sent's. Each moved column is a
+`modify_column` with its place, `MODIFY COLUMN c ... AFTER x` or `FIRST`, and its element of
+the `CREATE TABLE` moves with the comments on its lines. A column an `ALTER TABLE` defines, or
+one it would go after, cannot move there (`unsupported`, naming the column).
+
+**What no op changes** is refused with `unsupported`, naming it: a different `PARTITION BY`,
+`WITH SYSTEM VERSIONING`, `PERIOD FOR`, `TEMPORARY`, or row start or end column. So is a
+table whose columns the script does not list (`CREATE TABLE ... AS SELECT`). A column
+another table's foreign key uses cannot be dropped (`referenced`, as `drop_column`). Dropping
+the only column a `CREATE TABLE` defines, when `ALTER TABLE` statements add the others and the
+table sent adds none, is `unsupported`.
+
+After the last change the table is compared with the table sent once more; a difference is a
+`self-check` error naming the member (`column `note`: type`, `index `ix_note``, `option
+engine`), a bug to report.
+
+The migration statements of a `replace_table` are merged into as few `ALTER TABLE` statements
+as [the rules](#merged-alter-table-statements) allow, whether or not the request has
+`merge_alters`, so a table is altered once where MariaDB lets it; each statement has `edits`,
+`spec` and `clauses`, and every clause has the `replace_table`'s `edit` and the tags of the
+op that made it. A table with a column added, one moved and an index changed:
+
+```json
+{"edit": 0, "edits": [0], "action": "alter", "object": "table", "name": "orders", "table": "orders",
+ "sql": "ALTER TABLE `orders` DROP INDEX `ix_note`, ADD COLUMN `total` DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER `customer_id`, MODIFY COLUMN `note` TEXT AFTER `id`, ADD INDEX `ix_note` (`note`(20))",
+ "spec": "DROP INDEX `ix_note`, ADD COLUMN `total` ..., MODIFY COLUMN `note` TEXT AFTER `id`, ADD INDEX `ix_note` (`note`(20))",
+ "clauses": [
+   {"edit": 0, "spec": "DROP INDEX `ix_note`", "action": "drop", "object": "index", "name": "ix_note", "table": "orders"},
+   {"edit": 0, "spec": "ADD COLUMN `total` DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER `customer_id`", "action": "add", "object": "column", "name": "total", "table": "orders"},
+   {"edit": 0, "spec": "MODIFY COLUMN `note` TEXT AFTER `id`", "action": "alter", "object": "column", "name": "note", "table": "orders"},
+   {"edit": 0, "spec": "ADD INDEX `ix_note` (`note`(20))", "action": "add", "object": "index", "name": "ix_note", "table": "orders"}]}
+```
+
+Statements of other tables keep their place: around a column that another table's foreign
+key uses, that table's `DROP FOREIGN KEY` and `ADD CONSTRAINT` (see `modify_column`), which
+keeps the table's statements apart. A column renamed is not renamed in deployed views: as
+for `rename_column`, the view's text in the script is, and MSM deployments run Section 150
+(views, routines; `CREATE OR REPLACE`) after the table changes, so the view is created again
+in the same deployment.
+
 ### Placement
 
 msm decides where a new object's statement goes in an MSM project and in what form; the
@@ -366,7 +486,7 @@ for a `form` the op does not take. `replace_*` (which rewrite a statement where 
 | `files` | array | `{file, edits}` for each file that changes, the script first, then the included files in the order they are first included; `file` is `-` for stdin (else the script as given), an included file's path relative to `--source-dir` with `/` separators |
 | `files[].edits` | array | `{range, new_text}`: LSP ranges (0-based line, UTF-16 character) in that file's text as it is on disk, not the sliced or expanded text; sorted and not overlapping, so they can be applied back to front |
 | `migration` | array | `{edit, sql, action, object, name, table?, new_name?}`: the statements that take a deployed schema of the old shape to the new one, in edit order, each with what it does (see [Migration](#migration)); with `merge_alters`, an `ALTER TABLE` also has `edits`, `spec` and `clauses` |
-| `notes` | array | `{edit, kind, file, source?, start, message}`: what an edit could not do itself, for a person to check; they do not refuse the edit (see [Notes](#notes)). `file` as in `files`; `source` the index in the outline's `includes` of the file's first directive (left out for the script); `start` a position in that file's text on disk |
+| `notes` | array | `{edit, kind, file, source?, start, message, table?, column?, new_name?}` (the last three for `possible-rename`): what an edit could not do itself, for a person to check; they do not refuse the edit (see [Notes](#notes)). `file` as in `files`; `source` the index in the outline's `includes` of the file's first directive (left out for the script); `start` a position in that file's text on disk |
 | `outline` | object | the outline ([outline-format.md](outline-format.md), format 1) of the edited texts, as `mariadb-lsp outline` of the edited files gives it; `file` as in `files` |
 
 When an include changes length before a directive's positive end bound (`[89:1200]`), the
@@ -386,7 +506,7 @@ Each statement says what it does, so a program need not read its SQL:
 | Member | Values |
 | --- | --- |
 | `action` | `create`, `drop` (a table, view, routine, trigger, event or sequence); `add`, `drop` (a member of a table); `alter`; `rename` |
-| `object` | `table`, `view`, `procedure`, `function`, `trigger`, `event`, `sequence`; `column`, `index`, `primary_key`, `foreign_key`, `table_options` |
+| `object` | `table`, `view`, `procedure`, `function`, `trigger`, `event`, `sequence`; `column`, `index`, `primary_key`, `foreign_key`, `table_options`, `check` (a table-level `CHECK`, `replace_table` only) |
 | `name` | the object's name before the edit (for a `create` or `add`, the new object's); `PRIMARY` for a primary key; for `table_options`, the table's |
 | `table` | a member's table (as named when the statement runs); left out for a table, view, routine, trigger, event or sequence |
 | `new_name` | the name after a `rename`, or after an `alter` of a column that `CHANGE COLUMN` renames; left out otherwise |
@@ -416,6 +536,7 @@ Each statement says what it does, so a program need not read its SQL:
 | `drop_sequence` | `DROP SEQUENCE s` | `drop` `sequence` |
 | `rename_sequence` | `RENAME TABLE a TO b`, then for each column whose default takes values from it (in its definition, or set by `ALTER COLUMN c SET DEFAULT`) `ALTER TABLE t ALTER COLUMN c SET DEFAULT ...` with the default as the edited script writes it: a deployed default still names the old sequence after `RENAME TABLE` | `rename` `sequence`, then `alter` `column` for each such column |
 | `rename_schema` | none | |
+| `replace_table` | the statements of the ops it is made of ([Replacing a table](#replacing-a-table)), merged; and for a table-level `CHECK`, `ALTER TABLE t DROP CONSTRAINT c` (an unnamed one has no statement: note `no-migration`) and `ALTER TABLE t ADD CONSTRAINT c CHECK (...)`. `modify_column` and `add_column` there also write the column's own `CHECK`s, and `modify_column` its place: `MODIFY COLUMN c ... AFTER x` or `FIRST`; a changed index a foreign key needs is `DROP INDEX i, ADD INDEX i (...)` (one clause) | the tags of those ops; `drop` and `add` `check` |
 | `replace_view`, `replace_routine`, `replace_trigger`, `replace_event` | `CREATE OR REPLACE VIEW`, `PROCEDURE`, `FUNCTION`, `TRIGGER` or `EVENT` with the new definition, as written but `OR REPLACE` (the object is on a deployed server); a routine, trigger or event with the note `routine-created`, `trigger-created` or `event-created` | `create` `view`, `procedure`, `function`, `trigger` or `event` |
 
 ### Merged ALTER TABLE statements
@@ -488,7 +609,7 @@ its clauses:
 An `ALTER TABLE` that nothing joined keeps its own tags and has `edits`, `spec` and a
 `clauses` list of one too, so a program can read every `ALTER TABLE` the same way. `RENAME
 TABLE` and the other statements are left as they are, without these members. Without
-`merge_alters` no statement has them.
+`merge_alters` no statement has them, but those of a `replace_table`.
 
 ## Notes
 
@@ -500,10 +621,11 @@ TABLE` and the other statements are left as they are, without these members. Wit
 | `routine-created` | the same for a routine `add_routine` creates or `replace_routine` writes anew: its `CREATE` in the migration cannot run inside a stored procedure. msm treats it as `routine-recreated` |
 | `trigger-created`, `trigger-recreated` | the same for a trigger `add_trigger` creates (or `replace_trigger` writes anew) or `rename_trigger` drops and creates again: MariaDB refuses `CREATE TRIGGER` inside a stored procedure (error 1303) |
 | `event-created` | the same for an event `add_event` creates or `replace_event` writes anew: MariaDB refuses `CREATE EVENT` with its body inside a stored procedure (error 1576). `ALTER EVENT ... RENAME TO` runs there |
-| `unchanged` | a `replace_*` sent the object as it is: nothing was written or migrated |
+| `unchanged` | a `replace_*` sent the object as it is: nothing was written or migrated; for `replace_table`, at its `CREATE TABLE`, "the table `t` is as sent: nothing was changed" |
+| `possible-rename` | `replace_table` drops a column and adds one alike but for its name: a rename, perhaps; the message names the `renames` that would keep its data. At the dropped column's definition; the edit is done as sent. The note also has `table` and `column` (as the script spells them) and `new_name` (as the table sent spells it): `renames: {"columns": {column: new_name}}` keeps the data |
 | `alter-removed` | a `replace_*` removed an `ALTER` of the object after its `CREATE`: the new definition replaces what it changed; one note per statement |
 | `still-referenced` | after a drop, a statement still refers to the dropped table, view, routine or column (a view's `SELECT`, a trigger, event or routine body, an `INSERT`); one note per statement |
-| `no-migration` | the edit has no statement for part of it: an option removed by `set_table_options`, an unnamed index or foreign key dropped, an unnamed foreign key around a `modify_column` |
+| `no-migration` | the edit has no statement for part of it: an option removed by `set_table_options` (or `replace_table`), an unnamed index, foreign key or table-level `CHECK` dropped, an unnamed foreign key around a `modify_column` |
 
 A kind is never removed or renamed within format 1; a consumer that does not know a kind
 should show its `message`.
@@ -521,7 +643,7 @@ A refused request writes no edits, whatever edits before the failing one did:
 | Kind | When |
 | --- | --- |
 | `bad-request` | the request is not JSON of format 1, a member is missing, empty, unknown or of the wrong type, a new name is too long, a routine name is ambiguous without `kind`, a column's type is not a MariaDB data type, or a definition does not parse; an add op's `at` or `form` that cannot be followed ([Placement](#placement)) |
-| `unsupported` | an op this binary does not do or does not know (a newer binary may), or a column added to a table whose columns the script does not list (`CREATE TABLE ... AS SELECT`, `LIKE`) |
+| `unsupported` | an op this binary does not do or does not know (a newer binary may), or a column added to a table whose columns the script does not list (`CREATE TABLE ... AS SELECT`, `LIKE`); for `replace_table`, a change no op makes (partitioning, system versioning, a period, `TEMPORARY`), a column to move that an `ALTER TABLE` defines, the last column of a `CREATE TABLE` to drop, or a rename of a column a generated column or `DEFAULT` names |
 | `unknown-object` | the table, column, view, routine, trigger, event or sequence is not in the outline, nor the table or column a foreign key references, nor the column `after` names, nor a trigger's table (a view is not one) or the trigger its `order` names; `drop_trigger`'s `table` is not the trigger's |
 | `name-taken` | the new name is taken: by a table, view or sequence for a table, view or sequence (they share a namespace), by a column of the table, by a routine of the same kind, by an index of the table, by a foreign key of the schema, by a trigger or an event of the schema for a trigger or event; a second primary key (use `set_primary_key`); a change of case only is a rename |
 | `referenced` | `drop_table` of a table another table's foreign key references; `drop_column` of a column a foreign key uses; `drop_index` or `set_primary_key` taking away the index a foreign key or an `AUTO_INCREMENT` column needs; `drop_trigger` of a trigger another one follows or precedes; `drop_sequence` of a sequence a `CREATE TABLE` or `ALTER TABLE` names |

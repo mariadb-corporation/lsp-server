@@ -575,3 +575,43 @@ qualifier, for msm's banners; off by default, since nothing else here edits comm
 migration: msm builds one for released projects if it needs it. The self-check counts the
 references to the new name with its placeholders.
 
+
+**Replacing a table, 2026-11-27 (asked for by mariadb-shell-plugins: msm's
+`set_schema_statements` sends an agent's `CREATE TABLE` for a table the project has, so that
+agents change tables with SQL instead of `msm.edit_schema`, and a release still gets its
+`ALTER`s):** `replace_table` with `table` (the outline's Table of the agent's statement) and
+optional `renames: {"columns": {old: new}}`. Designed with the msm session: the op makes no
+text of its own but runs the existing ops as steps (`Editor::run_step`, each with the
+`replace_table`'s edit index, so notes and migration clauses carry it), each step reading the
+table as the steps before left it; the steps and their order are in `docs/edit-format.md`
+(Replacing a table). Reasons: a table is often written across its `CREATE TABLE`, later
+`ALTER TABLE`s and `CREATE INDEX`es, which those ops already edit with layout and comments
+kept; a rewrite of the `CREATE TABLE` alone would have to remove the rest. The order is the
+one where every statement also runs alone on MariaDB 12.3: `AUTO_INCREMENT` taken off before
+the index it leads goes and put on once one leads it; an index a foreign key needs dropped
+only after its replacement (`index_needed`), a changed one rewritten in place as `DROP INDEX
+i, ADD INDEX i (...)`; columns added before columns dropped (found by `schema_edit_fuzz`: a
+`CREATE TABLE` whose only column goes while an `ALTER TABLE` adds the other). The steps'
+statements are always merged (`merge_alter_statements` on the edit's slice;
+`merge_alter_statements` now keeps the clauses of a statement merged before, so
+`merge_alters` merging again is safe), since msm runs each `ALTER TABLE` as one online
+ALTER. Unnamed keys and checks of the table sent match by definition (agents rarely name
+foreign keys); columns compare every member, `column_type` over the type as written when
+both sides have one. New internal steps: `add_check` and `drop_check` (table-level `CHECK`s,
+`ADD CONSTRAINT c CHECK (...)` / `DROP CONSTRAINT c`, migration object `check`); a
+`modify_column` step takes the column's `CHECK`s (`new_checks`) and a place (`after`,
+`first`: the item moves within the `CREATE TABLE` with the comments on its lines); a
+`set_primary_key` step takes the whole key (`new_index`); a `drop_index` step with
+`new_index` replaces the index. Column moves are the columns outside the longest common
+order. A dropped column alike to an added one gets `possible-rename`; msm turns it into a
+refusal unless the agent sends `renames` or confirms. Not done, and refused with
+`unsupported`: partitioning, system versioning, periods, `TEMPORARY`. Checked against
+MariaDB 12.3.2 (`test_edit.py`, `Replace_table_on_a_server`): the migration run on tables with
+rows (with `foreign_key_checks=0`, as MSM deploys) gives the tables the edited script and the
+agent's SQL create (`SHOW CREATE TABLE`, keys compared as a set: the server lists them in the
+order they were made). `fuzz/schema_edit_fuzz.cc` generates both tables from one pool of
+columns, keys and checks; with Homebrew LLVM 22 the fuzzers need
+`ASAN_OPTIONS=detect_container_overflow=0` (libFuzzer's own corpus trips it). A deployed view
+that selects a renamed column is not created again by the migration (as with `rename_column`);
+msm needs nothing more: every deployment, updates too, runs Section 150 after the table
+changes, which creates the view again from its rewritten text.

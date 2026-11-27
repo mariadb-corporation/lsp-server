@@ -29,6 +29,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
 from test_lsp import BINARY, FIXTURES  # noqa: E402
+import sandbox  # noqa: E402
 
 MRS_PROJECT = pathlib.Path(os.environ.get(
     "MDBLS_MRS_PROJECT",
@@ -819,6 +820,202 @@ class Edit_mrs_project(unittest.TestCase):
         self.assertEqual(self.p.outline(), before)
         self.assertEqual({f: f.read_bytes() for f in self.p.dev.rglob("*.sql")}, files)
         self.assertEqual(self.p.script, script)
+
+
+def outline_table(sql, name):
+    """Table `name` of the outline of `sql`, as msm sends it."""
+    answer = subprocess.run([BINARY, "outline", "-"], input=sql.encode(), capture_output=True, timeout=120)
+    outline = json.loads(answer.stdout)
+    return next(t for s in outline["schemas"] for t in s["tables"] if t["name"] == name)
+
+
+def edit_script(script, edits, **request):
+    """The answer of `edit` on `script` (stdin), and the script edited."""
+    with tempfile.TemporaryDirectory(prefix="mdbls-edit-") as d:
+        path = pathlib.Path(d) / "request.json"
+        path.write_text(json.dumps({"format": 1, "schema": None, "edits": edits, **request}))
+        answer = subprocess.run([BINARY, "edit", "--edits", str(path), "-"], input=script.encode(),
+                                capture_output=True, timeout=120)
+    result = json.loads(answer.stdout)
+    if answer.returncode != 0:
+        return answer.returncode, result, None
+    edited = script
+    for f in result["files"]:
+        if f["file"] == "-":
+            edited = apply_edits(script, f["edits"])
+    return 0, result, edited
+
+
+@unittest.skipUnless(sandbox.mariadbd() and sandbox.shell_bin_dir(), "no mariadbd or no MariaDB Shell")
+class Replace_table_on_a_server(unittest.TestCase):
+    """replace_table as msm uses it: the agent's CREATE TABLE outlined and
+    sent.  On a server, the migration run on the old script's tables (rows
+    in them, foreign_key_checks=0 as MSM deploys) must give the tables the
+    edited script creates, and those the agent's SQL creates."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = sandbox.Sandbox()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.stop()
+
+    def show(self, schema, table):
+        """SHOW CREATE TABLE without the AUTO_INCREMENT counter, the keys
+        and constraints in one order (the server's follows their history)."""
+        sql = re.sub(r" AUTO_INCREMENT=\d+", "", self.server.query("SHOW CREATE TABLE `%s`.`%s`" % (schema, table)))
+        lines = [line.rstrip(",") for line in sql.split("\n")]
+        keys = sorted(line for line in lines if re.match(r"  (KEY|UNIQUE KEY|FULLTEXT|SPATIAL|CONSTRAINT) ", line))
+        return "\n".join([line for line in lines if line not in keys] + keys)
+
+    def deploy(self, schema, script):
+        self.server.sql("DROP DATABASE IF EXISTS `%s`; CREATE DATABASE `%s`; USE `%s`; %s"
+                        % (schema, schema, schema, script))
+
+    def replace(self, old, new, table, rows="", renames=None, tables=None, as_new=True):
+        """The answer of the replace; `tables`: those compared (`table`)."""
+        edit = {"op": "replace_table", "table": outline_table(new, table)}
+        if renames:
+            edit["renames"] = {"columns": renames}
+        code, result, edited = edit_script(old, [edit])
+        self.assertEqual(code, 0, result)
+        self.assertTrue(all(m["edit"] == 0 for m in result["migration"]))
+        migration = "".join(m["sql"] + ";\n" for m in result["migration"])
+        self.deploy("migrated", old + "\n" + rows + "\nSET foreign_key_checks = 0;\n" + migration)
+        self.deploy("edited", edited)
+        self.deploy("sent", new)
+        for t in tables or [table]:
+            self.assertEqual(self.show("migrated", t), self.show("edited", t), migration)
+            if as_new:
+                self.assertEqual(self.show("edited", t), self.show("sent", t), edited)
+        return result
+
+    def test_a_column_added_one_moved_and_an_index_changed(self):
+        customer = "CREATE TABLE customer (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, name VARCHAR(45) NOT NULL);\n"
+        old = customer + (
+            "CREATE TABLE orders (\n"
+            "  id INT NOT NULL,\n"
+            "  customer_id INT NOT NULL,\n"
+            "  note TEXT, -- free text\n"
+            "  PRIMARY KEY (id),\n"
+            "  INDEX ix_note (note(10), customer_id),\n"
+            "  CONSTRAINT fk_orders_customer FOREIGN KEY (customer_id) REFERENCES customer (id)\n"
+            ") ENGINE=InnoDB COMMENT='the orders';\n")
+        new = customer + (
+            "CREATE TABLE orders (\n"
+            "  id INT NOT NULL,\n"
+            "  note TEXT,\n"
+            "  customer_id INT NOT NULL,\n"
+            "  total DECIMAL(10,2) NOT NULL DEFAULT 0,\n"
+            "  PRIMARY KEY (id),\n"
+            "  INDEX ix_note (note(20)),\n"
+            "  CONSTRAINT fk_orders_customer FOREIGN KEY (customer_id) REFERENCES customer (id)\n"
+            ") ENGINE=InnoDB COMMENT='the orders';\n")
+        result = self.replace(old, new, "orders",
+                              rows="INSERT INTO customer (name) VALUES ('a'); INSERT INTO orders VALUES (1, 1, 'x');")
+        self.assertEqual([m["sql"] for m in result["migration"]], [
+            "ALTER TABLE `orders` DROP INDEX `ix_note`, "
+            "ADD COLUMN `total` DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER `customer_id`, "
+            "MODIFY COLUMN `note` TEXT AFTER `id`, ADD INDEX `ix_note` (`note`(20))"])
+        self.assertEqual(result["notes"], [])
+        self.assertEqual(self.server.query("SELECT note FROM migrated.orders"), "x")
+
+    def test_columns_changed_moved_dropped_and_added(self):
+        old = "CREATE TABLE t (a INT, b INT, c VARCHAR(10), d INT, KEY ix_b (b));\n"
+        new = ("CREATE TABLE t (c VARCHAR(20) NOT NULL DEFAULT '', a BIGINT COMMENT 'the a', d INT, e INT DEFAULT 5,\n"
+               "  UNIQUE KEY ix_d (d, a));\n")
+        self.replace(old, new, "t", rows="INSERT INTO t VALUES (1, 2, 'x', 4);")
+        self.assertEqual(self.server.query("SELECT CONCAT(c, a, d, e) FROM migrated.t"), "x145")
+
+    def test_foreign_keys_and_checks(self):
+        old = ("CREATE TABLE p (id INT PRIMARY KEY);\n"
+               "CREATE TABLE t (\n"
+               "  id INT PRIMARY KEY,\n"
+               "  p_id INT,\n"
+               "  n INT CHECK (n > 0),\n"
+               "  CONSTRAINT fk_t_p FOREIGN KEY (p_id) REFERENCES p (id),\n"
+               "  CONSTRAINT c_n CHECK (n < 100),\n"
+               "  CONSTRAINT c_50 CHECK (n <> 50)\n"
+               ");\n")
+        new = ("CREATE TABLE p (id INT PRIMARY KEY);\n"
+               "CREATE TABLE t (\n"
+               "  id INT PRIMARY KEY,\n"
+               "  p_id INT,\n"
+               "  n INT CHECK (n >= 0),\n"
+               "  CONSTRAINT fk_t_p FOREIGN KEY (p_id) REFERENCES p (id) ON DELETE CASCADE,\n"
+               "  CONSTRAINT c_n CHECK (n < 1000),\n"
+               "  CONSTRAINT c_7 CHECK (n <> 7)\n"
+               ");\n")
+        result = self.replace(old, new, "t", rows="INSERT INTO p VALUES (1); INSERT INTO t VALUES (1, 1, 5);")
+        self.assertEqual(result["notes"], [])
+
+    def test_an_auto_increment_key_comes_and_goes(self):
+        result = self.replace("CREATE TABLE t (a INT);\n",
+                              "CREATE TABLE t (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, a INT);\n",
+                              "t", rows="INSERT INTO t VALUES (10), (20);")
+        self.assertEqual([m["sql"] for m in result["migration"]],
+                         ["ALTER TABLE `t` ADD COLUMN `id` INT NOT NULL AUTO_INCREMENT FIRST, ADD PRIMARY KEY (`id`)"])
+        self.replace("CREATE TABLE t (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, a INT);\n",
+                     "CREATE TABLE t (id INT NOT NULL, a INT);\n", "t", rows="INSERT INTO t (a) VALUES (10), (20);")
+        self.replace("CREATE TABLE t (id INT NOT NULL, a INT);\n",
+                     "CREATE TABLE t (id INT NOT NULL AUTO_INCREMENT, a INT, PRIMARY KEY (id));\n", "t",
+                     rows="INSERT INTO t VALUES (1, 10), (2, 20);")
+
+    def test_a_primary_key_changes(self):
+        # A column leaving the key becomes nullable on the server too.
+        self.replace("CREATE TABLE t (a INT, b INT, PRIMARY KEY (a, b));\n",
+                     "CREATE TABLE t (a INT NOT NULL, b INT, PRIMARY KEY (a));\n", "t",
+                     rows="INSERT INTO t VALUES (1, 2);")
+        self.replace("CREATE TABLE t (a INT, b INT NOT NULL, PRIMARY KEY (a) COMMENT 'x');\n",
+                     "CREATE TABLE t (a INT NOT NULL, b INT NOT NULL, PRIMARY KEY (a, b) COMMENT 'y');\n", "t",
+                     rows="INSERT INTO t VALUES (1, 2);")
+
+    def test_renames_keep_the_data(self):
+        old = ("CREATE TABLE t (id INT PRIMARY KEY, nm VARCHAR(10), q INT);\n"
+               "CREATE VIEW v AS SELECT nm, q FROM t;\n")
+        new = ("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(40), qty INT);\n"
+               "CREATE VIEW v AS SELECT name, qty FROM t;\n")
+        result = self.replace(old, new, "t", rows="INSERT INTO t VALUES (1, 'n', 2);",
+                              renames={"nm": "name", "q": "qty"})
+        # The rename alone, the rename with a change.
+        self.assertEqual([m["sql"] for m in result["migration"]],
+                         ["ALTER TABLE `t` RENAME COLUMN `q` TO `qty`, CHANGE COLUMN `nm` `name` VARCHAR(40)"])
+        self.assertEqual(self.server.query("SELECT CONCAT(name, qty) FROM migrated.t"), "n2")
+
+    def test_renamed_columns_in_checks(self):
+        # MariaDB renames a column in the table's CHECKs itself: they stay.
+        for old, new in [
+                ("CREATE TABLE t (id INT PRIMARY KEY, a INT, CHECK (a > 0));\n",
+                 "CREATE TABLE t (id INT PRIMARY KEY, b INT, CHECK (b > 0));\n"),
+                ("CREATE TABLE t (id INT PRIMARY KEY, a INT, CHECK (a > 0));\n",
+                 "CREATE TABLE t (id INT PRIMARY KEY, b BIGINT, CHECK (b > 0));\n"),
+                ("CREATE TABLE t (id INT PRIMARY KEY, a INT CHECK (a > 0), CONSTRAINT c CHECK (a < 100));\n",
+                 "CREATE TABLE t (id INT PRIMARY KEY, b BIGINT CHECK (b > 0), CONSTRAINT c CHECK (b < 100));\n")]:
+            with self.subTest(new=new):
+                result = self.replace(old, new, "t", rows="INSERT INTO t VALUES (1, 5);", renames={"a": "b"})
+                self.assertEqual(result["notes"], [])
+                self.assertTrue(all("CONSTRAINT" not in m["sql"] for m in result["migration"]), result["migration"])
+
+    def test_an_index_a_foreign_key_needs_changes(self):
+        old = ("CREATE TABLE p (id INT PRIMARY KEY);\n"
+               "CREATE TABLE t (id INT PRIMARY KEY, p_id INT, KEY ix_p (p_id),\n"
+               "  CONSTRAINT fk_t_p FOREIGN KEY (p_id) REFERENCES p (id));\n")
+        new = ("CREATE TABLE p (id INT PRIMARY KEY);\n"
+               "CREATE TABLE t (id INT PRIMARY KEY, p_id INT, KEY ix_p (p_id, id),\n"
+               "  CONSTRAINT fk_t_p FOREIGN KEY (p_id) REFERENCES p (id));\n")
+        result = self.replace(old, new, "t", rows="INSERT INTO p VALUES (1); INSERT INTO t VALUES (1, 1);")
+        self.assertEqual([m["sql"] for m in result["migration"]],
+                         ["ALTER TABLE `t` DROP INDEX `ix_p`, ADD INDEX `ix_p` (`p_id`, `id`)"])
+
+    def test_a_column_another_table_references_changes(self):
+        old = ("CREATE TABLE p (id INT NOT NULL PRIMARY KEY);\n"
+               "CREATE TABLE t (id INT PRIMARY KEY, p_id INT,\n"
+               "  CONSTRAINT fk_t_p FOREIGN KEY (p_id) REFERENCES p (id));\n")
+        new = ("CREATE TABLE p (id INT NOT NULL PRIMARY KEY COMMENT 'the key', label VARCHAR(10));\n"
+               "CREATE TABLE t (id INT PRIMARY KEY, p_id INT,\n"
+               "  CONSTRAINT fk_t_p FOREIGN KEY (p_id) REFERENCES p (id));\n")
+        self.replace(old, new, "p", rows="INSERT INTO p VALUES (1); INSERT INTO t VALUES (1, 1);", tables=["p", "t"])
 
 
 if __name__ == "__main__":

@@ -93,6 +93,7 @@ constexpr Op_name k_ops[] = {
     {Edit_op::replace_routine, "replace_routine"},
     {Edit_op::replace_trigger, "replace_trigger"},
     {Edit_op::replace_event, "replace_event"},
+    {Edit_op::replace_table, "replace_table"},
 };
 
 // The longest name the server takes for a table, column or routine.
@@ -381,6 +382,7 @@ const char *to_string(Migration_object o) {
     case Migration_object::primary_key: return "primary_key";
     case Migration_object::foreign_key: return "foreign_key";
     case Migration_object::table_options: return "table_options";
+    case Migration_object::check: return "check";
   }
   return "";
 }
@@ -405,12 +407,17 @@ void merge_alter_statements(std::vector<Migration_statement> &migration) {
     const bool fits = into != nullptr && std::none_of(into->names.begin(), into->names.end(), [&](const Alter_names &e) {
       return std::any_of(m.names.begin(), m.names.end(), [&](const Alter_names &l) { return conflicts(e, l); });
     });
+    // A statement merged before (replace_table's) keeps its clauses.
     if (!fits) {
-      m.clauses = {m};
+      if (m.clauses.empty()) m.clauses = {m};
       out.push_back(std::move(m));
       continue;
     }
-    into->clauses.push_back(m);
+    if (m.clauses.empty()) {
+      into->clauses.push_back(m);
+    } else {
+      std::move(m.clauses.begin(), m.clauses.end(), std::back_inserter(into->clauses));
+    }
     into->spec.append(", ").append(m.spec);
     std::move(m.names.begin(), m.names.end(), std::back_inserter(into->names));
   }
@@ -671,7 +678,9 @@ class Json_reader {
 };
 
 // column_type and returns_column_type (outline feature column_types) are
-// accepted and ignored: they follow from the type.
+// accepted: they follow from the type, and are never written; replace_table
+// compares a column's column_type, when both sides have one, in place of its
+// type as written.
 std::optional<Column> read_column(Json_reader &r, const Json &v, const std::string &what) {
   if (!r.object(v, what, {"name", "type", "nullable", "default", "auto_increment", "comment", "charset",
                           "collation", "generated", "generated_storage", "generated_row", "on_update",
@@ -698,6 +707,7 @@ std::optional<Column> read_column(Json_reader &r, const Json &v, const std::stri
   r.boolean(v, "invisible", &c.invisible, w);
   r.opt_bool(v, "system_versioning", &c.system_versioning, w);
   r.options(v, "options", &c.options, w);
+  r.opt_str(v, "column_type", &c.column_type, w);
   if (!r.ok()) return std::nullopt;
   return c;
 }
@@ -1342,6 +1352,38 @@ std::variant<Edit_request, Edit_error> parse_edit_request(std::string_view json)
         name("sequence", &se.sequence);
         name("new_name", &se.new_name);
         break;
+      case Edit_op::replace_table:
+        members({"op", "table", "renames"});
+        if (const Json *t = object("table")) se.new_table = read_table(r, *t);
+        if (se.new_table) {
+          names_to_check.push_back(se.new_table->name);
+          for (const auto &c : se.new_table->columns) names_to_check.push_back(c.name);
+        }
+        if (r.ok() && Json_reader::given(e, "renames")) {
+          const Json &rn = e["renames"];
+          const std::string rw = "\"renames\" of " + what;
+          if (r.object(rn, rw, {"columns"}) && Json_reader::given(rn, "columns")) {
+            const Json &cols = rn["columns"];
+            if (!cols.IsObject()) {
+              r.fail("\"columns\" of " + rw + " is not an object");
+            } else {
+              for (auto it = cols.MemberBegin(); r.ok() && it != cols.MemberEnd(); ++it) {
+                const std::string from(it->name.GetString(), it->name.GetStringLength());
+                if (!it->value.IsString() || it->value.GetStringLength() == 0 || from.empty()) {
+                  r.fail("\"columns\" of " + rw + " holds something that is not a rename of one name to another");
+                  break;
+                }
+                const std::string to(it->value.GetString(), it->value.GetStringLength());
+                for (const auto &[f, t] : se.renames) {
+                  if (iequals(f, from)) r.fail(rw + " renames the column `" + from + "` twice");
+                  else if (iequals(t, to)) r.fail(rw + " renames two columns to `" + to + "`");
+                }
+                se.renames.emplace_back(from, to);
+              }
+            }
+          }
+        }
+        break;
       case Edit_op::rename_schema: {
         members({"op", "schema", "new_name", "comments"});
         name("schema", &se.schema);
@@ -1776,14 +1818,328 @@ bool own_line(std::string_view text, Range r) {
   return is_blank(text.substr(lb, r.begin - lb));
 }
 
+// ---------------------------------------------------------------------
+// replace_table: what a table sent is, compared with what the script has
+
+// SQL as compared: blanks collapsed (none next to parentheses, commas and
+// dots), letters in lower case; string literals as written.
+std::string sql_key(std::string_view s) {
+  std::string out;
+  char quote = 0;
+  bool space = false;
+  const auto punct = [](char c) { return c == '(' || c == ')' || c == ',' || c == '.'; };
+  for (size_t k = 0; k < s.size(); ++k) {
+    const char c = s[k];
+    if (quote != 0) {
+      out.push_back(c);
+      if (c == '\\' && k + 1 < s.size()) {
+        out.push_back(s[++k]);
+      } else if (c == quote) {
+        if (k + 1 < s.size() && s[k + 1] == quote) out.push_back(s[++k]);
+        else quote = 0;
+      }
+      continue;
+    }
+    if (std::isspace(static_cast<unsigned char>(c))) {
+      space = true;
+      continue;
+    }
+    if (space && !out.empty() && !punct(out.back()) && !punct(c)) out.push_back(' ');
+    space = false;
+    if (c == '\'' || c == '"') quote = c;
+    out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+  }
+  return out;
+}
+bool same_sql(std::string_view a, std::string_view b) { return sql_key(a) == sql_key(b); }
+bool same_sql_opt(const std::optional<std::string> &a, const std::optional<std::string> &b) {
+  return a.has_value() == b.has_value() && (!a || same_sql(*a, *b));
+}
+bool same_word(const std::optional<std::string> &a, const std::optional<std::string> &b) {
+  return a.has_value() == b.has_value() && (!a || iequals(*a, *b));
+}
+// Whether an index on `index` serves a foreign key on `fk`: those are its
+// leading columns.
+bool serves(const std::vector<std::string> &index, const std::vector<std::string> &fk) {
+  return fk.size() <= index.size() &&
+         std::equal(fk.begin(), fk.end(), index.begin(), [](const auto &x, const auto &y) { return iequals(x, y); });
+}
+bool same_columns(const std::vector<std::string> &a, const std::vector<std::string> &b) {
+  return a.size() == b.size() && serves(a, b);
+}
+bool same_options(const std::vector<std::pair<std::string, std::string>> &a,
+                  const std::vector<std::pair<std::string, std::string>> &b) {
+  return std::is_permutation(a.begin(), a.end(), b.begin(), b.end(), [](const auto &x, const auto &y) {
+    return iequals(x.first, y.first) && same_sql(x.second, y.second);
+  });
+}
+
+// `expr` with each name (bare or in backticks, outside string literals)
+// that `renames` maps, compared in any case, replaced by the name it maps
+// to: an expression as MariaDB keeps it after RENAME or CHANGE COLUMN.
+std::string renamed_in(std::string_view expr, const std::vector<std::pair<std::string, std::string>> &renames) {
+  const auto word = [](char c) { return edit_text::is_word_char(c); };
+  std::string out;
+  for (size_t k = 0; k < expr.size();) {
+    const char c = expr[k];
+    if (c == '\'' || c == '"') {
+      size_t e = k + 1;
+      while (e < expr.size() && expr[e] != c) e += expr[e] == '\\' ? 2 : 1;
+      e = std::min(e + 1, expr.size());
+      out.append(expr.substr(k, e - k));
+      k = e;
+      continue;
+    }
+    const bool quoted = c == '`';
+    if (!quoted && !word(c)) {
+      out.push_back(c);
+      ++k;
+      continue;
+    }
+    size_t e = k + 1;
+    if (quoted) {
+      while (e < expr.size() && expr[e] != '`') ++e;
+      e = std::min(e + 1, expr.size());
+    } else {
+      while (e < expr.size() && word(expr[e])) ++e;
+    }
+    const std::string_view token = expr.substr(k, e - k);
+    const std::string_view name = quoted && token.size() >= 2 ? token.substr(1, token.size() - 2) : token;
+    const auto r = std::find_if(renames.begin(), renames.end(), [&](const auto &x) { return iequals(x.first, name); });
+    if (r == renames.end()) out.append(token);
+    else out += quoted ? "`" + r->second + "`" : r->second;
+    k = e;
+  }
+  return out;
+}
+
+// The column-level CHECKs of column `c` of `t`, as expressions; with `c`
+// named `as` in them when that is given.
+std::vector<std::string> check_expressions(const Table &t, const std::string &c, const std::string &as = {}) {
+  std::vector<std::string> out;
+  for (const auto &ck : edit_text::column_checks(t, c)) {
+    out.push_back(sql_key(as.empty() ? ck.expression : renamed_in(ck.expression, {{c, as}})));
+  }
+  return out;
+}
+
+// The first member in which column `a` of `ta` (with its CHECKs) differs
+// from `b` of `tb`, "" when none does.  `name`: the names too.
+std::string column_difference(const Table &ta, const Column &a, const Table &tb, const Column &b, bool name = true) {
+  if (name && a.name != b.name) return "name";
+  // The server's type when both are known: INT and int(11) are one type.
+  if (a.column_type && b.column_type ? !iequals(*a.column_type, *b.column_type) : !same_sql(a.type, b.type)) {
+    return "type";
+  }
+  if (a.nullable != b.nullable) return "nullable";
+  if (!same_sql_opt(a.default_value, b.default_value)) return "default";
+  if (a.auto_increment != b.auto_increment) return "auto_increment";
+  if (a.comment != b.comment) return "comment";
+  if (!same_word(a.charset, b.charset)) return "charset";
+  if (!same_word(a.collation, b.collation)) return "collation";
+  if (!same_sql_opt(a.generated, b.generated)) return "generated";
+  const auto storage = [](const std::optional<std::string> &s) {
+    return s && iequals(*s, "STORED") ? std::optional<std::string>("PERSISTENT") : s;
+  };
+  if (!same_word(storage(a.generated_storage), storage(b.generated_storage))) return "generated_storage";
+  if (!same_word(a.generated_row, b.generated_row)) return "generated_row";
+  if (!same_sql_opt(a.on_update, b.on_update)) return "on_update";
+  if (a.invisible != b.invisible) return "invisible";
+  if (a.system_versioning != b.system_versioning) return "system_versioning";
+  if (!same_options(a.options, b.options)) return "options";
+  // A CHECK naming its column follows the column's name (a rename keeps it).
+  const auto ca = check_expressions(ta, a.name, iequals(a.name, b.name) ? std::string() : b.name);
+  const auto cb = check_expressions(tb, b.name);
+  if (!std::is_permutation(ca.begin(), ca.end(), cb.begin(), cb.end())) return "checks";
+  return "";
+}
+
+// Two keys alike but for their names.
+bool same_index(const Index &a, const Index &b) {
+  const auto order = [](const std::string &o) { return iequals(o, "ASC") ? std::string() : upper(o); };
+  return a.kind == b.kind && iequals(a.using_, b.using_) && a.comment == b.comment && a.ignored == b.ignored &&
+         iequals(a.without_overlaps, b.without_overlaps) && same_options(a.options, b.options) &&
+         std::equal(a.key_parts.begin(), a.key_parts.end(), b.key_parts.begin(), b.key_parts.end(),
+                    [&](const Key_part &x, const Key_part &y) {
+                      return iequals(x.column, y.column) && x.length == y.length && order(x.order) == order(y.order);
+                    });
+}
+bool same_foreign_key(const Foreign_key &a, const Foreign_key &b) {
+  // No rule is RESTRICT.
+  const auto rule = [](const std::string &r) { return r.empty() ? std::string("RESTRICT") : upper(r); };
+  return same_columns(a.columns, b.columns) && iequals(a.ref_schema, b.ref_schema) && iequals(a.ref_table, b.ref_table) &&
+         same_columns(a.ref_columns, b.ref_columns) && rule(a.on_delete) == rule(b.on_delete) &&
+         rule(a.on_update) == rule(b.on_update) && iequals(a.match, b.match) &&
+         (a.index_name.empty() || b.index_name.empty() || iequals(a.index_name, b.index_name));
+}
+bool same_check(const Check &a, const Check &b) { return same_sql(a.expression, b.expression); }
+
+// Which of `have` each of `wanted` is: the one of its name; for one sent
+// without a name, the first not yet taken that is alike (`same`), named or
+// not.  nullopt for one that is not there.
+template <typename T, typename Same>
+std::vector<std::optional<size_t>> match_items(const std::vector<const T *> &have, const std::vector<const T *> &wanted,
+                                               Same same) {
+  std::vector<std::optional<size_t>> out(wanted.size());
+  std::vector<bool> taken(have.size(), false);
+  for (size_t w = 0; w < wanted.size(); ++w) {
+    if (wanted[w]->name.empty()) continue;
+    for (size_t h = 0; h < have.size(); ++h) {
+      if (!taken[h] && iequals(have[h]->name, wanted[w]->name)) {
+        out[w] = h;
+        taken[h] = true;
+        break;
+      }
+    }
+  }
+  for (size_t w = 0; w < wanted.size(); ++w) {
+    if (!wanted[w]->name.empty()) continue;
+    for (size_t h = 0; h < have.size(); ++h) {
+      if (!taken[h] && same(*have[h], *wanted[w])) {
+        out[w] = h;
+        taken[h] = true;
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+// The non-primary indexes, the primary key, the table-level CHECKs.
+std::vector<const Index *> secondary_indexes(const Table &t) {
+  std::vector<const Index *> out;
+  for (const auto &ix : t.indexes) {
+    if (ix.kind != "primary") out.push_back(&ix);
+  }
+  return out;
+}
+const Index *primary_key(const Table &t) {
+  for (const auto &ix : t.indexes) {
+    if (ix.kind == "primary") return &ix;
+  }
+  return nullptr;
+}
+std::vector<const Check *> table_checks(const Table &t) {
+  std::vector<const Check *> out;
+  for (const auto &ck : t.checks) {
+    if (ck.column.empty()) out.push_back(&ck);
+  }
+  return out;
+}
+template <typename T>
+std::vector<const T *> pointers(const std::vector<T> &v) {
+  std::vector<const T *> out;
+  for (const auto &x : v) out.push_back(&x);
+  return out;
+}
+
+// What makes the options of table `have` those of `want`, as
+// set_table_options takes it: a value for each one that is new or other
+// (a comment compared exactly, any other value in any case), nullopt for
+// each one `want` leaves out but the AUTO_INCREMENT counter, which stays.
+std::vector<std::pair<std::string, std::optional<std::string>>> option_changes(const Table &have, const Table &want) {
+  std::vector<std::pair<std::string, std::optional<std::string>>> out;
+  const auto value_of = [](const Table &t, const std::string &k) -> const std::string * {
+    for (const auto &[name, v] : t.options) {
+      if (name == k) return &v;
+    }
+    return nullptr;
+  };
+  for (const auto &[k, v] : want.options) {
+    const std::string *now = value_of(have, k);
+    if (now == nullptr || (k == "comment" ? *now != v : !iequals(*now, v))) out.emplace_back(k, v);
+  }
+  for (const auto &[k, v] : have.options) {
+    if (k != "auto_increment" && value_of(want, k) == nullptr) out.emplace_back(k, std::nullopt);
+  }
+  return out;
+}
+
+// The first member in which table `have` is not `want`, named for a
+// person: "column `c`: type", "index `ix`", ...; "" when they are alike.
+// An AUTO_INCREMENT counter `want` leaves out is kept.
+std::string table_difference(const Table &have, const Table &want) {
+  if (have.columns.size() != want.columns.size()) return "the columns";
+  for (size_t k = 0; k < want.columns.size(); ++k) {
+    const Column &w = want.columns[k];
+    if (!iequals(have.columns[k].name, w.name)) return "the column order (`" + w.name + "`)";
+    const std::string d = column_difference(have, have.columns[k], want, w);
+    if (!d.empty()) return "column `" + w.name + "`: " + d;
+  }
+  const auto key = [](const std::string &what, const std::string &name) {
+    return name.empty() ? "an unnamed " + what : what + " `" + name + "`";
+  };
+  const Index *hp = primary_key(have);
+  const Index *wp = primary_key(want);
+  if ((hp == nullptr) != (wp == nullptr) || (hp != nullptr && !same_index(*hp, *wp))) return "the primary key";
+  const auto hi = secondary_indexes(have);
+  const auto wi = secondary_indexes(want);
+  const auto mi = match_items(hi, wi, same_index);
+  for (size_t k = 0; k < wi.size(); ++k) {
+    if (!mi[k] || !same_index(*hi[*mi[k]], *wi[k])) return key("index", wi[k]->name);
+  }
+  if (hi.size() != wi.size()) return "an index the table sent does not have";
+  const auto hf = pointers(have.foreign_keys);
+  const auto wf = pointers(want.foreign_keys);
+  const auto mf = match_items(hf, wf, same_foreign_key);
+  for (size_t k = 0; k < wf.size(); ++k) {
+    if (!mf[k] || !same_foreign_key(*hf[*mf[k]], *wf[k])) return key("foreign key", wf[k]->name);
+  }
+  if (hf.size() != wf.size()) return "a foreign key the table sent does not have";
+  const auto hc = table_checks(have);
+  const auto wc = table_checks(want);
+  const auto mc = match_items(hc, wc, same_check);
+  for (size_t k = 0; k < wc.size(); ++k) {
+    if (!mc[k] || !same_check(*hc[*mc[k]], *wc[k])) return key("check", wc[k]->name);
+  }
+  if (hc.size() != wc.size()) return "a check the table sent does not have";
+  if (const auto changes = option_changes(have, want); !changes.empty()) return "option " + changes[0].first;
+  return "";
+}
+
+// The longest common subsequence of two name lists (compared in any case):
+// the names of `a` in it.
+std::set<std::string> common_order(const std::vector<std::string> &a, const std::vector<std::string> &b) {
+  const size_t n = a.size(), m = b.size();
+  std::vector<std::vector<uint32_t>> len(n + 1, std::vector<uint32_t>(m + 1, 0));
+  for (size_t x = n; x-- > 0;) {
+    for (size_t y = m; y-- > 0;) {
+      len[x][y] = iequals(a[x], b[y]) ? len[x + 1][y + 1] + 1 : std::max(len[x + 1][y], len[x][y + 1]);
+    }
+  }
+  std::set<std::string> out;
+  for (size_t x = 0, y = 0; x < n && y < m;) {
+    if (iequals(a[x], b[y])) {
+      out.insert(lower(a[x]));
+      ++x;
+      ++y;
+    } else if (len[x + 1][y] >= len[x][y + 1]) {
+      ++x;
+    } else {
+      ++y;
+    }
+  }
+  return out;
+}
+
 class Editor {
  public:
   Editor(Session &s, const Edit_request &request, Edit_result &result)
       : m_s(s), m_request(request), m_result(result), m_schema(request.schema) {}
 
   std::optional<Edit_error> run(size_t i) {
+    const Schema_edit &e = m_request.edits[i];
+    // Its steps name their new keys; its table's unnamed keys match by
+    // what they are.
+    if (e.op == Edit_op::replace_table) return replace_table(i, e);
+    return run_step(i, e);
+  }
+
+ private:
+  // One op of edit `i`: the edit itself, or a step of a replace_table.
+  std::optional<Edit_error> run_step(size_t i, const Schema_edit &edit) {
     // The op and its self-check see the names the new keys are given.
-    const Schema_edit e = with_key_names(m_request.edits[i]);
+    const Schema_edit e = with_key_names(edit);
     Changes changes;
     std::optional<Edit_error> err;
     switch (e.op) {
@@ -1820,6 +2176,9 @@ class Editor {
       case Edit_op::replace_routine: err = replace_routine(i, e, changes); break;
       case Edit_op::replace_trigger: err = replace_trigger(i, e, changes); break;
       case Edit_op::replace_event: err = replace_event(i, e, changes); break;
+      case Edit_op::add_check: err = add_check(i, e, changes); break;
+      case Edit_op::drop_check: err = drop_check(i, e, changes); break;
+      case Edit_op::rename_in_checks: err = rename_in_checks(i, e, changes); break;
       default:
         return error(i, "unsupported", std::string("this binary does not do ") + to_string(e.op) + " yet");
     }
@@ -1831,7 +2190,6 @@ class Editor {
     return verify(i, e);
   }
 
- private:
   const Outline &outline() const { return m_s.outline(); }
   Lookup lookup() const { return Lookup(outline(), m_schema); }
 
@@ -1910,8 +2268,8 @@ class Editor {
     return std::nullopt;
   }
 
-  // A note at byte `at` of the original text of file `file`.
-  void note_at(size_t edit, const char *kind, size_t file, uint32_t at, std::string message) {
+  // A note at byte `at` of the original text of file `file`; the note.
+  Edit_note &note_at(size_t edit, const char *kind, size_t file, uint32_t at, std::string message) {
     Edit_note n;
     n.edit = edit;
     n.kind = kind;
@@ -1919,14 +2277,15 @@ class Editor {
     n.include = m_s.include_of(file);
     n.at = at;
     n.message = std::move(message);
-    m_result.notes.push_back(std::move(n));
+    return m_result.notes.emplace_back(std::move(n));
   }
 
-  // The same, at byte `offset` of the current text of outline source `source`.
-  void note(size_t edit, const char *kind, uint32_t source, uint32_t offset, std::string message) {
+  // The same, at byte `offset` of the current text of outline source
+  // `source`; nullptr when that is no file of the edit (none is made).
+  Edit_note *note(size_t edit, const char *kind, uint32_t source, uint32_t offset, std::string message) {
     const auto file = m_s.file_of(source);
-    if (!file) return;
-    note_at(edit, kind, *file, m_s.files()[*file].log.to_original(offset), std::move(message));
+    if (!file) return nullptr;
+    return &note_at(edit, kind, *file, m_s.files()[*file].log.to_original(offset), std::move(message));
   }
 
   // A string literal holding every one of `words` as a word, outside a
@@ -2588,6 +2947,28 @@ class Editor {
       return change(changes, p.end, p.end, ",") && change(changes, le, le, eol + indent + item);
     }
     return change(changes, p.end, p.end, "," + eol + indent + item);
+  }
+
+  // Moves item `at` of a comma-separated list after item `after` (none:
+  // first), written `item` now.  An item on lines of its own takes them
+  // along, with the comments on them.
+  bool move_item(Changes &changes, const std::vector<Range> &items, size_t at, std::optional<size_t> after,
+                 const std::string &item, const std::string &eol) {
+    const size_t next = after ? *after + 1 : 0;
+    if (next == at) return change(changes, items[at].begin, items[at].end, item);  // where it is already
+    const std::string_view t = text();
+    if (at + 1 < items.size() && next < items.size() && own_line(t, items[at]) && own_line(t, items[at + 1]) &&
+        own_line(t, items[next])) {
+      // Its lines, from its own to the next item's.
+      const uint32_t b = line_begin(t, items[at].begin);
+      const uint32_t e = line_begin(t, items[at + 1].begin);
+      std::string block(t.substr(b, e - b));
+      block.replace(items[at].begin - b, items[at].end - items[at].begin, item);
+      const uint32_t to = line_begin(t, items[next].begin);
+      return change(changes, b, e, "") && change(changes, to, to, block);
+    }
+    std::vector<Range> removed;
+    return remove_items(changes, items, {at}, &removed) && insert_item(changes, items, after, item, eol);
   }
 
   // Removes the items `gone` of a comma-separated list, with their commas;
@@ -3637,7 +4018,8 @@ class Editor {
       if (iequals(table->columns[k].name, after)) m_position = k + 1;
     }
     const edit_text::Style st = style_of(table->origin);
-    const std::string def = edit_text::column_sql(c, {}, st);
+    const std::vector<Check> checks = e.new_checks ? *e.new_checks : std::vector<Check>{};
+    const std::string def = edit_text::column_sql(c, checks, st);
     if (auto err = check_column(i, c, def)) return err;
     const auto ct = create_table_of(*table);
     bool done = false;
@@ -3661,10 +4043,10 @@ class Editor {
         return error(i, "self-check", "no place for column `" + c.name + "` was found");
       }
     }
-    std::string clause = "ADD COLUMN " + edit_text::column_sql(c, {}, {});
+    std::string clause = "ADD COLUMN " + edit_text::column_sql(c, checks, {});
     if (e.first) clause += " FIRST";
     else if (!e.after.empty()) clause += " AFTER " + backtick_quote(after);
-    Alter_names n = column_names(c, false);
+    Alter_names n = column_names(c, !checks.empty());
     n.defines = {c.name};
     if (!e.first && !e.after.empty()) n.refers = {after};
     migrate_member(i, table->name, clause, Act::add, Obj::column, c.name, std::move(n));
@@ -3702,7 +4084,8 @@ class Editor {
       column = table == nullptr ? nullptr : table->column(nc.name);
       if (column == nullptr) return error(i, "self-check", "column `" + nc.name + "` is lost by its rename");
     }
-    const std::vector<Check> checks = edit_text::column_checks(*table, column->name);
+    std::vector<Check> checks = e.new_checks ? *e.new_checks : edit_text::column_checks(*table, column->name);
+    for (auto &ck : checks) ck.column = nc.name;
     // A column-level PRIMARY KEY or UNIQUE belongs to the definition.
     std::string key;
     bool in_primary = false;
@@ -3723,7 +4106,10 @@ class Editor {
     def = spell_like(token, nc.name) + def.substr(st.id(nc.name).size());
     if (!key.empty()) def += " " + st.kw(key);
     if (auto err = check_column(i, nc, def)) return err;
-    if (!change(changes, range->begin, range->end, def)) {
+    const bool moved = e.first || !e.after.empty();
+    if (moved) {
+      if (auto err = move_column(i, *table, *column, e, def, st, changes)) return err;
+    } else if (!change(changes, range->begin, range->end, def)) {
       return error(i, "self-check", "the definition of column `" + nc.name + "` cannot be changed");
     }
     m_in_primary = in_primary;
@@ -3743,7 +4129,16 @@ class Editor {
     } else {
       n.modifies = {old_name};
     }
-    migrate_member(i, table_name, (renamed ? "CHANGE COLUMN " + backtick_quote(old_name) + " " : "MODIFY COLUMN ") + body,
+    std::string place;
+    if (e.first) {
+      place = " FIRST";
+    } else if (!e.after.empty()) {
+      const Column *a = table->column(e.after);
+      place = " AFTER " + backtick_quote(a != nullptr ? a->name : e.after);
+      n.refers = {a != nullptr ? a->name : e.after};
+    }
+    migrate_member(i, table_name,
+                   (renamed ? "CHANGE COLUMN " + backtick_quote(old_name) + " " : "MODIFY COLUMN ") + body + place,
                    Act::alter, Obj::column, old_name, std::move(n), renamed ? nc.name : std::string());
     for (auto [x, fk] : fks) {
       if (fk.name.empty()) continue;
@@ -3754,6 +4149,38 @@ class Editor {
         if (iequals(fk.ref_table, table_name) && iequals(col, old_name)) col = nc.name;
       }
       migrate_add_foreign_key(i, x, fk);
+    }
+    return std::nullopt;
+  }
+
+  // Moves `column` of `table`, written `def` now, after `e.after` or first:
+  // its item of the CREATE TABLE goes elsewhere in the list, with the
+  // comments on its lines.  Both columns must be defined by the CREATE TABLE.
+  std::optional<Edit_error> move_column(size_t i, const Table &table, const Column &column, const Schema_edit &e,
+                                        const std::string &def, const edit_text::Style &st, Changes &changes) {
+    auto unsupported = [&](const std::string &name) {
+      return error(i, "unsupported", "the column `" + table.name + "`.`" + name +
+                                         "` is defined by an ALTER TABLE: the column order cannot be changed there");
+    };
+    const auto ct = create_table_of(table);
+    const auto in_create = [&](const Column &c) -> std::optional<size_t> {
+      if (!ct || statement_of(c.origin) != ct->k) return std::nullopt;
+      for (size_t k = 0; k < ct->items.columns.size(); ++k) {
+        if (iequals(ct->items.columns[k], c.name)) return k;
+      }
+      return std::nullopt;
+    };
+    const auto at = in_create(column);
+    if (!at) return unsupported(column.name);
+    std::optional<size_t> after;
+    if (!e.first) {
+      const Column *a = table.column(e.after);
+      if (a == nullptr) return error(i, "unknown-object", "table `" + table.name + "` has no column `" + e.after + "`");
+      after = in_create(*a);
+      if (!after) return unsupported(a->name);
+    }
+    if (!move_item(changes, ct->items.ranges, *at, after, def, st.eol)) {
+      return error(i, "self-check", "the column `" + column.name + "` cannot be moved");
     }
     return std::nullopt;
   }
@@ -3805,7 +4232,10 @@ class Editor {
           if (!drop_key_part(changes, *p, ch[0], name, &removed, &whole)) return fail();
           if (whole) gone.insert(j);
         }
-        if (gone.size() == items.nodes.size()) return fail();
+        if (gone.size() == items.nodes.size()) {
+          return error(i, "unsupported", "`" + name + "` is the only column the CREATE TABLE of `" + table->name +
+                                             "` defines (ALTER TABLE adds the others): it cannot be dropped there");
+        }
         if (!gone.empty() && !remove_items(changes, items.ranges, gone, &removed)) return fail();
       } else if (verb == gram().create && is_index) {
         bool whole = false;
@@ -4590,17 +5020,6 @@ class Editor {
     return nullptr;
   }
 
-  // Whether an index on `index` serves a foreign key on `fk`: those are its
-  // leading columns.
-  static bool serves(const std::vector<std::string> &index, const std::vector<std::string> &fk) {
-    return fk.size() <= index.size() && std::equal(fk.begin(), fk.end(), index.begin(), [](const auto &x, const auto &y) {
-             return iequals(x, y);
-           });
-  }
-  static bool same_columns(const std::vector<std::string> &a, const std::vector<std::string> &b) {
-    return a.size() == b.size() && serves(a, b);
-  }
-
   // What would lose the index it needs if `table`'s index `gone` went
   // (replaced by an index on `instead`, when given): a foreign key (MariaDB
   // refuses to drop the index, 1553), or an AUTO_INCREMENT column, which
@@ -4718,6 +5137,7 @@ class Editor {
     const auto found = index_named(i, *table, e);
     if (const auto *err = std::get_if<Edit_error>(&found)) return *err;
     const Index &ix = *std::get<const Index *>(found);
+    if (e.new_index) return replace_index(i, *table, ix, *e.new_index, changes);
     if (auto err = index_needed(i, *table, &ix, {})) return err;
     m_count = table->indexes.size();
     if (!remove_index(changes, *table, ix)) {
@@ -4735,6 +5155,39 @@ class Editor {
     return std::nullopt;
   }
 
+  // Index `ix` of `table` becomes `nix` (of its name): the key is written
+  // anew where it is, and the migration drops and adds it in one statement,
+  // so a foreign key it serves keeps an index throughout.
+  std::optional<Edit_error> replace_index(size_t i, const Table &table, const Index &ix, const Index &nix,
+                                          Changes &changes) {
+    if (auto err = index_needed(i, table, &ix, nix.columns())) return err;
+    const edit_text::Style st = style_of(table.origin);
+    const std::string sql = edit_text::index_sql(nix, st);
+    if (const auto p = parse_problem("CREATE TABLE x (a INT, " + sql + ")")) {
+      return error(i, "bad-request", "the index does not parse (" + *p + ")");
+    }
+    m_count = table.indexes.size();
+    bool ok = false;
+    const auto r = searched_range(ix.origin.source, ix.origin.statement);
+    if (r && column_level(table, ix) == nullptr) {
+      const auto at = node_at(*r, gram().key_def, [&](uint32_t b, uint32_t en) {
+        return (b <= r->begin && r->end <= en) || (r->begin <= b && en <= r->end);
+      });
+      if (at) ok = change(changes, at->first.tree.begin(at->second), at->first.tree.end(at->second), sql);
+    }
+    if (!ok) {
+      changes.clear();
+      ok = remove_index(changes, table, ix) &&
+           add_element(changes, table, sql, {Element::index, Element::primary, Element::column}, st);
+    }
+    if (!ok) return error(i, "self-check", "the index `" + ix.name + "` of `" + table.name + "` cannot be written");
+    Alter_names n = key_names(nix, nix.name, true);
+    n.keys.insert(n.keys.begin(), {ix.name, false, false});
+    migrate_member(i, table.name, "DROP INDEX " + backtick_quote(ix.name) + ", ADD " + edit_text::index_sql(nix, {}),
+                   Act::alter, Obj::index, ix.name, std::move(n));
+    return std::nullopt;
+  }
+
   std::optional<Edit_error> set_primary_key(size_t i, const Schema_edit &e, Changes &changes) {
     const Table *table = lookup().table(e.table).second;
     if (table == nullptr) return error(i, "unknown-object", "there is no table `" + e.table + "`");
@@ -4743,28 +5196,45 @@ class Editor {
         return error(i, "unknown-object", "table `" + table->name + "` has no column `" + c + "`");
       }
     }
-    const Index *old = nullptr;
-    for (const auto &x : table->indexes) {
-      if (x.kind == "primary") old = &x;
-    }
-    if (old != nullptr && same_columns(old->columns(), e.columns)) return std::nullopt;  // as it is
-    if (old != nullptr) {
-      if (auto err = index_needed(i, *table, old, e.columns)) return err;
-    }
-    const edit_text::Style st = style_of(table->origin);
+    const Index *old = primary_key(*table);
     Index pk;
     pk.kind = "primary";
-    for (const auto &c : e.columns) pk.key_parts.emplace_back().column = c;
+    if (e.new_index) {
+      pk = *e.new_index;
+    } else {
+      for (const auto &c : e.columns) pk.key_parts.emplace_back().column = c;
+    }
+    // A key of nothing but its columns: the one set_primary_key writes.
+    const auto plain = [](const Index &x) {
+      return x.using_.empty() && !x.comment && !x.ignored && x.without_overlaps.empty() && x.options.empty() &&
+             std::all_of(x.key_parts.begin(), x.key_parts.end(),
+                         [](const Key_part &kp) { return !kp.length && kp.order.empty(); });
+    };
+    if (old != nullptr && (e.new_index ? same_index(*old, pk) : same_columns(old->columns(), e.columns))) {
+      return std::nullopt;  // as it is
+    }
+    if (old != nullptr) {
+      if (auto err = index_needed(i, *table, old, pk.columns())) return err;
+    }
+    const edit_text::Style st = style_of(table->origin);
     bool ok = false;
-    if (old != nullptr && column_level(*table, *old) == nullptr) {
+    // A whole key sent (replace_table) keeps none of the old key's
+    // attributes: only its columns change when neither key has others, else
+    // the key is written anew where it stands.
+    const bool columns_only = old != nullptr && plain(pk) && (!e.new_index || plain(*old));
+    if (old != nullptr && column_level(*table, *old) == nullptr && (columns_only || e.new_index)) {
       // The key's columns where it is written: its other attributes stay.
       const auto r = searched_range(old->origin.source, old->origin.statement);
       const auto at = r ? node_at(*r, gram().key_def, [&](uint32_t b, uint32_t en) { return b <= r->begin && r->end <= en; })
                         : std::nullopt;
       if (at) {
         const auto &t = at->first.tree;
-        const uint32_t list = child_of(t, at->second, gram().key_list);
-        ok = list != k_npos && change(changes, t.begin(list), t.end(list), edit_text::ids(e.columns, st));
+        if (columns_only) {
+          const uint32_t list = child_of(t, at->second, gram().key_list);
+          ok = list != k_npos && change(changes, t.begin(list), t.end(list), edit_text::ids(pk.columns(), st));
+        } else {
+          ok = change(changes, t.begin(at->second), t.end(at->second), edit_text::index_sql(pk, st));
+        }
       }
     } else {
       ok = old == nullptr || remove_index(changes, *table, *old);
@@ -4859,6 +5329,589 @@ class Editor {
            "an unnamed foreign key of `" + table->name + "` was removed: the server's name for it is not known");
     }
     return std::nullopt;
+  }
+
+  // ---------------------------------------------------------------------
+  // Table-level CHECKs (steps of replace_table)
+
+  // The table-level CHECK of `table` that `ck` names, or has the
+  // expression of when it has no name.
+  const Check *check_of(const Table &table, const Check &ck) const {
+    for (const Check *x : table_checks(table)) {
+      if (ck.name.empty() ? x->name.empty() && same_check(*x, ck) : iequals(x->name, ck.name)) return x;
+    }
+    return nullptr;
+  }
+
+  std::optional<Edit_error> add_check(size_t i, const Schema_edit &e, Changes &changes) {
+    const Table *table = lookup().table(e.table).second;
+    if (table == nullptr) return error(i, "unknown-object", "there is no table `" + e.table + "`");
+    const Check &ck = *e.new_check;
+    if (!ck.name.empty() && check_of(*table, ck) != nullptr) {
+      return error(i, "name-taken", "table `" + table->name + "` has a check `" + ck.name + "`");
+    }
+    const edit_text::Style st = style_of(table->origin);
+    const std::string sql = edit_text::check_sql(ck, st);
+    if (const auto p = parse_problem("CREATE TABLE x (a INT, " + sql + ")")) {
+      return error(i, "bad-request", "the check does not parse (" + *p + ")");
+    }
+    m_count = table->checks.size();
+    if (!add_element(changes, *table, sql,
+                     {Element::other, Element::foreign_key, Element::index, Element::primary, Element::column}, st)) {
+      return error(i, "self-check", "no place for the check was found in `" + table->name + "`");
+    }
+    Alter_names n;
+    n.keys = {{ck.name, true, true}};
+    n.expression = true;
+    migrate_member(i, table->name, "ADD " + edit_text::check_sql(ck, {}), Act::add, Obj::check, ck.name, std::move(n));
+    return std::nullopt;
+  }
+
+  std::optional<Edit_error> drop_check(size_t i, const Schema_edit &e, Changes &changes) {
+    const Table *table = lookup().table(e.table).second;
+    if (table == nullptr) return error(i, "unknown-object", "there is no table `" + e.table + "`");
+    const Check *ck = check_of(*table, *e.new_check);
+    if (ck == nullptr) return error(i, "unknown-object", "table `" + table->name + "` has no such check");
+    m_count = table->checks.size();
+    const auto r = searched_range(ck->origin.source, ck->origin.statement);
+    if (!r || !remove_element(changes, *r, ck->name.empty() ? table->name : ck->name)) {
+      return error(i, "self-check", "the check cannot be removed from `" + table->name + "`");
+    }
+    if (ck->name.empty()) {
+      note(i, "no-migration", ck->origin.source, ck->origin.statement.begin,
+           "an unnamed check of `" + table->name + "` was removed: the server's name for it is not known");
+      return std::nullopt;
+    }
+    Alter_names n;
+    n.keys = {{ck->name, true, false}};
+    migrate_member(i, table->name, "DROP CONSTRAINT " + backtick_quote(ck->name), Act::drop, Obj::check, ck->name,
+                   std::move(n));
+    return std::nullopt;
+  }
+
+  // The expression of each table-level CHECK of `e.table` with the columns
+  // of `e.renames` renamed in it, where it is written.
+  std::optional<Edit_error> rename_in_checks(size_t i, const Schema_edit &e, Changes &changes) {
+    const Table *table = lookup().table(e.table).second;
+    if (table == nullptr) return error(i, "unknown-object", "there is no table `" + e.table + "`");
+    for (const Check *ck : table_checks(*table)) {
+      if (renamed_in(ck->expression, e.renames) == ck->expression) continue;
+      const auto r = searched_range(ck->origin.source, ck->origin.statement);
+      if (!r || r->end > text().size()) return error(i, "self-check", "a check of `" + table->name + "` is not found");
+      // From the parenthesis after CHECK: the constraint's name stays.
+      const std::string_view written = text().substr(r->begin, r->end - r->begin);
+      const std::string low = lower(written);
+      size_t at = low.find("check");
+      at = at == std::string::npos ? at : written.find('(', at);
+      if (at == std::string::npos) return error(i, "self-check", "a check of `" + table->name + "` cannot be read");
+      if (!change(changes, r->begin + static_cast<uint32_t>(at), r->end, renamed_in(written.substr(at), e.renames))) {
+        return error(i, "self-check", "a check of `" + table->name + "` cannot be changed");
+      }
+    }
+    return std::nullopt;
+  }
+
+  // ---------------------------------------------------------------------
+  // replace_table
+
+  // The table as `e` sends it becomes the script's: the differences are
+  // made by the ops above, in an order MariaDB takes (docs/plans/
+  // schema-edits.md, replace_table), each step reading the table as the
+  // steps before left it.  Its ALTER TABLEs are merged.
+  std::optional<Edit_error> replace_table(size_t i, const Schema_edit &e) {
+    const Table *found = lookup().table(e.new_table->name).second;
+    if (found == nullptr) return error(i, "unknown-object", "there is no table `" + e.new_table->name + "`");
+    const std::string name = found->name;
+    Table want = *e.new_table;
+    want.name = name;
+    if (found->columns.empty()) {
+      return error(i, "unsupported", "the columns of `" + name + "` are not known (CREATE TABLE ... AS or LIKE)");
+    }
+    if (auto err = check_sent(i, *found, want, e)) return err;
+    // The table as the steps so far left it: valid until the next step.
+    const auto current = [&]() -> const Table & { return *lookup().table(name).second; };
+    // Column `target` of the table sent: its name now (a rename not done yet).
+    const auto now_name = [&](const Table &t, const std::string &target) {
+      for (const auto &[from, to] : e.renames) {
+        if (iequals(to, target) && t.column(from) != nullptr && t.column(from)->name != to) return t.column(from)->name;
+      }
+      return target;
+    };
+    // Its name in the table sent.
+    const auto sent_name = [&](const std::string &now) {
+      for (const auto &[from, to] : e.renames) {
+        if (iequals(from, now)) return to;
+      }
+      return now;
+    };
+    // The table with its columns named as in the table sent.
+    const auto as_sent = [&](Table t) {
+      const auto fix = [&](std::string &c) { c = sent_name(c); };
+      for (auto &c : t.columns) fix(c.name);
+      for (auto &ix : t.indexes) {
+        for (auto &kp : ix.key_parts) fix(kp.column);
+      }
+      for (auto &fk : t.foreign_keys) {
+        for (auto &c : fk.columns) fix(c);
+        if (iequals(fk.ref_table, name)) {
+          for (auto &c : fk.ref_columns) fix(c);
+        }
+      }
+      // MariaDB renames columns in CHECKs with RENAME and CHANGE COLUMN.
+      for (auto &ck : t.checks) {
+        if (!ck.column.empty()) fix(ck.column);
+        ck.expression = renamed_in(ck.expression, e.renames);
+      }
+      return t;
+    };
+    const auto checks_of = [&](const std::string &column) { return edit_text::column_checks(want, column); };
+    const size_t first_statement = m_result.migration.size();
+    bool changed = false;
+    const auto step = [&](Schema_edit s) {
+      changed = true;
+      s.table = name;
+      return run_step(i, s);
+    };
+    possible_renames(i, *found, want, e);
+    // For each of `have` (the script's, as_sent) that the table sent does not
+    // have as it is: its index.
+    const auto stale = [](const auto &have, const auto &wanted, auto same) {
+      const auto m = match_items(have, wanted, same);
+      std::vector<std::pair<size_t, std::decay_t<decltype(wanted[0])>>> out;  // (have, its match or nullptr)
+      for (size_t h = 0; h < have.size(); ++h) {
+        const auto w = std::find(m.begin(), m.end(), std::optional<size_t>(h));
+        const std::decay_t<decltype(wanted[0])> match = w == m.end() ? nullptr : wanted[static_cast<size_t>(w - m.begin())];
+        if (match == nullptr || !same(*have[h], *match)) out.emplace_back(h, match);
+      }
+      return out;
+    };
+
+    // 1. Renames of columns that change nothing else (a rename that does
+    // goes with its change, step 8).
+    for (const auto &[from, to] : e.renames) {
+      const Table &t = current();
+      const Column *c = t.column(from);
+      const Column *w = want.column(to);
+      if (c == nullptr || c->name == to) continue;
+      // Its own CHECKs name it: modify_column (step 8) writes them anew.
+      if (!column_difference(t, *c, want, *w, false).empty() || !edit_text::column_checks(t, c->name).empty()) continue;
+      Schema_edit s;
+      s.op = Edit_op::rename_column;
+      s.column = c->name;
+      s.new_name = w->name;
+      if (auto err = step(s)) return err;
+    }
+    // 2. Foreign keys that go or change.
+    {
+      const Table t = current();
+      for (const auto &[h, match] : stale(pointers(as_sent(t).foreign_keys), pointers(want.foreign_keys), same_foreign_key)) {
+        Schema_edit s;
+        s.op = Edit_op::drop_foreign_key;
+        s.name = t.foreign_keys[h].name;
+        if (s.name.empty()) s.columns = t.foreign_keys[h].columns;
+        if (auto err = step(s)) return err;
+      }
+    }
+    // 3. Table-level CHECKs that go or change.
+    {
+      const Table ts = as_sent(current());
+      const auto have = table_checks(ts);
+      for (const auto &[h, match] : stale(have, table_checks(want), same_check)) {
+        Schema_edit s;
+        s.op = Edit_op::drop_check;
+        s.new_check = *have[h];
+        if (auto err = step(s)) return err;
+      }
+    }
+    // 4. Columns that lose AUTO_INCREMENT, before the index it leads goes.
+    const Table before_ai = current();
+    for (const auto &c : before_ai.columns) {
+      const Column *w = want.column(sent_name(c.name));
+      if (!c.auto_increment || w == nullptr || w->auto_increment) continue;
+      if (auto err = step(modify_step(c.name, *w, checks_of(w->name)))) return err;
+    }
+    // 5. Indexes that go or change (step 10 adds the new definition); one
+    // that a foreign key or an AUTO_INCREMENT column still needs waits for
+    // the new ones, and one that changed under its name is then replaced.
+    const auto drop_indexes = [&](bool last) -> std::optional<Edit_error> {
+      const Table *t = lookup().table(name).second;
+      const Table ts = as_sent(*t);
+      if (primary_key(*t) != nullptr && primary_key(want) == nullptr) {
+        if (last || !index_needed(i, *t, primary_key(*t), {})) {
+          Schema_edit s;
+          s.op = Edit_op::drop_index;
+          s.kind = "primary";
+          if (auto err = step(s)) return err;
+          t = lookup().table(name).second;
+        }
+      }
+      std::vector<Schema_edit> steps;
+      const auto have_now = secondary_indexes(*t);
+      for (const auto &[h, match] : stale(secondary_indexes(ts), secondary_indexes(want), same_index)) {
+        Schema_edit s;
+        s.op = Edit_op::drop_index;
+        s.name = have_now[h]->name;
+        if (s.name.empty()) s.columns = have_now[h]->columns();
+        if (last && match != nullptr && !s.name.empty() && !match->name.empty()) {
+          // Changed under its name, and needed until now: written anew
+          // where it is, dropped and added in one clause pair.
+          s.new_index = *match;
+        } else if (!last && index_needed(i, *t, have_now[h], {})) {
+          continue;
+        }
+        steps.push_back(s);
+      }
+      for (const auto &s : steps) {
+        if (auto err = step(s)) return err;
+      }
+      return std::nullopt;
+    };
+    if (auto err = drop_indexes(false)) return err;
+    // 6. Columns that come, each after the one before it in the table sent;
+    // before those that go, so that a CREATE TABLE keeps a column.
+    for (size_t k = 0; k < want.columns.size(); ++k) {
+      const Column &w = want.columns[k];
+      const Table &t = current();
+      if (t.column(now_name(t, w.name)) != nullptr) continue;
+      Schema_edit s;
+      s.op = Edit_op::add_column;
+      s.new_column = w;
+      s.new_checks = checks_of(w.name);
+      if (k == 0) s.first = true;
+      else s.after = now_name(t, want.columns[k - 1].name);
+      if (auto err = step(s)) return err;
+    }
+    // 7. Columns that go.
+    const Table before_drops = current();
+    for (const auto &c : before_drops.columns) {
+      if (want.column(sent_name(c.name)) != nullptr) continue;
+      Schema_edit s;
+      s.op = Edit_op::drop_column;
+      s.column = c.name;
+      if (auto err = step(s)) return err;
+    }
+    // 8. Columns that change or move: the fewest moves (those outside the
+    // longest common order), in the order of the table sent.
+    // Columns that leave the primary key and may be NULL: the server keeps a
+    // key's column NOT NULL, so they are made nullable once out of it.
+    std::vector<std::string> nullable_later;
+    {
+      const Table &t = current();
+      std::vector<std::string> now, sent;
+      for (const auto &c : t.columns) now.push_back(sent_name(c.name));
+      for (const auto &w : want.columns) sent.push_back(w.name);
+      const std::set<std::string> stay = common_order(now, sent);
+      // A primary key's column reads NOT NULL; leaving the key, it must say
+      // so itself.
+      const auto in_key = [](const Table &x, const std::string &col) {
+        const Index *pk = primary_key(x);
+        return pk != nullptr && names(pk->columns(), col);
+      };
+      for (size_t k = 0; k < want.columns.size(); ++k) {
+        const Table &tk = current();
+        Column w = want.columns[k];
+        const Column *c = tk.column(now_name(tk, w.name));
+        if (c == nullptr) return error(i, "self-check", "table `" + name + "` lost the column `" + w.name + "`");
+        // AUTO_INCREMENT that no index serves yet comes with step 11.
+        if (w.auto_increment && !c->auto_increment && !leads_an_index(tk, c->name)) w.auto_increment = false;
+        const bool moved = stay.count(lower(w.name)) == 0;
+        const bool leaves_key = in_key(tk, c->name) && !in_key(want, w.name);
+        const bool says_not_null = !w.nullable && leaves_key && !written_not_null(*c);
+        if (w.nullable && leaves_key) {
+          w.nullable = false;
+          nullable_later.push_back(w.name);
+        }
+        if (!moved && !says_not_null && column_difference(tk, *c, want, w).empty()) continue;
+        Schema_edit s = modify_step(c->name, w, checks_of(w.name));
+        if (moved) {
+          if (k == 0) s.first = true;
+          else s.after = now_name(tk, want.columns[k - 1].name);
+        }
+        if (auto err = step(s)) return err;
+      }
+    }
+    // The renamed columns, in the table-level CHECKs' text too.
+    if (!e.renames.empty()) {
+      const Table &t = current();
+      if (std::any_of(t.checks.begin(), t.checks.end(), [&](const Check &ck) {
+            return ck.column.empty() && renamed_in(ck.expression, e.renames) != ck.expression;
+          })) {
+        Schema_edit s;
+        s.op = Edit_op::rename_in_checks;
+        s.renames = e.renames;
+        if (auto err = step(s)) return err;
+      }
+    }
+    // 9. The primary key.
+    if (const Index *wp = primary_key(want)) {
+      const Index *hp = primary_key(current());
+      if (hp == nullptr || !same_index(*hp, *wp)) {
+        Schema_edit s;
+        s.op = Edit_op::set_primary_key;
+        s.columns = wp->columns();
+        s.new_index = *wp;
+        if (auto err = step(s)) return err;
+      }
+    }
+    // 10. Indexes that come; then those that had to wait for them.
+    {
+      const auto wanted = secondary_indexes(want);
+      const auto m = match_items(secondary_indexes(current()), wanted, same_index);
+      for (size_t w = 0; w < wanted.size(); ++w) {
+        if (m[w]) continue;
+        Schema_edit s;
+        s.op = Edit_op::add_index;
+        s.new_index = *wanted[w];
+        if (auto err = step(s)) return err;
+      }
+    }
+    if (auto err = drop_indexes(true)) return err;
+    // The columns that left the primary key, nullable now.
+    for (const auto &n : nullable_later) {
+      const Column *c = current().column(n);
+      const Column *w = want.column(n);
+      if (c == nullptr || w == nullptr) continue;
+      Column wc = *w;
+      wc.auto_increment = c->auto_increment;  // step 11 adds it
+      if (auto err = step(modify_step(c->name, wc, checks_of(w->name)))) return err;
+    }
+    // 11. AUTO_INCREMENT on a column an index now leads.
+    for (const auto &w : want.columns) {
+      const Column *c = current().column(w.name);
+      if (c == nullptr || c->auto_increment || !w.auto_increment) continue;
+      if (auto err = step(modify_step(c->name, w, checks_of(w.name)))) return err;
+    }
+    // 12. Table-level CHECKs that come, each named.
+    {
+      const Table &t = current();
+      const auto wanted = table_checks(want);
+      const auto m = match_items(table_checks(t), wanted, same_check);
+      std::vector<std::string> taken;
+      // Every CHECK shares the table's names; a column's own is named after
+      // the column on the server.
+      for (const Table *x : {&t, static_cast<const Table *>(&want)}) {
+        for (const auto &ck : x->checks) taken.push_back(ck.name.empty() ? ck.column : ck.name);
+      }
+      for (size_t w = 0; w < wanted.size(); ++w) {
+        if (m[w]) continue;
+        Schema_edit s;
+        s.op = Edit_op::add_check;
+        s.new_check = *wanted[w];
+        if (s.new_check->name.empty()) {
+          s.new_check->name = unique_name("chk_" + name, [&](const std::string &n) {
+            return std::any_of(taken.begin(), taken.end(), [&](const std::string &x) { return iequals(x, n); });
+          });
+          taken.push_back(s.new_check->name);
+        }
+        if (auto err = step(s)) return err;
+      }
+    }
+    // 13. Foreign keys that come.
+    {
+      const auto m = match_items(pointers(current().foreign_keys), pointers(want.foreign_keys), same_foreign_key);
+      for (size_t w = 0; w < want.foreign_keys.size(); ++w) {
+        if (m[w]) continue;
+        Schema_edit s;
+        s.op = Edit_op::add_foreign_key;
+        s.new_foreign_key = want.foreign_keys[w];
+        if (auto err = step(s)) return err;
+      }
+    }
+    // 14. Table options; an AUTO_INCREMENT counter the table sent leaves out
+    // stays.
+    {
+      Schema_edit s;
+      s.op = Edit_op::set_table_options;
+      s.options = option_changes(current(), want);
+      if (!s.options.empty()) {
+        if (auto err = step(s)) return err;
+      }
+    }
+
+    if (!changed) {
+      // No step ran: `found` is the table still.
+      note(i, "unchanged", found->origin.source, found->origin.statement.begin,
+           "the table `" + name + "` is as sent: nothing was changed");
+      return std::nullopt;
+    }
+    if (const std::string d = table_difference(current(), want); !d.empty()) {
+      return error(i, "self-check", "table `" + name + "` is not as sent: " + d + " differs");
+    }
+    // One ALTER TABLE wherever the clauses allow, whatever merge_alters says.
+    std::vector<Migration_statement> own(std::make_move_iterator(m_result.migration.begin() +
+                                                                 static_cast<ptrdiff_t>(first_statement)),
+                                         std::make_move_iterator(m_result.migration.end()));
+    m_result.migration.resize(first_statement);
+    merge_alter_statements(own);
+    std::move(own.begin(), own.end(), std::back_inserter(m_result.migration));
+    return std::nullopt;
+  }
+
+  // The definition of column `c` says NOT NULL.
+  bool written_not_null(const Column &c) const {
+    const auto r = searched_range(c.origin.source, c.origin.statement);
+    if (!r || r->end > text().size()) return false;
+    // Not in a COMMENT or DEFAULT string, nor in parentheses (a CHECK, a
+    // generated column's expression: `CHECK (c IS NOT NULL)`).
+    const std::string all = sql_key(text().substr(r->begin, r->end - r->begin));
+    std::string key;
+    char quote = 0;
+    int depth = 0;
+    for (size_t k = 0; k < all.size(); ++k) {
+      const char ch = all[k];
+      if (quote != 0) {
+        if (ch == '\\' && k + 1 < all.size()) ++k;
+        else if (ch == quote && k + 1 < all.size() && all[k + 1] == quote) ++k;
+        else if (ch == quote) quote = 0;
+        continue;
+      }
+      if (ch == '\'' || ch == '"') quote = ch;
+      else if (ch == '(') ++depth;
+      else if (ch == ')') depth = depth > 0 ? depth - 1 : 0;
+      else if (depth == 0) key.push_back(ch);
+    }
+    return key.find("not null") != std::string::npos;
+  }
+
+  // A modify_column step making column `column` what `w` is.
+  static Schema_edit modify_step(const std::string &column, const Column &w, std::vector<Check> checks) {
+    Schema_edit s;
+    s.op = Edit_op::modify_column;
+    s.column = column;
+    s.new_column = w;
+    s.new_checks = std::move(checks);
+    return s;
+  }
+
+  // An index of `t` starts with column `column`.
+  static bool leads_an_index(const Table &t, const std::string &column) {
+    return std::any_of(t.indexes.begin(), t.indexes.end(), [&](const Index &ix) { return serves(ix.columns(), {column}); });
+  }
+
+  // The table sent, and the renames, as replace_table takes them.
+  std::optional<Edit_error> check_sent(size_t i, const Table &found, const Table &want, const Schema_edit &e) {
+    const std::string &name = found.name;
+    for (size_t a = 0; a < want.columns.size(); ++a) {
+      for (size_t b = a + 1; b < want.columns.size(); ++b) {
+        if (iequals(want.columns[a].name, want.columns[b].name)) {
+          return error(i, "bad-request", "table `" + name + "` has two columns `" + want.columns[b].name + "`");
+        }
+      }
+    }
+    size_t primaries = 0;
+    for (const auto &ix : want.indexes) {
+      if (ix.kind == "primary") ++primaries;
+      for (const auto &kp : ix.key_parts) {
+        if (want.column(kp.column) == nullptr) {
+          return error(i, "unknown-object", "an index of `" + name + "` names the column `" + kp.column +
+                                                "`, which the table sent does not have");
+        }
+      }
+    }
+    if (primaries > 1) return error(i, "bad-request", "table `" + name + "` has two primary keys");
+    for (const auto &ck : want.checks) {
+      if (!ck.column.empty() && want.column(ck.column) == nullptr) {
+        return error(i, "unknown-object", "a check of `" + name + "` is on the column `" + ck.column +
+                                              "`, which the table sent does not have");
+      }
+    }
+    for (const auto &fk : want.foreign_keys) {
+      for (const auto &c : fk.columns) {
+        if (want.column(c) == nullptr) {
+          return error(i, "unknown-object", "a foreign key of `" + name + "` names the column `" + c +
+                                                "`, which the table sent does not have");
+        }
+      }
+    }
+    // What no op changes.
+    const auto unsupported = [&](const std::string &clause) {
+      return error(i, "unsupported", "replace_table cannot change " + clause + " of `" + name + "`");
+    };
+    if (found.temporary != want.temporary) return unsupported("TEMPORARY");
+    if (!same_sql(found.partitioning, want.partitioning)) return unsupported("the PARTITION BY clause");
+    if (found.system_versioning != want.system_versioning) return unsupported("WITH SYSTEM VERSIONING");
+    if (!std::equal(found.periods.begin(), found.periods.end(), want.periods.begin(), want.periods.end(),
+                    [](const Period &a, const Period &b) {
+                      return iequals(a.name, b.name) && iequals(a.start, b.start) && iequals(a.end, b.end);
+                    })) {
+      return unsupported("a PERIOD FOR clause");
+    }
+    for (const auto &c : found.columns) {
+      const Column *w = want.column(c.name);
+      if (c.generated_row && (w == nullptr || !same_word(c.generated_row, w->generated_row))) {
+        return unsupported("the row start or end column `" + c.name + "`");
+      }
+    }
+    for (const auto &w : want.columns) {
+      if (w.generated_row && found.column(w.name) == nullptr) {
+        return unsupported("the row start or end column `" + w.name + "`");
+      }
+    }
+    for (const auto &[from, to] : e.renames) {
+      const Column *c = found.column(from);
+      if (c == nullptr) return error(i, "unknown-object", "table `" + name + "` has no column `" + from + "` to rename");
+      if (want.column(to) == nullptr) {
+        return error(i, "bad-request", "the table sent has no column `" + to + "`, which `" + from + "` is renamed to");
+      }
+      if (iequals(from, to)) continue;
+      if (want.column(from) != nullptr) {
+        return error(i, "bad-request", "the table sent still has the column `" + from + "`, which it renames");
+      }
+      if (found.column(to) != nullptr) {
+        return error(i, "name-taken", "table `" + name + "` has a column `" + to + "`: rename it first");
+      }
+      // Not rewritten there (the reference search does not reach them).
+      for (const auto &x : found.columns) {
+        for (const auto *expr : {&x.generated, &x.default_value}) {
+          if (*expr && renamed_in(**expr, {{from, to}}) != **expr) {
+            return error(i, "unsupported", "replace_table cannot rename `" + from + "`: the expression of column `" +
+                                               x.name + "` names it");
+          }
+        }
+      }
+    }
+    return std::nullopt;
+  }
+
+  // A column the table sent drops and one it adds, alike but for their
+  // names, each the other's only such: a rename, perhaps.
+  void possible_renames(size_t i, const Table &found, const Table &want, const Schema_edit &e) {
+    const auto renamed = [&](const std::string &c, auto side) {
+      return std::any_of(e.renames.begin(), e.renames.end(), [&](const auto &r) { return iequals(r.*side, c); });
+    };
+    using Rename = std::pair<std::string, std::string>;
+    std::vector<const Column *> dropped, added;
+    for (const auto &c : found.columns) {
+      if (want.column(c.name) == nullptr && !renamed(c.name, &Rename::first)) dropped.push_back(&c);
+    }
+    for (const auto &w : want.columns) {
+      if (found.column(w.name) == nullptr && !renamed(w.name, &Rename::second)) added.push_back(&w);
+    }
+    // alike[d][a]: dropped d and added a differ only in their names.
+    std::vector<std::vector<bool>> alike(dropped.size(), std::vector<bool>(added.size()));
+    std::vector<size_t> per_added(added.size(), 0);
+    for (size_t d = 0; d < dropped.size(); ++d) {
+      for (size_t a = 0; a < added.size(); ++a) {
+        alike[d][a] = column_difference(found, *dropped[d], want, *added[a], false).empty();
+        if (alike[d][a]) ++per_added[a];
+      }
+    }
+    for (size_t d = 0; d < dropped.size(); ++d) {
+      if (std::count(alike[d].begin(), alike[d].end(), true) != 1) continue;
+      const size_t a = static_cast<size_t>(std::find(alike[d].begin(), alike[d].end(), true) - alike[d].begin());
+      if (per_added[a] != 1) continue;
+      const Column &dc = *dropped[d];
+      const Column &ac = *added[a];
+      Edit_note *n = note(i, "possible-rename", dc.origin.source, dc.origin.statement.begin,
+                          "the column `" + found.name + "`.`" + dc.name + "` is dropped and `" + ac.name +
+                              "` added with its definition: if it is a rename, send \"renames\": {\"columns\": {\"" +
+                              dc.name + "\": \"" + ac.name + "\"}}, else the migration drops its data");
+      if (n != nullptr) {
+        n->table = found.name;
+        n->column = dc.name;
+        n->new_name = ac.name;
+      }
+    }
   }
 
   // The changes of one edit, sorted; the same change twice (a file
@@ -5077,6 +6130,12 @@ class Editor {
           return fail("column `" + want.name + "` has another default");
         }
         if (c->comment != want.comment) return fail("column `" + want.name + "` has another comment");
+        if (e.first || !e.after.empty()) {
+          size_t k = 0;
+          while (k < t->columns.size() && t->columns[k].name != want.name) ++k;
+          const bool placed = e.first ? k == 0 : k > 0 && k < t->columns.size() && iequals(t->columns[k - 1].name, e.after);
+          if (!placed) return fail("column `" + want.name + "` is not where it was moved");
+        }
         if (!iequals(want.name, old_name)) {
           if (t->column(old_name) != nullptr) return fail("table `" + t->name + "` still has a column `" + old_name + "`");
           for (const auto &ix : t->indexes) {
@@ -5116,6 +6175,16 @@ class Editor {
       case Edit_op::drop_index: {
         const Table *t = l.table(e.table).second;
         if (t == nullptr) return fail("the edited script has no table `" + e.table + "`");
+        if (e.op == Edit_op::drop_index && e.new_index) {
+          // Replaced: as many, one of them the new one.
+          if (t->indexes.size() != m_count ||
+              std::none_of(t->indexes.begin(), t->indexes.end(), [&](const Index &x) {
+                return iequals(x.name, e.new_index->name) && same_index(x, *e.new_index);
+              })) {
+            return fail("table `" + t->name + "` does not have the index `" + e.new_index->name + "` as sent");
+          }
+          break;
+        }
         const bool added = e.op == Edit_op::add_index;
         if (auto err = check_keys(*t, t->indexes, "index", "indexes", added, [&](const Index &x) {
               const Index &ix = *e.new_index;
@@ -5137,6 +6206,29 @@ class Editor {
                      (fk.name.empty() || iequals(x.name, fk.name));
             })) {
           return err;
+        }
+        break;
+      }
+      case Edit_op::rename_in_checks: {
+        const Table *t = l.table(e.table).second;
+        if (t == nullptr) return fail("the edited script has no table `" + e.table + "`");
+        for (const Check *ck : table_checks(*t)) {
+          if (renamed_in(ck->expression, e.renames) != ck->expression) {
+            return fail("a check of `" + t->name + "` still names a column renamed: " + ck->expression);
+          }
+        }
+        break;
+      }
+      case Edit_op::add_check:
+      case Edit_op::drop_check: {
+        const Table *t = l.table(e.table).second;
+        if (t == nullptr) return fail("the edited script has no table `" + e.table + "`");
+        const bool added = e.op == Edit_op::add_check;
+        if (t->checks.size() != (added ? m_count + 1 : m_count - 1)) {
+          return fail("table `" + t->name + "` has " + std::to_string(t->checks.size()) + " checks");
+        }
+        if (added && check_of(*t, *e.new_check) == nullptr) {
+          return fail("table `" + t->name + "` does not have the check added");
         }
         break;
       }
@@ -5439,6 +6531,9 @@ std::string edit_result_json(const Edit_result &result, std::string_view script_
     const auto &f = result.files[n.file];
     lsp::write_position(w, lines[n.file].position(f.original, n.at));
     str(w, "message", n.message);
+    if (!n.table.empty()) str(w, "table", n.table);
+    if (!n.column.empty()) str(w, "column", n.column);
+    if (!n.new_name.empty()) str(w, "new_name", n.new_name);
     w.EndObject();
   }
   w.EndArray();
