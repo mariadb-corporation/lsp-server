@@ -962,6 +962,15 @@ class Replace_table_on_a_server(unittest.TestCase):
                      "CREATE TABLE t (id INT NOT NULL AUTO_INCREMENT, a INT, PRIMARY KEY (id));\n", "t",
                      rows="INSERT INTO t VALUES (1, 10), (2, 20);")
 
+    def test_a_primary_key_changes(self):
+        # A column leaving the key becomes nullable on the server too.
+        self.replace("CREATE TABLE t (a INT, b INT, PRIMARY KEY (a, b));\n",
+                     "CREATE TABLE t (a INT NOT NULL, b INT, PRIMARY KEY (a));\n", "t",
+                     rows="INSERT INTO t VALUES (1, 2);")
+        self.replace("CREATE TABLE t (a INT, b INT NOT NULL, PRIMARY KEY (a) COMMENT 'x');\n",
+                     "CREATE TABLE t (a INT NOT NULL, b INT NOT NULL, PRIMARY KEY (a, b) COMMENT 'y');\n", "t",
+                     rows="INSERT INTO t VALUES (1, 2);")
+
     def test_renames_keep_the_data(self):
         old = ("CREATE TABLE t (id INT PRIMARY KEY, nm VARCHAR(10), q INT);\n"
                "CREATE VIEW v AS SELECT nm, q FROM t;\n")
@@ -973,6 +982,20 @@ class Replace_table_on_a_server(unittest.TestCase):
         self.assertEqual([m["sql"] for m in result["migration"]],
                          ["ALTER TABLE `t` RENAME COLUMN `q` TO `qty`, CHANGE COLUMN `nm` `name` VARCHAR(40)"])
         self.assertEqual(self.server.query("SELECT CONCAT(name, qty) FROM migrated.t"), "n2")
+
+    def test_renamed_columns_in_checks(self):
+        # MariaDB renames a column in the table's CHECKs itself: they stay.
+        for old, new in [
+                ("CREATE TABLE t (id INT PRIMARY KEY, a INT, CHECK (a > 0));\n",
+                 "CREATE TABLE t (id INT PRIMARY KEY, b INT, CHECK (b > 0));\n"),
+                ("CREATE TABLE t (id INT PRIMARY KEY, a INT, CHECK (a > 0));\n",
+                 "CREATE TABLE t (id INT PRIMARY KEY, b BIGINT, CHECK (b > 0));\n"),
+                ("CREATE TABLE t (id INT PRIMARY KEY, a INT CHECK (a > 0), CONSTRAINT c CHECK (a < 100));\n",
+                 "CREATE TABLE t (id INT PRIMARY KEY, b BIGINT CHECK (b > 0), CONSTRAINT c CHECK (b < 100));\n")]:
+            with self.subTest(new=new):
+                result = self.replace(old, new, "t", rows="INSERT INTO t VALUES (1, 5);", renames={"a": "b"})
+                self.assertEqual(result["notes"], [])
+                self.assertTrue(all("CONSTRAINT" not in m["sql"] for m in result["migration"]), result["migration"])
 
     def test_an_index_a_foreign_key_needs_changes(self):
         old = ("CREATE TABLE p (id INT PRIMARY KEY);\n"

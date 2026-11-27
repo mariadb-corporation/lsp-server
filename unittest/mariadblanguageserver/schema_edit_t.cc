@@ -3174,6 +3174,64 @@ TEST(Schema_edit, replace_table_keeps_not_null_when_the_key_moves) {
             migration(r));
 }
 
+TEST(Schema_edit, replace_table_primary_key_changes) {
+  auto replaced = [](const std::string &script, const std::string &table) {
+    return ok(edit(script, {}, request("", replace_table(table))));
+  };
+  // A column leaving the key and nullable: the server keeps a key's column
+  // NOT NULL, so it changes once out of the key.
+  const auto r = replaced("CREATE TABLE t (\n  a INT,\n  b INT,\n  PRIMARY KEY (a, b)\n);\n",
+                          R"j({"name": "t", "columns": [{"name": "a", "type": "INT", "nullable": false}, {"name": "b", "type": "INT"}],
+                               "indexes": [{"kind": "primary", "columns": ["a"]}]})j");
+  EXPECT_EQ("CREATE TABLE t (\n  a INT,\n  b INT,\n  PRIMARY KEY (a)\n);\n", text(r, ""));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `t` DROP PRIMARY KEY, ADD PRIMARY KEY (`a`), MODIFY COLUMN `b` INT"},
+            migration(r));
+  // A key with a COMMENT: its columns change, the old COMMENT goes with
+  // the old key; or the key sent is written whole.
+  const std::string commented = "CREATE TABLE t (\n  a INT,\n  b INT NOT NULL,\n  PRIMARY KEY (a) COMMENT 'x'\n);\n";
+  const std::string columns = R"j("columns": [{"name": "a", "type": "INT", "nullable": false}, {"name": "b", "type": "INT", "nullable": false}])j";
+  const auto r2 = replaced(commented, R"j({"name": "t", )j" + columns + R"j(, "indexes": [{"kind": "primary", "columns": ["a", "b"]}]})j");
+  EXPECT_EQ("CREATE TABLE t (\n  a INT,\n  b INT NOT NULL,\n  PRIMARY KEY (a, b)\n);\n", text(r2, ""));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `t` DROP PRIMARY KEY, ADD PRIMARY KEY (`a`, `b`)"}, migration(r2));
+  const auto r3 = replaced(commented, R"j({"name": "t", )j" + columns +
+                                          R"j(, "indexes": [{"kind": "primary", "columns": ["a", "b"], "comment": "y"}]})j");
+  EXPECT_EQ("CREATE TABLE t (\n  a INT,\n  b INT NOT NULL,\n  PRIMARY KEY (a, b) COMMENT 'y'\n);\n", text(r3, ""));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `t` DROP PRIMARY KEY, ADD PRIMARY KEY (`a`, `b`) COMMENT 'y'"}, migration(r3));
+  // NOT NULL in the column's CHECK is not its own.
+  const auto r4 = replaced("CREATE TABLE t (\n  a INT,\n  b INT CHECK (b IS NOT NULL),\n  PRIMARY KEY (a, b)\n);\n",
+                           R"j({"name": "t", )j" + columns + R"j(, "checks": [{"expression": "b IS NOT NULL", "column": "b"}],
+                               "indexes": [{"kind": "primary", "columns": ["a"]}]})j");
+  EXPECT_EQ("CREATE TABLE t (\n  a INT,\n  b INT NOT NULL CHECK (b IS NOT NULL),\n  PRIMARY KEY (a)\n);\n", text(r4, ""));
+}
+
+TEST(Schema_edit, replace_table_renames_in_checks) {
+  // MariaDB renames a column in the CHECKs itself: the text follows, with
+  // no migration of its own; a column's own CHECK is written with it.
+  const std::string script =
+      "CREATE TABLE t (\n  a INT CHECK (a > 0),\n  n INT,\n  CONSTRAINT `a` CHECK (`a` < 100 AND n <> 'a'),\n  CHECK (n > a)\n);\n";
+  const auto r = ok(edit(script, {}, request("", replace_table(R"j({"name": "t",
+      "columns": [{"name": "b", "type": "INT"}, {"name": "n", "type": "INT"}],
+      "checks": [{"expression": "b > 0", "column": "b"}, {"name": "a", "expression": "`b` < 100 AND n <> 'a'"}, {"expression": "n > b"}]})j",
+                                                           R"({"a": "b"})"))));
+  EXPECT_EQ("CREATE TABLE t (\n  b INT CHECK (b > 0),\n  n INT,\n  CONSTRAINT `a` CHECK (`b` < 100 AND n <> 'a'),\n  CHECK (n > b)\n);\n",
+            text(r, ""));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `t` CHANGE COLUMN `a` `b` INT CHECK (b > 0)"}, migration(r));
+  EXPECT_TRUE(r.notes.empty());
+  // A generated column or a DEFAULT naming it is not rewritten: refused.
+  const auto e = failed(edit("CREATE TABLE t (a INT, g INT AS (a + 1));\n", {},
+                             request("", replace_table(R"j({"name": "t", "columns": [{"name": "b", "type": "INT"},
+                                 {"name": "g", "type": "INT", "generated": "b + 1"}]})j", R"({"a": "b"})"))));
+  EXPECT_EQ("unsupported: replace_table cannot rename `a`: the expression of column `g` names it", e.kind + ": " + e.message);
+}
+
+TEST(Schema_edit, replace_table_check_names_avoid_column_checks) {
+  // The server names a column's CHECK after its column.
+  const auto r = ok(edit("CREATE TABLE t (\n  a INT,\n  chk_t INT CHECK (chk_t > 0)\n);\n", {},
+                         request("", replace_table(R"j({"name": "t", "columns": [{"name": "a", "type": "INT"}, {"name": "chk_t", "type": "INT"}],
+                             "checks": [{"expression": "chk_t > 0", "column": "chk_t"}, {"expression": "a > 1"}]})j"))));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `t` ADD CONSTRAINT `chk_t_2` CHECK (a > 1)"}, migration(r));
+}
+
 TEST(Schema_edit, replace_table_options) {
   // The AUTO_INCREMENT counter stays; another option left out goes, with
   // no statement to take the server back to its default.

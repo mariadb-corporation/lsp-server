@@ -1874,10 +1874,52 @@ bool same_options(const std::vector<std::pair<std::string, std::string>> &a,
   });
 }
 
-// The column-level CHECKs of column `c` of `t`, as expressions.
-std::vector<std::string> check_expressions(const Table &t, const std::string &c) {
+// `expr` with each name (bare or in backticks, outside string literals)
+// that `renames` maps, compared in any case, replaced by the name it maps
+// to: an expression as MariaDB keeps it after RENAME or CHANGE COLUMN.
+std::string renamed_in(std::string_view expr, const std::vector<std::pair<std::string, std::string>> &renames) {
+  const auto word = [](char c) { return edit_text::is_word_char(c); };
+  std::string out;
+  for (size_t k = 0; k < expr.size();) {
+    const char c = expr[k];
+    if (c == '\'' || c == '"') {
+      size_t e = k + 1;
+      while (e < expr.size() && expr[e] != c) e += expr[e] == '\\' ? 2 : 1;
+      e = std::min(e + 1, expr.size());
+      out.append(expr.substr(k, e - k));
+      k = e;
+      continue;
+    }
+    const bool quoted = c == '`';
+    if (!quoted && !word(c)) {
+      out.push_back(c);
+      ++k;
+      continue;
+    }
+    size_t e = k + 1;
+    if (quoted) {
+      while (e < expr.size() && expr[e] != '`') ++e;
+      e = std::min(e + 1, expr.size());
+    } else {
+      while (e < expr.size() && word(expr[e])) ++e;
+    }
+    const std::string_view token = expr.substr(k, e - k);
+    const std::string_view name = quoted && token.size() >= 2 ? token.substr(1, token.size() - 2) : token;
+    const auto r = std::find_if(renames.begin(), renames.end(), [&](const auto &x) { return iequals(x.first, name); });
+    if (r == renames.end()) out.append(token);
+    else out += quoted ? "`" + r->second + "`" : r->second;
+    k = e;
+  }
+  return out;
+}
+
+// The column-level CHECKs of column `c` of `t`, as expressions; with `c`
+// named `as` in them when that is given.
+std::vector<std::string> check_expressions(const Table &t, const std::string &c, const std::string &as = {}) {
   std::vector<std::string> out;
-  for (const auto &ck : edit_text::column_checks(t, c)) out.push_back(sql_key(ck.expression));
+  for (const auto &ck : edit_text::column_checks(t, c)) {
+    out.push_back(sql_key(as.empty() ? ck.expression : renamed_in(ck.expression, {{c, as}})));
+  }
   return out;
 }
 
@@ -1905,7 +1947,8 @@ std::string column_difference(const Table &ta, const Column &a, const Table &tb,
   if (a.invisible != b.invisible) return "invisible";
   if (a.system_versioning != b.system_versioning) return "system_versioning";
   if (!same_options(a.options, b.options)) return "options";
-  const auto ca = check_expressions(ta, a.name);
+  // A CHECK naming its column follows the column's name (a rename keeps it).
+  const auto ca = check_expressions(ta, a.name, iequals(a.name, b.name) ? std::string() : b.name);
   const auto cb = check_expressions(tb, b.name);
   if (!std::is_permutation(ca.begin(), ca.end(), cb.begin(), cb.end())) return "checks";
   return "";
@@ -2135,6 +2178,7 @@ class Editor {
       case Edit_op::replace_event: err = replace_event(i, e, changes); break;
       case Edit_op::add_check: err = add_check(i, e, changes); break;
       case Edit_op::drop_check: err = drop_check(i, e, changes); break;
+      case Edit_op::rename_in_checks: err = rename_in_checks(i, e, changes); break;
       default:
         return error(i, "unsupported", std::string("this binary does not do ") + to_string(e.op) + " yet");
     }
@@ -5174,15 +5218,23 @@ class Editor {
     }
     const edit_text::Style st = style_of(table->origin);
     bool ok = false;
-    if (old != nullptr && column_level(*table, *old) == nullptr && plain(pk)) {
+    // A whole key sent (replace_table) keeps none of the old key's
+    // attributes: only its columns change when neither key has others, else
+    // the key is written anew where it stands.
+    const bool columns_only = old != nullptr && plain(pk) && (!e.new_index || plain(*old));
+    if (old != nullptr && column_level(*table, *old) == nullptr && (columns_only || e.new_index)) {
       // The key's columns where it is written: its other attributes stay.
       const auto r = searched_range(old->origin.source, old->origin.statement);
       const auto at = r ? node_at(*r, gram().key_def, [&](uint32_t b, uint32_t en) { return b <= r->begin && r->end <= en; })
                         : std::nullopt;
       if (at) {
         const auto &t = at->first.tree;
-        const uint32_t list = child_of(t, at->second, gram().key_list);
-        ok = list != k_npos && change(changes, t.begin(list), t.end(list), edit_text::ids(pk.columns(), st));
+        if (columns_only) {
+          const uint32_t list = child_of(t, at->second, gram().key_list);
+          ok = list != k_npos && change(changes, t.begin(list), t.end(list), edit_text::ids(pk.columns(), st));
+        } else {
+          ok = change(changes, t.begin(at->second), t.end(at->second), edit_text::index_sql(pk, st));
+        }
       }
     } else {
       ok = old == nullptr || remove_index(changes, *table, *old);
@@ -5337,6 +5389,28 @@ class Editor {
     return std::nullopt;
   }
 
+  // The expression of each table-level CHECK of `e.table` with the columns
+  // of `e.renames` renamed in it, where it is written.
+  std::optional<Edit_error> rename_in_checks(size_t i, const Schema_edit &e, Changes &changes) {
+    const Table *table = lookup().table(e.table).second;
+    if (table == nullptr) return error(i, "unknown-object", "there is no table `" + e.table + "`");
+    for (const Check *ck : table_checks(*table)) {
+      if (renamed_in(ck->expression, e.renames) == ck->expression) continue;
+      const auto r = searched_range(ck->origin.source, ck->origin.statement);
+      if (!r || r->end > text().size()) return error(i, "self-check", "a check of `" + table->name + "` is not found");
+      // From the parenthesis after CHECK: the constraint's name stays.
+      const std::string_view written = text().substr(r->begin, r->end - r->begin);
+      const std::string low = lower(written);
+      size_t at = low.find("check");
+      at = at == std::string::npos ? at : written.find('(', at);
+      if (at == std::string::npos) return error(i, "self-check", "a check of `" + table->name + "` cannot be read");
+      if (!change(changes, r->begin + static_cast<uint32_t>(at), r->end, renamed_in(written.substr(at), e.renames))) {
+        return error(i, "self-check", "a check of `" + table->name + "` cannot be changed");
+      }
+    }
+    return std::nullopt;
+  }
+
   // ---------------------------------------------------------------------
   // replace_table
 
@@ -5383,8 +5457,10 @@ class Editor {
           for (auto &c : fk.ref_columns) fix(c);
         }
       }
+      // MariaDB renames columns in CHECKs with RENAME and CHANGE COLUMN.
       for (auto &ck : t.checks) {
         if (!ck.column.empty()) fix(ck.column);
+        ck.expression = renamed_in(ck.expression, e.renames);
       }
       return t;
     };
@@ -5417,7 +5493,8 @@ class Editor {
       const Column *c = t.column(from);
       const Column *w = want.column(to);
       if (c == nullptr || c->name == to) continue;
-      if (!column_difference(t, *c, want, *w, false).empty()) continue;
+      // Its own CHECKs name it: modify_column (step 8) writes them anew.
+      if (!column_difference(t, *c, want, *w, false).empty() || !edit_text::column_checks(t, c->name).empty()) continue;
       Schema_edit s;
       s.op = Edit_op::rename_column;
       s.column = c->name;
@@ -5515,6 +5592,9 @@ class Editor {
     }
     // 8. Columns that change or move: the fewest moves (those outside the
     // longest common order), in the order of the table sent.
+    // Columns that leave the primary key and may be NULL: the server keeps a
+    // key's column NOT NULL, so they are made nullable once out of it.
+    std::vector<std::string> nullable_later;
     {
       const Table &t = current();
       std::vector<std::string> now, sent;
@@ -5535,13 +5615,30 @@ class Editor {
         // AUTO_INCREMENT that no index serves yet comes with step 11.
         if (w.auto_increment && !c->auto_increment && !leads_an_index(tk, c->name)) w.auto_increment = false;
         const bool moved = stay.count(lower(w.name)) == 0;
-        const bool says_not_null = !w.nullable && in_key(tk, c->name) && !in_key(want, w.name) && !written_not_null(*c);
+        const bool leaves_key = in_key(tk, c->name) && !in_key(want, w.name);
+        const bool says_not_null = !w.nullable && leaves_key && !written_not_null(*c);
+        if (w.nullable && leaves_key) {
+          w.nullable = false;
+          nullable_later.push_back(w.name);
+        }
         if (!moved && !says_not_null && column_difference(tk, *c, want, w).empty()) continue;
         Schema_edit s = modify_step(c->name, w, checks_of(w.name));
         if (moved) {
           if (k == 0) s.first = true;
           else s.after = now_name(tk, want.columns[k - 1].name);
         }
+        if (auto err = step(s)) return err;
+      }
+    }
+    // The renamed columns, in the table-level CHECKs' text too.
+    if (!e.renames.empty()) {
+      const Table &t = current();
+      if (std::any_of(t.checks.begin(), t.checks.end(), [&](const Check &ck) {
+            return ck.column.empty() && renamed_in(ck.expression, e.renames) != ck.expression;
+          })) {
+        Schema_edit s;
+        s.op = Edit_op::rename_in_checks;
+        s.renames = e.renames;
         if (auto err = step(s)) return err;
       }
     }
@@ -5569,6 +5666,15 @@ class Editor {
       }
     }
     if (auto err = drop_indexes(true)) return err;
+    // The columns that left the primary key, nullable now.
+    for (const auto &n : nullable_later) {
+      const Column *c = current().column(n);
+      const Column *w = want.column(n);
+      if (c == nullptr || w == nullptr) continue;
+      Column wc = *w;
+      wc.auto_increment = c->auto_increment;  // step 11 adds it
+      if (auto err = step(modify_step(c->name, wc, checks_of(w->name)))) return err;
+    }
     // 11. AUTO_INCREMENT on a column an index now leads.
     for (const auto &w : want.columns) {
       const Column *c = current().column(w.name);
@@ -5581,8 +5687,11 @@ class Editor {
       const auto wanted = table_checks(want);
       const auto m = match_items(table_checks(t), wanted, same_check);
       std::vector<std::string> taken;
-      for (const Check *ck : table_checks(t)) taken.push_back(ck->name);
-      for (const Check *ck : wanted) taken.push_back(ck->name);
+      // Every CHECK shares the table's names; a column's own is named after
+      // the column on the server.
+      for (const Table *x : {&t, static_cast<const Table *>(&want)}) {
+        for (const auto &ck : x->checks) taken.push_back(ck.name.empty() ? ck.column : ck.name);
+      }
       for (size_t w = 0; w < wanted.size(); ++w) {
         if (m[w]) continue;
         Schema_edit s;
@@ -5642,11 +5751,24 @@ class Editor {
   bool written_not_null(const Column &c) const {
     const auto r = searched_range(c.origin.source, c.origin.statement);
     if (!r || r->end > text().size()) return false;
-    // Not in a COMMENT or DEFAULT string.
-    std::string key = sql_key(text().substr(r->begin, r->end - r->begin));
-    for (size_t q = key.find_first_of("'\""); q != std::string::npos; q = key.find_first_of("'\"", q)) {
-      const size_t end = key.find(key[q], q + 1);
-      key.erase(q, end == std::string::npos ? std::string::npos : end + 1 - q);
+    // Not in a COMMENT or DEFAULT string, nor in parentheses (a CHECK, a
+    // generated column's expression: `CHECK (c IS NOT NULL)`).
+    const std::string all = sql_key(text().substr(r->begin, r->end - r->begin));
+    std::string key;
+    char quote = 0;
+    int depth = 0;
+    for (size_t k = 0; k < all.size(); ++k) {
+      const char ch = all[k];
+      if (quote != 0) {
+        if (ch == '\\' && k + 1 < all.size()) ++k;
+        else if (ch == quote && k + 1 < all.size() && all[k + 1] == quote) ++k;
+        else if (ch == quote) quote = 0;
+        continue;
+      }
+      if (ch == '\'' || ch == '"') quote = ch;
+      else if (ch == '(') ++depth;
+      else if (ch == ')') depth = depth > 0 ? depth - 1 : 0;
+      else if (depth == 0) key.push_back(ch);
     }
     return key.find("not null") != std::string::npos;
   }
@@ -5737,6 +5859,15 @@ class Editor {
       }
       if (found.column(to) != nullptr) {
         return error(i, "name-taken", "table `" + name + "` has a column `" + to + "`: rename it first");
+      }
+      // Not rewritten there (the reference search does not reach them).
+      for (const auto &x : found.columns) {
+        for (const auto *expr : {&x.generated, &x.default_value}) {
+          if (*expr && renamed_in(**expr, {{from, to}}) != **expr) {
+            return error(i, "unsupported", "replace_table cannot rename `" + from + "`: the expression of column `" +
+                                               x.name + "` names it");
+          }
+        }
       }
     }
     return std::nullopt;
@@ -6075,6 +6206,16 @@ class Editor {
                      (fk.name.empty() || iequals(x.name, fk.name));
             })) {
           return err;
+        }
+        break;
+      }
+      case Edit_op::rename_in_checks: {
+        const Table *t = l.table(e.table).second;
+        if (t == nullptr) return fail("the edited script has no table `" + e.table + "`");
+        for (const Check *ck : table_checks(*t)) {
+          if (renamed_in(ck->expression, e.renames) != ck->expression) {
+            return fail("a check of `" + t->name + "` still names a column renamed: " + ck->expression);
+          }
         }
         break;
       }

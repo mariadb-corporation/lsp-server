@@ -75,9 +75,12 @@ enum class Edit_op {
   replace_event,
   replace_table,
   // Steps of replace_table, never in a request: a table-level CHECK added
-  // (new_check) or dropped (new_check names it, or gives its expression).
+  // (new_check) or dropped (new_check names it, or gives its expression);
+  // the columns `renames` renamed, renamed in the table-level CHECKs' text
+  // (MariaDB renames them there itself: no migration).
   add_check,
   drop_check,
+  rename_in_checks,
 };
 
 // The request's `op` spelling; nullopt for an unknown one.
