@@ -611,5 +611,7 @@ rows (with `foreign_key_checks=0`, as MSM deploys) gives the tables the edited s
 agent's SQL create (`SHOW CREATE TABLE`, keys compared as a set: the server lists them in the
 order they were made). `fuzz/schema_edit_fuzz.cc` generates both tables from one pool of
 columns, keys and checks; with Homebrew LLVM 22 the fuzzers need
-`ASAN_OPTIONS=detect_container_overflow=0` (libFuzzer's own corpus trips it). Open: a deployed
-view that selects a renamed column is not created again (as with `rename_column`).
+`ASAN_OPTIONS=detect_container_overflow=0` (libFuzzer's own corpus trips it). A deployed view
+that selects a renamed column is not created again by the migration (as with `rename_column`);
+msm needs nothing more: every deployment, updates too, runs Section 150 after the table
+changes, which creates the view again from its rewritten text.

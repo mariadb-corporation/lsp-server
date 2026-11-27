@@ -407,7 +407,9 @@ op that made it. A table with a column added, one moved and an index changed:
 Statements of other tables keep their place: around a column that another table's foreign
 key uses, that table's `DROP FOREIGN KEY` and `ADD CONSTRAINT` (see `modify_column`), which
 keeps the table's statements apart. A column renamed is not renamed in deployed views: as
-for `rename_column`, a view that selects it must be created again.
+for `rename_column`, the view's text in the script is, and MSM deployments run Section 150
+(views, routines; `CREATE OR REPLACE`) after the table changes, so the view is created again
+in the same deployment.
 
 ### Placement
 
