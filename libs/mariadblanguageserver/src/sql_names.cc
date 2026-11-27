@@ -423,6 +423,18 @@ Name_ref Statement_names::classify(uint32_t token) const {
         (iequals(ref.name, "NEW") || iequals(ref.name, "OLD"))) {
       ref.kind = Name_kind::other;
     }
+    // A column in an expression of CREATE TABLE or ALTER TABLE (a CHECK, a
+    // generated column, a DEFAULT, PARTITION BY) is one of that table: no
+    // table is in scope there.  Not in a query (CREATE TABLE ... SELECT).
+    if (ref.kind == Name_kind::column && ref.qualifiers.empty() && !ref.has_owner &&
+        ancestor(a, s.query_specification) == npos && ancestor(a, s.trigger_tail) == npos &&
+        ancestor(a, s.create_routine) == npos) {
+      uint32_t owner = ancestor(a, s.alter);
+      if (owner == npos) owner = ancestor(a, s.create);
+      if (owner != npos && m_tree.child(owner, s.TABLE_SYM) != npos && m_tree.child(owner, s.INDEX_SYM) == npos) {
+        set_owner(m_tree.child(owner, s.table_ident), &ref);
+      }
+    }
     return ref;
   }
   if (sym == s.field_ident) {

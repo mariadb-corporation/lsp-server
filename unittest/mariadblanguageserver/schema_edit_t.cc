@@ -422,6 +422,19 @@ TEST(Schema_edit, rename_column_defined_by_alter_table) {
   EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `t` RENAME COLUMN `email` TO `mail`"}, migration(r));
 }
 
+TEST(Schema_edit, rename_column_in_its_tables_expressions) {
+  // MariaDB renames the column there too (RENAME COLUMN, checked on 12.3).
+  const std::string script =
+      "CREATE TABLE t (a INT CHECK (a > 0), g INT AS (a + 1), d INT DEFAULT (a * 2), CHECK (a < 9))\n"
+      "  PARTITION BY HASH (a);\n"
+      "ALTER TABLE t ADD CONSTRAINT c CHECK (`a` <> 5);\n";
+  const auto r = ok(edit(script, {}, request("", R"j({"op": "rename_column", "table": "t", "column": "a", "new_name": "b"})j")));
+  EXPECT_EQ("CREATE TABLE t (b INT CHECK (b > 0), g INT AS (b + 1), d INT DEFAULT (b * 2), CHECK (b < 9))\n"
+            "  PARTITION BY HASH (b);\n"
+            "ALTER TABLE t ADD CONSTRAINT c CHECK (`b` <> 5);\n",
+            text(r, ""));
+}
+
 TEST(Schema_edit, quoting_follows_each_token) {
   const std::string script =
       "CREATE TABLE `a` (id INT);\n"
@@ -3204,24 +3217,22 @@ TEST(Schema_edit, replace_table_primary_key_changes) {
   EXPECT_EQ("CREATE TABLE t (\n  a INT,\n  b INT NOT NULL CHECK (b IS NOT NULL),\n  PRIMARY KEY (a)\n);\n", text(r4, ""));
 }
 
-TEST(Schema_edit, replace_table_renames_in_checks) {
-  // MariaDB renames a column in the CHECKs itself: the text follows, with
-  // no migration of its own; a column's own CHECK is written with it.
+TEST(Schema_edit, replace_table_renames_in_expressions) {
+  // A rename renames the column in the table's CHECKs, generated columns and
+  // defaults, in the script as MariaDB does on the server: they stay.
   const std::string script =
-      "CREATE TABLE t (\n  a INT CHECK (a > 0),\n  n INT,\n  CONSTRAINT `a` CHECK (`a` < 100 AND n <> 'a'),\n  CHECK (n > a)\n);\n";
+      "CREATE TABLE t (\n  a INT CHECK (a > 0),\n  n INT,\n  g INT AS (a + 1),\n  d INT DEFAULT (a * 2),\n"
+      "  CONSTRAINT `a` CHECK (`a` < 100 AND n <> 'a'),\n  CHECK (n > a)\n);\n";
   const auto r = ok(edit(script, {}, request("", replace_table(R"j({"name": "t",
-      "columns": [{"name": "b", "type": "INT"}, {"name": "n", "type": "INT"}],
+      "columns": [{"name": "b", "type": "INT"}, {"name": "n", "type": "INT"}, {"name": "g", "type": "INT", "generated": "b + 1"},
+                  {"name": "d", "type": "INT", "default": "(b * 2)"}],
       "checks": [{"expression": "b > 0", "column": "b"}, {"name": "a", "expression": "`b` < 100 AND n <> 'a'"}, {"expression": "n > b"}]})j",
                                                            R"({"a": "b"})"))));
-  EXPECT_EQ("CREATE TABLE t (\n  b INT CHECK (b > 0),\n  n INT,\n  CONSTRAINT `a` CHECK (`b` < 100 AND n <> 'a'),\n  CHECK (n > b)\n);\n",
+  EXPECT_EQ("CREATE TABLE t (\n  b INT CHECK (b > 0),\n  n INT,\n  g INT AS (b + 1),\n  d INT DEFAULT (b * 2),\n"
+            "  CONSTRAINT `a` CHECK (`b` < 100 AND n <> 'a'),\n  CHECK (n > b)\n);\n",
             text(r, ""));
-  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `t` CHANGE COLUMN `a` `b` INT CHECK (b > 0)"}, migration(r));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `t` RENAME COLUMN `a` TO `b`"}, migration(r));
   EXPECT_TRUE(r.notes.empty());
-  // A generated column or a DEFAULT naming it is not rewritten: refused.
-  const auto e = failed(edit("CREATE TABLE t (a INT, g INT AS (a + 1));\n", {},
-                             request("", replace_table(R"j({"name": "t", "columns": [{"name": "b", "type": "INT"},
-                                 {"name": "g", "type": "INT", "generated": "b + 1"}]})j", R"({"a": "b"})"))));
-  EXPECT_EQ("unsupported: replace_table cannot rename `a`: the expression of column `g` names it", e.kind + ": " + e.message);
 }
 
 TEST(Schema_edit, replace_table_check_names_avoid_column_checks) {

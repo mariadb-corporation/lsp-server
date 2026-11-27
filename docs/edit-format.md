@@ -122,7 +122,9 @@ expanded script that spells the name is parsed and each name in it resolved in t
 script's context (its schema in use, aliases, the tables in scope), so `h.name` of `FROM
 url_host h` is a reference to `url_host.name` and `name` of another table is not. That
 covers DDL (foreign keys, indexes, `ALTER TABLE`, `CREATE INDEX`, `RENAME TABLE`, triggers'
-`ON`, the `DROP ... IF EXISTS` an idempotent script runs before a `CREATE`), DML, views, routine and trigger bodies, `GRANT`s, and statements in versioned
+`ON`, the `DROP ... IF EXISTS` an idempotent script runs before a `CREATE`; a column in its
+table's own expressions: `CHECK`s, generated columns, `DEFAULT`s, `PARTITION BY`, which
+MariaDB renames there too), DML, views, routine and trigger bodies, `GRANT`s, and statements in versioned
 comments, in the script and in every included file (a file included twice is edited once).
 Each reference is written as it was: in backticks or double quotes when it was, else with
 quotes only when the new name needs them.
@@ -365,10 +367,8 @@ the table sent: renamed and otherwise alike it is `RENAME COLUMN`, renamed and c
 The old name must be a column of the table (`unknown-object`), the new one a column of the
 table sent that is not also still sending the old one (`bad-request`), and no other column of
 the table may have the new name (`name-taken`: rename that one first). MariaDB renames the
-column in the table's `CHECK`s itself, so they compare with the rename made, are renamed in the
-script's text too, and have no migration; a column's own `CHECK` is written with it (`CHANGE
-COLUMN`). A renamed column that another column's generated expression or `DEFAULT` names is
-`unsupported`: the reference search does not reach those expressions. A column the table
+column in the table's `CHECK`s, generated columns, `DEFAULT`s and `PARTITION BY` itself, and
+so does the rename in the script: those compare with the renames made, and stay. A column the table
 sent drops that is alike, but for its name, to one it adds, each the other's only such
 column, gets a `possible-rename` note naming the `renames` that would keep its data; the edit
 still drops and adds it. msm refuses such an edit unless the agent sends `renames` or
@@ -643,7 +643,7 @@ A refused request writes no edits, whatever edits before the failing one did:
 | Kind | When |
 | --- | --- |
 | `bad-request` | the request is not JSON of format 1, a member is missing, empty, unknown or of the wrong type, a new name is too long, a routine name is ambiguous without `kind`, a column's type is not a MariaDB data type, or a definition does not parse; an add op's `at` or `form` that cannot be followed ([Placement](#placement)) |
-| `unsupported` | an op this binary does not do or does not know (a newer binary may), or a column added to a table whose columns the script does not list (`CREATE TABLE ... AS SELECT`, `LIKE`); for `replace_table`, a change no op makes (partitioning, system versioning, a period, `TEMPORARY`), a column to move that an `ALTER TABLE` defines, the last column of a `CREATE TABLE` to drop, or a rename of a column a generated column or `DEFAULT` names |
+| `unsupported` | an op this binary does not do or does not know (a newer binary may), or a column added to a table whose columns the script does not list (`CREATE TABLE ... AS SELECT`, `LIKE`); for `replace_table`, a change no op makes (partitioning, system versioning, a period, `TEMPORARY`), a column to move that an `ALTER TABLE` defines, or the last column of a `CREATE TABLE` to drop |
 | `unknown-object` | the table, column, view, routine, trigger, event or sequence is not in the outline, nor the table or column a foreign key references, nor the column `after` names, nor a trigger's table (a view is not one) or the trigger its `order` names; `drop_trigger`'s `table` is not the trigger's |
 | `name-taken` | the new name is taken: by a table, view or sequence for a table, view or sequence (they share a namespace), by a column of the table, by a routine of the same kind, by an index of the table, by a foreign key of the schema, by a trigger or an event of the schema for a trigger or event; a second primary key (use `set_primary_key`); a change of case only is a rename |
 | `referenced` | `drop_table` of a table another table's foreign key references; `drop_column` of a column a foreign key uses; `drop_index` or `set_primary_key` taking away the index a foreign key or an `AUTO_INCREMENT` column needs; `drop_trigger` of a trigger another one follows or precedes; `drop_sequence` of a sequence a `CREATE TABLE` or `ALTER TABLE` names |
