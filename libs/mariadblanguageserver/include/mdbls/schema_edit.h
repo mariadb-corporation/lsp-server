@@ -73,6 +73,11 @@ enum class Edit_op {
   replace_routine,
   replace_trigger,
   replace_event,
+  replace_table,
+  // Steps of replace_table, never in a request: a table-level CHECK added
+  // (new_check) or dropped (new_check names it, or gives its expression).
+  add_check,
+  drop_check,
 };
 
 // The request's `op` spelling; nullopt for an unknown one.
@@ -112,12 +117,20 @@ struct Schema_edit {
   std::string schema;        // rename_schema, MSM placeholders included
   bool comments = false;     // rename_schema: also `schema` in comments
   std::string new_name;
-  // add_table: the table; its columns, keys, checks, options.
+  // add_table, replace_table: the table; its columns, keys, checks, options.
   std::optional<Table> new_table;
   // add_column: the column; modify_column: what `column` becomes.
   std::optional<Column> new_column;
-  std::string after;   // add_column: the column it goes after, or ""
-  bool first = false;  // add_column: first
+  // add_column, and modify_column as a step of replace_table: the column it
+  // goes after, or "", or first.
+  std::string after;
+  bool first = false;
+  // modify_column as a step of replace_table: the column's CHECKs, in place
+  // of those it has.
+  std::optional<std::vector<Check>> new_checks;
+  // replace_table: columns renamed, (old name, new name).
+  std::vector<std::pair<std::string, std::string>> renames;
+  std::optional<Check> new_check;  // add_check, drop_check
   std::optional<View> new_view;        // add_view, replace_view
   std::optional<Routine> new_routine;  // add_routine, replace_routine
   std::optional<Trigger> new_trigger;  // add_trigger, replace_trigger
@@ -125,7 +138,10 @@ struct Schema_edit {
   std::optional<Sequence> new_sequence;  // add_sequence
   // set_table_options: outline option name and value; nullopt removes it.
   std::vector<std::pair<std::string, std::optional<std::string>>> options;
-  std::optional<Index> new_index;              // add_index
+  // add_index; set_primary_key as a step of replace_table: the whole key;
+  // drop_index as one: the key that takes its place (DROP and ADD in one
+  // clause pair, the text changed where the key is written).
+  std::optional<Index> new_index;
   std::optional<Foreign_key> new_foreign_key;  // add_foreign_key
   // drop_index, drop_foreign_key: the key by `name`, by `kind` ("primary",
   // drop_index), or by `columns` (an unnamed key); set_primary_key: its columns.
@@ -171,7 +187,7 @@ struct Edited_file {
 // Something an edit could not do itself, for a person to check.  `kind` is
 // stable: name-in-string, rest-reference, routine-recreated,
 // routine-created, still-referenced, no-migration, trigger-created,
-// trigger-recreated, event-created.
+// trigger-recreated, event-created, alter-removed, unchanged, possible-rename.
 struct Edit_note {
   size_t edit = 0;
   std::string kind;
@@ -188,6 +204,7 @@ enum class Migration_action : uint8_t { create, drop, add, alter, rename };
 enum class Migration_object : uint8_t {
   table, view, procedure, function, trigger, event, sequence,   // objects
   column, index, primary_key, foreign_key, table_options,       // a table's members
+  check,                                                        // a table-level CHECK
 };
 const char *to_string(Migration_action a);
 const char *to_string(Migration_object o);

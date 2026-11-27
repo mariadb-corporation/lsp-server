@@ -307,7 +307,7 @@ TEST(Schema_edit, supported_ops) {
       "rename_table rename_column rename_view rename_routine add_table drop_table add_column modify_column "
       "drop_column add_index drop_index add_foreign_key drop_foreign_key set_table_options add_view drop_view "
       "add_routine drop_routine set_primary_key add_trigger drop_trigger rename_trigger add_event drop_event rename_event add_sequence "
-      "drop_sequence rename_sequence rename_schema replace_view replace_routine replace_trigger replace_event",
+      "drop_sequence rename_sequence rename_schema replace_view replace_routine replace_trigger replace_event replace_table",
       supported_edit_ops());
 }
 
@@ -2882,4 +2882,306 @@ TEST(Schema_edit, placement_of_a_trigger_after_its_table) {
   const auto r = ok(edit_main(k_two_tables, {}, request("", trigger + at("", 2, 23) + "}")));
   EXPECT_NE(std::string::npos, text(r, "").find("CREATE TABLE b (id INT);\n\nCREATE TRIGGER g BEFORE INSERT ON b")) << text(r, "");
 }
+
+// ---------------------------------------------------------------------------
+// replace_table
+
+namespace {
+
+std::string replace_table(const std::string &table, const std::string &renames = "") {
+  return R"({"op": "replace_table", "table": )" + table +
+         (renames.empty() ? std::string() : R"(, "renames": {"columns": )" + renames + "}") + "}";
+}
+
+// k_shop's orders as the outline of an agent's CREATE TABLE gives it: the
+// foreign key without its name.
+const std::string k_orders = R"j({"name": "orders",
+  "columns": [{"name": "id", "type": "INT", "nullable": false}, {"name": "customer_id", "type": "INT", "nullable": false},
+              {"name": "note", "type": "TEXT"}],
+  "indexes": [{"kind": "primary", "columns": ["id"]},
+              {"name": "ix_note", "kind": "index", "key_parts": [{"column": "note", "length": 10}, {"column": "customer_id"}]}],
+  "foreign_keys": [{"columns": ["customer_id"], "references": {"table": "customer", "columns": ["id"]}}],
+  "options": {"engine": "InnoDB", "comment": "the orders"}})j";
+
+std::string orders_with(const std::string &from, const std::string &to) { return shop_with_in(k_orders, from, to); }
+
+}  // namespace
+
+TEST(Schema_edit, replace_table_unchanged) {
+  const auto r = ok(edit(k_shop, {}, request("shop", replace_table(k_orders))));
+  EXPECT_EQ(k_shop, text(r, ""));
+  EXPECT_EQ(0u, edit_count(r, ""));
+  EXPECT_TRUE(r.migration.empty());
+  ASSERT_EQ(std::vector<std::string>{"unchanged"}, note_kinds(r));
+  EXPECT_EQ("the table `orders` is as sent: nothing was changed", r.notes[0].message);
+  EXPECT_EQ(k_shop.find("CREATE TABLE `orders`"), r.notes[0].at);
+  // Spelt otherwise, the same: the server's type, blanks and case of SQL,
+  // a key's name given or not, no rule or RESTRICT, ASC or no order.
+  const std::string same = R"j({"name": "Orders",
+    "columns": [{"name": "id", "type": "INTEGER", "column_type": "int(11)", "nullable": false},
+                {"name": "customer_id", "type": "int", "nullable": false}, {"name": "note", "type": "text"}],
+    "indexes": [{"name": "PRIMARY", "kind": "primary", "columns": ["id"]},
+                {"name": "IX_NOTE", "kind": "index", "key_parts": [{"column": "note", "length": 10, "order": "ASC"}, {"column": "customer_id"}]}],
+    "foreign_keys": [{"name": "fk_orders_customer", "columns": ["customer_id"], "references": {"table": "customer", "columns": ["id"]}, "on_delete": "RESTRICT"}],
+    "options": {"engine": "innodb", "comment": "the orders"}})j";
+  const std::string script = shop_with("`id` INT NOT NULL,\n  `customer_id`", "`id` INT(11) NOT NULL,\n  `customer_id`");
+  const auto r2 = ok(edit(script, {}, request("shop", replace_table(same))));
+  EXPECT_EQ(std::vector<std::string>{"unchanged"}, note_kinds(r2));
+  EXPECT_TRUE(r2.migration.empty());
+}
+
+TEST(Schema_edit, replace_table_adds_moves_and_changes_in_one_alter) {
+  // A column added, one moved, an index changed: one ALTER TABLE.
+  const std::string sent = R"j({"name": "orders",
+    "columns": [{"name": "id", "type": "INT", "nullable": false}, {"name": "note", "type": "TEXT"},
+                {"name": "customer_id", "type": "INT", "nullable": false},
+                {"name": "total", "type": "DECIMAL(10,2)", "nullable": false, "default": "0"}],
+    "indexes": [{"kind": "primary", "columns": ["id"]}, {"name": "ix_note", "kind": "index", "key_parts": [{"column": "note", "length": 20}]}],
+    "foreign_keys": [{"columns": ["customer_id"], "references": {"table": "customer", "columns": ["id"]}}],
+    "options": {"engine": "InnoDB", "comment": "the orders"}})j";
+  const auto r = ok(edit(k_shop, {}, request("shop", replace_table(sent))));
+  EXPECT_EQ(shop_with("  `id` INT NOT NULL,\n"
+                      "  `customer_id` INT NOT NULL,\n"
+                      "  `note` TEXT,\n"
+                      "  PRIMARY KEY (`id`),\n"
+                      "  INDEX `ix_note` (`note`(10), `customer_id`),\n",
+                      "  `id` INT NOT NULL,\n"
+                      "  `note` TEXT,\n"
+                      "  `customer_id` INT NOT NULL,\n"
+                      "  `total` DECIMAL(10,2) NOT NULL DEFAULT 0,\n"
+                      "  PRIMARY KEY (`id`),\n"
+                      "  INDEX `ix_note` (`note`(20)),\n"),
+            text(r, ""));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `orders` DROP INDEX `ix_note`, "
+                                     "ADD COLUMN `total` DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER `customer_id`, "
+                                     "MODIFY COLUMN `note` TEXT AFTER `id`, ADD INDEX `ix_note` (`note`(20))"},
+            migration(r));
+  ASSERT_EQ(1u, r.migration.size());
+  EXPECT_EQ((Tags{"drop index ix_note (orders)", "add column total (orders)", "alter column note (orders)",
+                  "add index ix_note (orders)"}),
+            [&] {
+              Tags t;
+              for (const auto &c : r.migration[0].clauses) {
+                t.push_back(std::string(to_string(c.action)) + " " + to_string(c.object) + " " + c.name + " (" + c.table + ")");
+              }
+              return t;
+            }());
+  for (const auto &c : r.migration[0].clauses) EXPECT_EQ(0u, c.edit);
+  EXPECT_TRUE(r.notes.empty());
+  const Table *t = table(r, "shop", "orders");
+  ASSERT_NE(nullptr, t);
+  ASSERT_EQ(4u, t->columns.size());
+  EXPECT_EQ("note", t->columns[1].name);
+}
+
+TEST(Schema_edit, replace_table_moves_the_fewest_columns) {
+  // One column to the front moves that one, not the others; the comment
+  // on its line goes with it.
+  const std::string script = "CREATE TABLE t (\n  a INT,\n  b INT,\n  c INT, -- the c\n  d INT\n);\n";
+  const std::string sent = R"j({"name": "t", "columns": [{"name": "c", "type": "INT"}, {"name": "a", "type": "INT"},
+      {"name": "b", "type": "INT"}, {"name": "d", "type": "INT"}]})j";
+  const auto r = ok(edit(script, {}, request("", replace_table(sent))));
+  EXPECT_EQ("CREATE TABLE t (\n  c INT, -- the c\n  a INT,\n  b INT,\n  d INT\n);\n", text(r, ""));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `t` MODIFY COLUMN `c` INT FIRST"}, migration(r));
+  // The last column to the front, on one line.
+  const auto r2 = ok(edit("CREATE TABLE t (a INT, b INT, c INT);\n", {},
+                          request("", replace_table(R"j({"name": "t", "columns": [{"name": "c", "type": "INT"},
+                              {"name": "a", "type": "INT"}, {"name": "b", "type": "INT"}]})j"))));
+  EXPECT_EQ("CREATE TABLE t (c INT, a INT, b INT);\n", text(r2, ""));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `t` MODIFY COLUMN `c` INT FIRST"}, migration(r2));
+  // A column an ALTER TABLE defines cannot move.
+  const auto e = failed(edit("CREATE TABLE t (a INT, b INT);\nALTER TABLE t ADD COLUMN c INT;\n", {},
+                             request("", replace_table(R"j({"name": "t", "columns": [{"name": "c", "type": "INT"},
+                                 {"name": "a", "type": "INT"}, {"name": "b", "type": "INT"}]})j"))));
+  EXPECT_EQ("unsupported", e.kind);
+  EXPECT_EQ("the column `t`.`c` is defined by an ALTER TABLE: the column order cannot be changed there", e.message);
+}
+
+TEST(Schema_edit, replace_table_renames) {
+  // Only renamed: RENAME COLUMN, the references follow.
+  const std::string renamed = shop_with_in(orders_with(R"({"name": "note", "type": "TEXT"})", R"({"name": "remark", "type": "TEXT"})"),
+                                            R"({"column": "note", "length": 10})", R"({"column": "remark", "length": 10})");
+  const auto r = ok(edit(k_shop, {}, request("shop", replace_table(renamed, R"({"note": "remark"})"))));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `orders` RENAME COLUMN `note` TO `remark`"}, migration(r));
+  EXPECT_NE(std::string::npos, text(r, "").find("SELECT o.id, o.remark FROM orders o"));
+  EXPECT_NE(std::string::npos, text(r, "").find("INDEX `ix_note` (`remark`(10), `customer_id`)"));
+  EXPECT_TRUE(r.notes.empty());
+  // Renamed and changed: one CHANGE COLUMN.
+  std::string sent = orders_with(R"({"name": "note", "type": "TEXT"})", R"({"name": "remark", "type": "MEDIUMTEXT"})");
+  sent = shop_with_in(sent, R"({"column": "note", "length": 10})", R"({"column": "remark", "length": 10})");
+  const auto r2 = ok(edit(k_shop, {}, request("shop", replace_table(sent, R"({"note": "remark"})"))));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `orders` CHANGE COLUMN `note` `remark` MEDIUMTEXT"}, migration(r2));
+  EXPECT_NE(std::string::npos, text(r2, "").find("  `remark` MEDIUMTEXT,\n"));
+  // Without renames: dropped and added, with a note.
+  const std::string dropped = orders_with(R"({"name": "note", "type": "TEXT"})", R"({"name": "remark", "type": "TEXT"})");
+  const auto r3 = ok(edit(k_shop, {}, request("shop", replace_table(shop_with_in(dropped, R"j("indexes": [{"kind": "primary", "columns": ["id"]},
+              {"name": "ix_note", "kind": "index", "key_parts": [{"column": "note", "length": 10}, {"column": "customer_id"}]}])j",
+                                                                                        R"j("indexes": [{"kind": "primary", "columns": ["id"]}])j")))));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `orders` DROP INDEX `ix_note`, ADD COLUMN `remark` TEXT AFTER `customer_id`, DROP COLUMN `note`"},
+            migration(r3));
+  EXPECT_EQ((std::vector<std::string>{"possible-rename", "still-referenced", "still-referenced"}), note_kinds(r3));
+  EXPECT_EQ("the column `orders`.`note` is dropped and `remark` added with its definition: if it is a rename, send "
+            "\"renames\": {\"columns\": {\"note\": \"remark\"}}, else the migration drops its data",
+            r3.notes[0].message);
+}
+
+TEST(Schema_edit, replace_table_request_errors) {
+  auto err = [](const std::string &edit_json) {
+    const auto r = edit(k_shop, {}, request("shop", edit_json));
+    return std::holds_alternative<Edit_error>(r) ? std::get<Edit_error>(r).kind + ": " + std::get<Edit_error>(r).message : "ok";
+  };
+  EXPECT_EQ("unknown-object: there is no table `nope`",
+            err(replace_table(R"j({"name": "nope", "columns": [{"name": "a", "type": "INT"}]})j")));
+  EXPECT_EQ("bad-request: \"renames\" of the replace_table edit renames the column `NOTE` twice",
+            err(replace_table(k_orders, R"({"note": "a", "NOTE": "b"})")));
+  EXPECT_EQ("bad-request: \"renames\" of the replace_table edit renames two columns to `A`",
+            err(replace_table(k_orders, R"({"note": "a", "id": "A"})")));
+  EXPECT_EQ("bad-request: the replace_table edit has an unknown member \"at\"",
+            err(R"({"op": "replace_table", "table": )" + k_orders + R"(, "at": {"file": ""}})"));
+  EXPECT_EQ("bad-request: \"renames\" of the replace_table edit has an unknown member \"indexes\"",
+            err(replace_table(k_orders, "{}").replace(replace_table(k_orders, "{}").find("\"columns\": {}"), 13, "\"indexes\": {}")));
+  EXPECT_EQ("unknown-object: table `orders` has no column `nope` to rename", err(replace_table(k_orders, R"({"nope": "x"})")));
+  EXPECT_EQ("bad-request: the table sent has no column `x`, which `note` is renamed to",
+            err(replace_table(k_orders, R"({"note": "x"})")));
+  EXPECT_EQ("bad-request: the table sent still has the column `note`, which it renames",
+            err(replace_table(orders_with(R"({"name": "id", "type": "INT", "nullable": false})",
+                                          R"({"name": "id", "type": "INT", "nullable": false}, {"name": "x", "type": "INT"})"),
+                              R"({"note": "x"})")));
+  EXPECT_EQ("name-taken: table `orders` has a column `customer_id`: rename it first",
+            err(replace_table(R"j({"name": "orders", "columns": [{"name": "id", "type": "INT"}, {"name": "customer_id", "type": "INT"}]})j",
+                              R"({"note": "customer_id"})")));
+  EXPECT_EQ("unsupported: replace_table cannot change the PARTITION BY clause of `orders`",
+            err(replace_table(orders_with(R"("name": "orders",)", R"j("name": "orders", "partitioning": "PARTITION BY HASH (id)",)j"))));
+  EXPECT_EQ("unsupported: replace_table cannot change WITH SYSTEM VERSIONING of `orders`",
+            err(replace_table(orders_with(R"("name": "orders",)", R"("name": "orders", "system_versioning": true,)"))));
+  EXPECT_EQ("unknown-object: an index of `orders` names the column `nope`, which the table sent does not have",
+            err(replace_table(orders_with(R"({"kind": "primary", "columns": ["id"]})", R"({"kind": "primary", "columns": ["nope"]})"))));
+  EXPECT_EQ("unsupported: the columns of `l` are not known (CREATE TABLE ... AS or LIKE)",
+            [] {
+              const auto r = edit("CREATE TABLE t (a INT);\nCREATE TABLE l AS SELECT * FROM t;\n", {},
+                                  request("", replace_table(R"j({"name": "l", "columns": [{"name": "a", "type": "INT"}]})j")));
+              return std::get<Edit_error>(r).kind + ": " + std::get<Edit_error>(r).message;
+            }());
+  // A column another table's foreign key uses stays.
+  EXPECT_EQ("referenced: a foreign key of `orders` uses the column `customer`.`id`",
+            err(replace_table(R"j({"name": "customer", "columns": [{"name": "name", "type": "VARCHAR(45)", "nullable": false}]})j")));
+}
+
+TEST(Schema_edit, replace_table_foreign_keys_and_checks) {
+  const std::string script =
+      "CREATE TABLE p (id INT PRIMARY KEY);\n"
+      "CREATE TABLE t (\n"
+      "  id INT PRIMARY KEY,\n"
+      "  p_id INT,\n"
+      "  n INT CHECK (n > 0),\n"
+      "  CONSTRAINT fk_t_p FOREIGN KEY (p_id) REFERENCES p (id),\n"
+      "  CONSTRAINT c_n CHECK (n < 100),\n"
+      "  CHECK (n <> 50)\n"
+      ");\n";
+  const std::string sent = R"j({"name": "t",
+    "columns": [{"name": "id", "type": "INT", "nullable": false}, {"name": "p_id", "type": "INT"}, {"name": "n", "type": "INT"}],
+    "indexes": [{"kind": "primary", "columns": ["id"]}],
+    "foreign_keys": [{"name": "fk_t_p", "columns": ["p_id"], "references": {"table": "p", "columns": ["id"]}, "on_delete": "CASCADE"}],
+    "checks": [{"expression": "n >= 0", "column": "n"}, {"name": "c_n", "expression": "n < 1000"}, {"expression": "n <> 7"}]})j";
+  const auto r = ok(edit(script, {}, request("", replace_table(sent))));
+  EXPECT_EQ(
+      "CREATE TABLE p (id INT PRIMARY KEY);\n"
+      "CREATE TABLE t (\n"
+      "  id INT PRIMARY KEY,\n"
+      "  p_id INT,\n"
+      "  n INT CHECK (n >= 0),\n"
+      "  CONSTRAINT fk_t_p FOREIGN KEY (p_id) REFERENCES p (id) ON DELETE CASCADE,\n"
+      "  CONSTRAINT c_n CHECK (n < 1000),\n"
+      "  CONSTRAINT chk_t CHECK (n <> 7)\n"
+      ");\n",
+      text(r, ""));
+  // A foreign key dropped and added under its name cannot be one statement
+  // (1826); nor a check.
+  EXPECT_EQ((std::vector<std::string>{
+                "ALTER TABLE `t` DROP FOREIGN KEY `fk_t_p`, DROP CONSTRAINT `c_n`, MODIFY COLUMN `n` INT CHECK (n >= 0)",
+                "ALTER TABLE `t` ADD CONSTRAINT `c_n` CHECK (n < 1000), ADD CONSTRAINT `chk_t` CHECK (n <> 7), "
+                "ADD CONSTRAINT `fk_t_p` FOREIGN KEY (`p_id`) REFERENCES `p` (`id`) ON DELETE CASCADE"}),
+            migration(r));
+  // The unnamed check: its server name is not known.
+  EXPECT_EQ(std::vector<std::string>{"no-migration"}, note_kinds(r));
+}
+
+TEST(Schema_edit, replace_table_auto_increment) {
+  // A new AUTO_INCREMENT key column comes with its key in one statement.
+  const auto r = ok(edit("CREATE TABLE t (\n  a INT\n);\n", {}, request("", replace_table(R"j({"name": "t",
+      "columns": [{"name": "id", "type": "INT", "nullable": false, "auto_increment": true}, {"name": "a", "type": "INT"}],
+      "indexes": [{"kind": "primary", "columns": ["id"]}]})j"))));
+  EXPECT_EQ("CREATE TABLE t (\n  id INT NOT NULL AUTO_INCREMENT,\n  a INT,\n  PRIMARY KEY (id)\n);\n", text(r, ""));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `t` ADD COLUMN `id` INT NOT NULL AUTO_INCREMENT FIRST, ADD PRIMARY KEY (`id`)"},
+            migration(r));
+  // AUTO_INCREMENT goes before the key it needs.
+  const auto r2 = ok(edit("CREATE TABLE t (\n  id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,\n  a INT\n);\n", {},
+                          request("", replace_table(R"j({"name": "t",
+      "columns": [{"name": "id", "type": "INT", "nullable": false}, {"name": "a", "type": "INT"}]})j"))));
+  EXPECT_EQ("CREATE TABLE t (\n  id INT NOT NULL,\n  a INT\n);\n", text(r2, ""));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `t` MODIFY COLUMN `id` INT NOT NULL, DROP PRIMARY KEY"}, migration(r2));
+  // An existing column becomes the AUTO_INCREMENT key.
+  const auto r3 = ok(edit("CREATE TABLE t (\n  id INT NOT NULL,\n  a INT\n);\n", {}, request("", replace_table(R"j({"name": "t",
+      "columns": [{"name": "id", "type": "INT", "nullable": false, "auto_increment": true}, {"name": "a", "type": "INT"}],
+      "indexes": [{"kind": "primary", "columns": ["id"]}]})j"))));
+  EXPECT_EQ("CREATE TABLE t (\n  id INT NOT NULL AUTO_INCREMENT,\n  a INT,\n  PRIMARY KEY (id)\n);\n", text(r3, ""));
+  // Two statements: merge_alter_statements has not tried a key, then a
+  // change of its column.
+  EXPECT_EQ((std::vector<std::string>{"ALTER TABLE `t` ADD PRIMARY KEY (`id`)",
+                                      "ALTER TABLE `t` MODIFY COLUMN `id` INT NOT NULL AUTO_INCREMENT"}),
+            migration(r3));
+}
+
+TEST(Schema_edit, replace_table_keeps_a_column_in_the_create_table) {
+  // Found by schema_edit_fuzz: the CREATE TABLE's only column goes, an
+  // ALTER TABLE adds the other.  A column that comes goes into the CREATE
+  // TABLE first; without one, the drop cannot be written there.
+  const std::string script = "CREATE TABLE t (a INT);\nALTER TABLE t ADD COLUMN g INT;\n";
+  const auto r = ok(edit(script, {}, request("", replace_table(R"j({"name": "t", "columns": [{"name": "b", "type": "INT"},
+      {"name": "g", "type": "INT"}]})j"))));
+  EXPECT_EQ("CREATE TABLE t (b INT);\nALTER TABLE t ADD COLUMN g INT;\n", text(r, ""));
+  const auto e = failed(edit(script, {}, request("", replace_table(R"j({"name": "t", "columns": [{"name": "g", "type": "INT"}]})j"))));
+  EXPECT_EQ("unsupported", e.kind);
+  EXPECT_EQ("`a` is the only column the CREATE TABLE of `t` defines (ALTER TABLE adds the others): it cannot be dropped there",
+            e.message);
+}
+
+TEST(Schema_edit, replace_table_keeps_not_null_when_the_key_moves) {
+  // Found by schema_edit_fuzz: a primary key's column is NOT NULL without
+  // saying so; when the key goes elsewhere, the definition must say it.
+  const auto r = ok(edit("CREATE TABLE t (\n  c INT,\n  d INT NOT NULL,\n  PRIMARY KEY (c)\n);\n", {},
+                         request("", replace_table(R"j({"name": "t", "columns": [{"name": "c", "type": "INT", "nullable": false},
+                             {"name": "d", "type": "INT", "nullable": false}], "indexes": [{"kind": "primary", "columns": ["d"]}]})j"))));
+  EXPECT_EQ("CREATE TABLE t (\n  c INT NOT NULL,\n  d INT NOT NULL,\n  PRIMARY KEY (d)\n);\n", text(r, ""));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `t` MODIFY COLUMN `c` INT NOT NULL, DROP PRIMARY KEY, ADD PRIMARY KEY (`d`)"},
+            migration(r));
+}
+
+TEST(Schema_edit, replace_table_options) {
+  // The AUTO_INCREMENT counter stays; another option left out goes, with
+  // no statement to take the server back to its default.
+  const std::string script = "CREATE TABLE t (a INT) ENGINE=InnoDB AUTO_INCREMENT=100 ROW_FORMAT=DYNAMIC;\n";
+  const auto r = ok(edit(script, {}, request("", replace_table(R"j({"name": "t", "columns": [{"name": "a", "type": "INT"}],
+      "options": {"engine": "InnoDB", "comment": "x"}})j"))));
+  EXPECT_EQ("CREATE TABLE t (a INT) ENGINE=InnoDB AUTO_INCREMENT=100 COMMENT='x';\n", text(r, ""));
+  EXPECT_EQ(std::vector<std::string>{"ALTER TABLE `t` COMMENT='x'"}, migration(r));
+  EXPECT_EQ(std::vector<std::string>{"no-migration"}, note_kinds(r));
+}
+
+TEST(Schema_edit, replace_table_with_merge_alters_and_other_edits) {
+  // Its statements merged keep their clauses when merge_alters merges
+  // again; an edit after it sees the table it left.
+  const std::string sent = orders_with(R"({"name": "note", "type": "TEXT"})",
+                                       R"({"name": "note", "type": "TEXT"}, {"name": "x", "type": "INT"}, {"name": "y", "type": "INT"})");
+  const std::string req = R"({"format": 1, "schema": "shop", "merge_alters": true, "edits": [)" + replace_table(sent) +
+                          R"(, {"op": "add_column", "table": "orders", "column": {"name": "z", "type": "INT"}}]})";
+  const auto r = ok(edit(k_shop, {}, req));
+  ASSERT_EQ(1u, r.migration.size());
+  EXPECT_EQ("ALTER TABLE `orders` ADD COLUMN `x` INT AFTER `note`, ADD COLUMN `y` INT AFTER `x`, ADD COLUMN `z` INT",
+            r.migration[0].sql);
+  ASSERT_EQ(3u, r.migration[0].clauses.size());
+  EXPECT_EQ(0u, r.migration[0].clauses[1].edit);
+  EXPECT_EQ(1u, r.migration[0].clauses[2].edit);
+}
+
 }  // namespace mdbls
