@@ -1858,8 +1858,14 @@ bool same_sql_opt(const std::optional<std::string> &a, const std::optional<std::
 bool same_word(const std::optional<std::string> &a, const std::optional<std::string> &b) {
   return a.has_value() == b.has_value() && (!a || iequals(*a, *b));
 }
-bool same_names(const std::vector<std::string> &a, const std::vector<std::string> &b) {
-  return std::equal(a.begin(), a.end(), b.begin(), b.end(), [](const auto &x, const auto &y) { return iequals(x, y); });
+// Whether an index on `index` serves a foreign key on `fk`: those are its
+// leading columns.
+bool serves(const std::vector<std::string> &index, const std::vector<std::string> &fk) {
+  return fk.size() <= index.size() &&
+         std::equal(fk.begin(), fk.end(), index.begin(), [](const auto &x, const auto &y) { return iequals(x, y); });
+}
+bool same_columns(const std::vector<std::string> &a, const std::vector<std::string> &b) {
+  return a.size() == b.size() && serves(a, b);
 }
 bool same_options(const std::vector<std::pair<std::string, std::string>> &a,
                   const std::vector<std::pair<std::string, std::string>> &b) {
@@ -1871,9 +1877,7 @@ bool same_options(const std::vector<std::pair<std::string, std::string>> &a,
 // The column-level CHECKs of column `c` of `t`, as expressions.
 std::vector<std::string> check_expressions(const Table &t, const std::string &c) {
   std::vector<std::string> out;
-  for (const auto &ck : t.checks) {
-    if (!ck.column.empty() && iequals(ck.column, c)) out.push_back(sql_key(ck.expression));
-  }
+  for (const auto &ck : edit_text::column_checks(t, c)) out.push_back(sql_key(ck.expression));
   return out;
 }
 
@@ -1920,8 +1924,8 @@ bool same_index(const Index &a, const Index &b) {
 bool same_foreign_key(const Foreign_key &a, const Foreign_key &b) {
   // No rule is RESTRICT.
   const auto rule = [](const std::string &r) { return r.empty() ? std::string("RESTRICT") : upper(r); };
-  return same_names(a.columns, b.columns) && iequals(a.ref_schema, b.ref_schema) && iequals(a.ref_table, b.ref_table) &&
-         same_names(a.ref_columns, b.ref_columns) && rule(a.on_delete) == rule(b.on_delete) &&
+  return same_columns(a.columns, b.columns) && iequals(a.ref_schema, b.ref_schema) && iequals(a.ref_table, b.ref_table) &&
+         same_columns(a.ref_columns, b.ref_columns) && rule(a.on_delete) == rule(b.on_delete) &&
          rule(a.on_update) == rule(b.on_update) && iequals(a.match, b.match) &&
          (a.index_name.empty() || b.index_name.empty() || iequals(a.index_name, b.index_name));
 }
@@ -1986,6 +1990,28 @@ std::vector<const T *> pointers(const std::vector<T> &v) {
   return out;
 }
 
+// What makes the options of table `have` those of `want`, as
+// set_table_options takes it: a value for each one that is new or other
+// (a comment compared exactly, any other value in any case), nullopt for
+// each one `want` leaves out but the AUTO_INCREMENT counter, which stays.
+std::vector<std::pair<std::string, std::optional<std::string>>> option_changes(const Table &have, const Table &want) {
+  std::vector<std::pair<std::string, std::optional<std::string>>> out;
+  const auto value_of = [](const Table &t, const std::string &k) -> const std::string * {
+    for (const auto &[name, v] : t.options) {
+      if (name == k) return &v;
+    }
+    return nullptr;
+  };
+  for (const auto &[k, v] : want.options) {
+    const std::string *now = value_of(have, k);
+    if (now == nullptr || (k == "comment" ? *now != v : !iequals(*now, v))) out.emplace_back(k, v);
+  }
+  for (const auto &[k, v] : have.options) {
+    if (k != "auto_increment" && value_of(want, k) == nullptr) out.emplace_back(k, std::nullopt);
+  }
+  return out;
+}
+
 // The first member in which table `have` is not `want`, named for a
 // person: "column `c`: type", "index `ix`", ...; "" when they are alike.
 // An AUTO_INCREMENT counter `want` leaves out is kept.
@@ -2024,16 +2050,7 @@ std::string table_difference(const Table &have, const Table &want) {
     if (!mc[k] || !same_check(*hc[*mc[k]], *wc[k])) return key("check", wc[k]->name);
   }
   if (hc.size() != wc.size()) return "a check the table sent does not have";
-  for (const auto &[k, v] : want.options) {
-    const auto it = std::find_if(have.options.begin(), have.options.end(), [&](const auto &o) { return o.first == k; });
-    if (it == have.options.end() || (k == "comment" ? it->second != v : !iequals(it->second, v))) return "option " + k;
-  }
-  for (const auto &[k, v] : have.options) {
-    if (k == "auto_increment") continue;
-    if (std::none_of(want.options.begin(), want.options.end(), [&](const auto &o) { return o.first == k; })) {
-      return "option " + k;
-    }
-  }
+  if (const auto changes = option_changes(have, want); !changes.empty()) return "option " + changes[0].first;
   return "";
 }
 
@@ -2207,8 +2224,8 @@ class Editor {
     return std::nullopt;
   }
 
-  // A note at byte `at` of the original text of file `file`.
-  void note_at(size_t edit, const char *kind, size_t file, uint32_t at, std::string message) {
+  // A note at byte `at` of the original text of file `file`; the note.
+  Edit_note &note_at(size_t edit, const char *kind, size_t file, uint32_t at, std::string message) {
     Edit_note n;
     n.edit = edit;
     n.kind = kind;
@@ -2216,14 +2233,15 @@ class Editor {
     n.include = m_s.include_of(file);
     n.at = at;
     n.message = std::move(message);
-    m_result.notes.push_back(std::move(n));
+    return m_result.notes.emplace_back(std::move(n));
   }
 
-  // The same, at byte `offset` of the current text of outline source `source`.
-  void note(size_t edit, const char *kind, uint32_t source, uint32_t offset, std::string message) {
+  // The same, at byte `offset` of the current text of outline source
+  // `source`; nullptr when that is no file of the edit (none is made).
+  Edit_note *note(size_t edit, const char *kind, uint32_t source, uint32_t offset, std::string message) {
     const auto file = m_s.file_of(source);
-    if (!file) return;
-    note_at(edit, kind, *file, m_s.files()[*file].log.to_original(offset), std::move(message));
+    if (!file) return nullptr;
+    return &note_at(edit, kind, *file, m_s.files()[*file].log.to_original(offset), std::move(message));
   }
 
   // A string literal holding every one of `words` as a word, outside a
@@ -2885,6 +2903,28 @@ class Editor {
       return change(changes, p.end, p.end, ",") && change(changes, le, le, eol + indent + item);
     }
     return change(changes, p.end, p.end, "," + eol + indent + item);
+  }
+
+  // Moves item `at` of a comma-separated list after item `after` (none:
+  // first), written `item` now.  An item on lines of its own takes them
+  // along, with the comments on them.
+  bool move_item(Changes &changes, const std::vector<Range> &items, size_t at, std::optional<size_t> after,
+                 const std::string &item, const std::string &eol) {
+    const size_t next = after ? *after + 1 : 0;
+    if (next == at) return change(changes, items[at].begin, items[at].end, item);  // where it is already
+    const std::string_view t = text();
+    if (at + 1 < items.size() && next < items.size() && own_line(t, items[at]) && own_line(t, items[at + 1]) &&
+        own_line(t, items[next])) {
+      // Its lines, from its own to the next item's.
+      const uint32_t b = line_begin(t, items[at].begin);
+      const uint32_t e = line_begin(t, items[at + 1].begin);
+      std::string block(t.substr(b, e - b));
+      block.replace(items[at].begin - b, items[at].end - items[at].begin, item);
+      const uint32_t to = line_begin(t, items[next].begin);
+      return change(changes, b, e, "") && change(changes, to, to, block);
+    }
+    std::vector<Range> removed;
+    return remove_items(changes, items, {at}, &removed) && insert_item(changes, items, after, item, eol);
   }
 
   // Removes the items `gone` of a comma-separated list, with their commas;
@@ -4095,28 +4135,8 @@ class Editor {
       after = in_create(*a);
       if (!after) return unsupported(a->name);
     }
-    const auto &items = ct->items.ranges;
-    const size_t next = after ? *after + 1 : 0;
-    auto fail = [&] { return error(i, "self-check", "the column `" + column.name + "` cannot be moved"); };
-    if (next == *at) {
-      // Where it is already.
-      return change(changes, items[*at].begin, items[*at].end, def) ? std::nullopt : std::optional<Edit_error>(fail());
-    }
-    const std::string_view t = text();
-    if (*at + 1 < items.size() && next < items.size() && own_line(t, items[*at]) && own_line(t, items[*at + 1]) &&
-        own_line(t, items[next])) {
-      // Its lines, from its own to the next item's.
-      const uint32_t b = line_begin(t, items[*at].begin);
-      const uint32_t en = line_begin(t, items[*at + 1].begin);
-      std::string block(t.substr(b, en - b));
-      block.replace(items[*at].begin - b, items[*at].end - items[*at].begin, def);
-      const uint32_t to = line_begin(t, items[next].begin);
-      if (!change(changes, b, en, "") || !change(changes, to, to, block)) return fail();
-      return std::nullopt;
-    }
-    std::vector<Range> removed;
-    if (!remove_items(changes, items, {*at}, &removed) || !insert_item(changes, items, after, def, st.eol)) {
-      return fail();
+    if (!move_item(changes, ct->items.ranges, *at, after, def, st.eol)) {
+      return error(i, "self-check", "the column `" + column.name + "` cannot be moved");
     }
     return std::nullopt;
   }
@@ -4956,17 +4976,6 @@ class Editor {
     return nullptr;
   }
 
-  // Whether an index on `index` serves a foreign key on `fk`: those are its
-  // leading columns.
-  static bool serves(const std::vector<std::string> &index, const std::vector<std::string> &fk) {
-    return fk.size() <= index.size() && std::equal(fk.begin(), fk.end(), index.begin(), [](const auto &x, const auto &y) {
-             return iequals(x, y);
-           });
-  }
-  static bool same_columns(const std::vector<std::string> &a, const std::vector<std::string> &b) {
-    return a.size() == b.size() && serves(a, b);
-  }
-
   // What would lose the index it needs if `table`'s index `gone` went
   // (replaced by an index on `instead`, when given): a foreign key (MariaDB
   // refuses to drop the index, 1553), or an AUTO_INCREMENT column, which
@@ -5143,10 +5152,7 @@ class Editor {
         return error(i, "unknown-object", "table `" + table->name + "` has no column `" + c + "`");
       }
     }
-    const Index *old = nullptr;
-    for (const auto &x : table->indexes) {
-      if (x.kind == "primary") old = &x;
-    }
+    const Index *old = primary_key(*table);
     Index pk;
     pk.kind = "primary";
     if (e.new_index) {
@@ -5348,8 +5354,8 @@ class Editor {
       return error(i, "unsupported", "the columns of `" + name + "` are not known (CREATE TABLE ... AS or LIKE)");
     }
     if (auto err = check_sent(i, *found, want, e)) return err;
-    const Origin origin = found->origin;
-    const auto current = [&]() -> Table { return *lookup().table(name).second; };
+    // The table as the steps so far left it: valid until the next step.
+    const auto current = [&]() -> const Table & { return *lookup().table(name).second; };
     // Column `target` of the table sent: its name now (a rename not done yet).
     const auto now_name = [&](const Table &t, const std::string &target) {
       for (const auto &[from, to] : e.renames) {
@@ -5391,11 +5397,23 @@ class Editor {
       return run_step(i, s);
     };
     possible_renames(i, *found, want, e);
+    // For each of `have` (the script's, as_sent) that the table sent does not
+    // have as it is: its index.
+    const auto stale = [](const auto &have, const auto &wanted, auto same) {
+      const auto m = match_items(have, wanted, same);
+      std::vector<std::pair<size_t, std::decay_t<decltype(wanted[0])>>> out;  // (have, its match or nullptr)
+      for (size_t h = 0; h < have.size(); ++h) {
+        const auto w = std::find(m.begin(), m.end(), std::optional<size_t>(h));
+        const std::decay_t<decltype(wanted[0])> match = w == m.end() ? nullptr : wanted[static_cast<size_t>(w - m.begin())];
+        if (match == nullptr || !same(*have[h], *match)) out.emplace_back(h, match);
+      }
+      return out;
+    };
 
     // 1. Renames of columns that change nothing else (a rename that does
     // goes with its change, step 8).
     for (const auto &[from, to] : e.renames) {
-      const Table t = current();
+      const Table &t = current();
       const Column *c = t.column(from);
       const Column *w = want.column(to);
       if (c == nullptr || c->name == to) continue;
@@ -5409,12 +5427,7 @@ class Editor {
     // 2. Foreign keys that go or change.
     {
       const Table t = current();
-      const Table ts = as_sent(t);
-      const auto have = pointers(ts.foreign_keys);
-      const auto m = match_items(have, pointers(want.foreign_keys), same_foreign_key);
-      for (size_t h = 0; h < have.size(); ++h) {
-        const auto w = std::find(m.begin(), m.end(), std::optional<size_t>(h));
-        if (w != m.end() && same_foreign_key(*have[h], want.foreign_keys[static_cast<size_t>(w - m.begin())])) continue;
+      for (const auto &[h, match] : stale(pointers(as_sent(t).foreign_keys), pointers(want.foreign_keys), same_foreign_key)) {
         Schema_edit s;
         s.op = Edit_op::drop_foreign_key;
         s.name = t.foreign_keys[h].name;
@@ -5426,10 +5439,7 @@ class Editor {
     {
       const Table ts = as_sent(current());
       const auto have = table_checks(ts);
-      const auto m = match_items(have, table_checks(want), same_check);
-      for (size_t h = 0; h < have.size(); ++h) {
-        const auto w = std::find(m.begin(), m.end(), std::optional<size_t>(h));
-        if (w != m.end() && same_check(*have[h], *table_checks(want)[static_cast<size_t>(w - m.begin())])) continue;
+      for (const auto &[h, match] : stale(have, table_checks(want), same_check)) {
         Schema_edit s;
         s.op = Edit_op::drop_check;
         s.new_check = *have[h];
@@ -5459,28 +5469,19 @@ class Editor {
         }
       }
       std::vector<Schema_edit> steps;
-      const auto have = secondary_indexes(ts);
-      const auto wanted = secondary_indexes(want);
-      const auto m = match_items(have, wanted, same_index);
       const auto have_now = secondary_indexes(*t);
-      for (size_t h = 0; h < have.size(); ++h) {
-        const auto w = std::find(m.begin(), m.end(), std::optional<size_t>(h));
+      for (const auto &[h, match] : stale(secondary_indexes(ts), secondary_indexes(want), same_index)) {
         Schema_edit s;
         s.op = Edit_op::drop_index;
         s.name = have_now[h]->name;
         if (s.name.empty()) s.columns = have_now[h]->columns();
-        if (w != m.end()) {
-          const Index &wi = *wanted[static_cast<size_t>(w - m.begin())];
-          if (same_index(*have[h], wi)) continue;
-          if (last && !have_now[h]->name.empty() && !wi.name.empty()) {
-            // Changed under its name, and needed until now: written anew
-            // where it is, dropped and added in one clause pair.
-            s.new_index = wi;
-            steps.push_back(s);
-            continue;
-          }
+        if (last && match != nullptr && !s.name.empty() && !match->name.empty()) {
+          // Changed under its name, and needed until now: written anew
+          // where it is, dropped and added in one clause pair.
+          s.new_index = *match;
+        } else if (!last && index_needed(i, *t, have_now[h], {})) {
+          continue;
         }
-        if (!last && index_needed(i, *t, have_now[h], {})) continue;
         steps.push_back(s);
       }
       for (const auto &s : steps) {
@@ -5493,7 +5494,7 @@ class Editor {
     // before those that go, so that a CREATE TABLE keeps a column.
     for (size_t k = 0; k < want.columns.size(); ++k) {
       const Column &w = want.columns[k];
-      const Table t = current();
+      const Table &t = current();
       if (t.column(now_name(t, w.name)) != nullptr) continue;
       Schema_edit s;
       s.op = Edit_op::add_column;
@@ -5515,25 +5516,25 @@ class Editor {
     // 8. Columns that change or move: the fewest moves (those outside the
     // longest common order), in the order of the table sent.
     {
-      const Table t = current();
+      const Table &t = current();
       std::vector<std::string> now, sent;
       for (const auto &c : t.columns) now.push_back(sent_name(c.name));
       for (const auto &w : want.columns) sent.push_back(w.name);
       const std::set<std::string> stay = common_order(now, sent);
+      // A primary key's column reads NOT NULL; leaving the key, it must say
+      // so itself.
+      const auto in_key = [](const Table &x, const std::string &col) {
+        const Index *pk = primary_key(x);
+        return pk != nullptr && names(pk->columns(), col);
+      };
       for (size_t k = 0; k < want.columns.size(); ++k) {
-        const Table tk = current();
+        const Table &tk = current();
         Column w = want.columns[k];
         const Column *c = tk.column(now_name(tk, w.name));
         if (c == nullptr) return error(i, "self-check", "table `" + name + "` lost the column `" + w.name + "`");
         // AUTO_INCREMENT that no index serves yet comes with step 11.
         if (w.auto_increment && !c->auto_increment && !leads_an_index(tk, c->name)) w.auto_increment = false;
         const bool moved = stay.count(lower(w.name)) == 0;
-        // A primary key's column reads NOT NULL; leaving the key, it must
-        // say so itself.
-        const auto in_key = [](const Table &x, const std::string &col) {
-          const Index *pk = primary_key(x);
-          return pk != nullptr && names(pk->columns(), col);
-        };
         const bool says_not_null = !w.nullable && in_key(tk, c->name) && !in_key(want, w.name) && !written_not_null(*c);
         if (!moved && !says_not_null && column_difference(tk, *c, want, w).empty()) continue;
         Schema_edit s = modify_step(c->name, w, checks_of(w.name));
@@ -5546,8 +5547,7 @@ class Editor {
     }
     // 9. The primary key.
     if (const Index *wp = primary_key(want)) {
-      const Table t = current();
-      const Index *hp = primary_key(t);
+      const Index *hp = primary_key(current());
       if (hp == nullptr || !same_index(*hp, *wp)) {
         Schema_edit s;
         s.op = Edit_op::set_primary_key;
@@ -5558,9 +5558,8 @@ class Editor {
     }
     // 10. Indexes that come; then those that had to wait for them.
     {
-      const Table t = current();
       const auto wanted = secondary_indexes(want);
-      const auto m = match_items(secondary_indexes(t), wanted, same_index);
+      const auto m = match_items(secondary_indexes(current()), wanted, same_index);
       for (size_t w = 0; w < wanted.size(); ++w) {
         if (m[w]) continue;
         Schema_edit s;
@@ -5572,14 +5571,13 @@ class Editor {
     if (auto err = drop_indexes(true)) return err;
     // 11. AUTO_INCREMENT on a column an index now leads.
     for (const auto &w : want.columns) {
-      const Table t = current();
-      const Column *c = t.column(w.name);
+      const Column *c = current().column(w.name);
       if (c == nullptr || c->auto_increment || !w.auto_increment) continue;
       if (auto err = step(modify_step(c->name, w, checks_of(w.name)))) return err;
     }
     // 12. Table-level CHECKs that come, each named.
     {
-      const Table t = current();
+      const Table &t = current();
       const auto wanted = table_checks(want);
       const auto m = match_items(table_checks(t), wanted, same_check);
       std::vector<std::string> taken;
@@ -5601,8 +5599,7 @@ class Editor {
     }
     // 13. Foreign keys that come.
     {
-      const Table t = current();
-      const auto m = match_items(pointers(t.foreign_keys), pointers(want.foreign_keys), same_foreign_key);
+      const auto m = match_items(pointers(current().foreign_keys), pointers(want.foreign_keys), same_foreign_key);
       for (size_t w = 0; w < want.foreign_keys.size(); ++w) {
         if (m[w]) continue;
         Schema_edit s;
@@ -5614,28 +5611,17 @@ class Editor {
     // 14. Table options; an AUTO_INCREMENT counter the table sent leaves out
     // stays.
     {
-      const Table t = current();
       Schema_edit s;
       s.op = Edit_op::set_table_options;
-      for (const auto &[k, v] : want.options) {
-        const auto it = std::find_if(t.options.begin(), t.options.end(), [&](const auto &o) { return o.first == k; });
-        if (it == t.options.end() || (k == "comment" ? it->second != v : !iequals(it->second, v))) {
-          s.options.emplace_back(k, v);
-        }
-      }
-      for (const auto &[k, v] : t.options) {
-        if (k == "auto_increment") continue;
-        if (std::none_of(want.options.begin(), want.options.end(), [&](const auto &o) { return o.first == k; })) {
-          s.options.emplace_back(k, std::nullopt);
-        }
-      }
+      s.options = option_changes(current(), want);
       if (!s.options.empty()) {
         if (auto err = step(s)) return err;
       }
     }
 
     if (!changed) {
-      note(i, "unchanged", origin.source, origin.statement.begin,
+      // No step ran: `found` is the table still.
+      note(i, "unchanged", found->origin.source, found->origin.statement.begin,
            "the table `" + name + "` is as sent: nothing was changed");
       return std::nullopt;
     }
@@ -5656,7 +5642,13 @@ class Editor {
   bool written_not_null(const Column &c) const {
     const auto r = searched_range(c.origin.source, c.origin.statement);
     if (!r || r->end > text().size()) return false;
-    return sql_key(text().substr(r->begin, r->end - r->begin)).find("not null") != std::string::npos;
+    // Not in a COMMENT or DEFAULT string.
+    std::string key = sql_key(text().substr(r->begin, r->end - r->begin));
+    for (size_t q = key.find_first_of("'\""); q != std::string::npos; q = key.find_first_of("'\"", q)) {
+      const size_t end = key.find(key[q], q + 1);
+      key.erase(q, end == std::string::npos ? std::string::npos : end + 1 - q);
+    }
+    return key.find("not null") != std::string::npos;
   }
 
   // A modify_column step making column `column` what `w` is.
@@ -5671,9 +5663,7 @@ class Editor {
 
   // An index of `t` starts with column `column`.
   static bool leads_an_index(const Table &t, const std::string &column) {
-    return std::any_of(t.indexes.begin(), t.indexes.end(), [&](const Index &ix) {
-      return !ix.key_parts.empty() && iequals(ix.key_parts[0].column, column);
-    });
+    return std::any_of(t.indexes.begin(), t.indexes.end(), [&](const Index &ix) { return serves(ix.columns(), {column}); });
   }
 
   // The table sent, and the renames, as replace_table takes them.
@@ -5755,36 +5745,40 @@ class Editor {
   // A column the table sent drops and one it adds, alike but for their
   // names, each the other's only such: a rename, perhaps.
   void possible_renames(size_t i, const Table &found, const Table &want, const Schema_edit &e) {
-    const auto renamed_from = [&](const std::string &c) {
-      return std::any_of(e.renames.begin(), e.renames.end(), [&](const auto &r) { return iequals(r.first, c); });
+    const auto renamed = [&](const std::string &c, auto side) {
+      return std::any_of(e.renames.begin(), e.renames.end(), [&](const auto &r) { return iequals(r.*side, c); });
     };
-    const auto renamed_to = [&](const std::string &c) {
-      return std::any_of(e.renames.begin(), e.renames.end(), [&](const auto &r) { return iequals(r.second, c); });
-    };
+    using Rename = std::pair<std::string, std::string>;
     std::vector<const Column *> dropped, added;
     for (const auto &c : found.columns) {
-      if (want.column(c.name) == nullptr && !renamed_from(c.name)) dropped.push_back(&c);
+      if (want.column(c.name) == nullptr && !renamed(c.name, &Rename::first)) dropped.push_back(&c);
     }
     for (const auto &w : want.columns) {
-      if (found.column(w.name) == nullptr && !renamed_to(w.name)) added.push_back(&w);
+      if (found.column(w.name) == nullptr && !renamed(w.name, &Rename::second)) added.push_back(&w);
     }
-    const auto alike = [&](const Column *d, const Column *a) {
-      return column_difference(found, *d, want, *a, false).empty();
-    };
-    for (const Column *d : dropped) {
-      const auto n = std::count_if(added.begin(), added.end(), [&](const Column *a) { return alike(d, a); });
-      if (n != 1) continue;
-      const Column *a = *std::find_if(added.begin(), added.end(), [&](const Column *x) { return alike(d, x); });
-      if (std::count_if(dropped.begin(), dropped.end(), [&](const Column *x) { return alike(x, a); }) != 1) continue;
-      note(i, "possible-rename", d->origin.source, d->origin.statement.begin,
-           "the column `" + found.name + "`.`" + d->name + "` is dropped and `" + a->name +
-               "` added with its definition: if it is a rename, send \"renames\": {\"columns\": {\"" + d->name +
-               "\": \"" + a->name + "\"}}, else the migration drops its data");
-      if (!m_result.notes.empty() && m_result.notes.back().kind == "possible-rename") {
-        Edit_note &last = m_result.notes.back();
-        last.table = found.name;
-        last.column = d->name;
-        last.new_name = a->name;
+    // alike[d][a]: dropped d and added a differ only in their names.
+    std::vector<std::vector<bool>> alike(dropped.size(), std::vector<bool>(added.size()));
+    std::vector<size_t> per_added(added.size(), 0);
+    for (size_t d = 0; d < dropped.size(); ++d) {
+      for (size_t a = 0; a < added.size(); ++a) {
+        alike[d][a] = column_difference(found, *dropped[d], want, *added[a], false).empty();
+        if (alike[d][a]) ++per_added[a];
+      }
+    }
+    for (size_t d = 0; d < dropped.size(); ++d) {
+      if (std::count(alike[d].begin(), alike[d].end(), true) != 1) continue;
+      const size_t a = static_cast<size_t>(std::find(alike[d].begin(), alike[d].end(), true) - alike[d].begin());
+      if (per_added[a] != 1) continue;
+      const Column &dc = *dropped[d];
+      const Column &ac = *added[a];
+      Edit_note *n = note(i, "possible-rename", dc.origin.source, dc.origin.statement.begin,
+                          "the column `" + found.name + "`.`" + dc.name + "` is dropped and `" + ac.name +
+                              "` added with its definition: if it is a rename, send \"renames\": {\"columns\": {\"" +
+                              dc.name + "\": \"" + ac.name + "\"}}, else the migration drops its data");
+      if (n != nullptr) {
+        n->table = found.name;
+        n->column = dc.name;
+        n->new_name = ac.name;
       }
     }
   }

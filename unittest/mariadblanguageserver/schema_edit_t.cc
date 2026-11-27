@@ -131,16 +131,22 @@ std::vector<std::string> note_kinds(const Edit_result &r) {
   return out;
 }
 
-// Each migration statement's tag: "action object name [(table)] [-> new]".
+// A migration statement's or clause's tag: "action object name [(table)] [-> new]".
+std::string tag(const Migration_clause &m) {
+  std::string t = std::string(to_string(m.action)) + " " + to_string(m.object) + " " + m.name;
+  if (!m.table.empty()) t += " (" + m.table + ")";
+  if (!m.new_name.empty()) t += " -> " + m.new_name;
+  return t;
+}
 using Tags = std::vector<std::string>;
 Tags tags(const Edit_result &r) {
   Tags out;
-  for (const auto &m : r.migration) {
-    std::string t = std::string(to_string(m.action)) + " " + to_string(m.object) + " " + m.name;
-    if (!m.table.empty()) t += " (" + m.table + ")";
-    if (!m.new_name.empty()) t += " -> " + m.new_name;
-    out.push_back(t);
-  }
+  for (const auto &m : r.migration) out.push_back(tag(m));
+  return out;
+}
+Tags clause_tags(const Migration_statement &m) {
+  Tags out;
+  for (const auto &c : m.clauses) out.push_back(tag(c));
   return out;
 }
 
@@ -2959,13 +2965,7 @@ TEST(Schema_edit, replace_table_adds_moves_and_changes_in_one_alter) {
   ASSERT_EQ(1u, r.migration.size());
   EXPECT_EQ((Tags{"drop index ix_note (orders)", "add column total (orders)", "alter column note (orders)",
                   "add index ix_note (orders)"}),
-            [&] {
-              Tags t;
-              for (const auto &c : r.migration[0].clauses) {
-                t.push_back(std::string(to_string(c.action)) + " " + to_string(c.object) + " " + c.name + " (" + c.table + ")");
-              }
-              return t;
-            }());
+            clause_tags(r.migration[0]));
   for (const auto &c : r.migration[0].clauses) EXPECT_EQ(0u, c.edit);
   EXPECT_TRUE(r.notes.empty());
   const Table *t = table(r, "shop", "orders");
@@ -3046,8 +3046,8 @@ TEST(Schema_edit, replace_table_renames) {
 }
 
 TEST(Schema_edit, replace_table_request_errors) {
-  auto err = [](const std::string &edit_json) {
-    const auto r = edit(k_shop, {}, request("shop", edit_json));
+  auto err = [](const std::string &edit_json, const std::string &script = k_shop) {
+    const auto r = edit(script, {}, request(script == k_shop ? "shop" : "", edit_json));
     return std::holds_alternative<Edit_error>(r) ? std::get<Edit_error>(r).kind + ": " + std::get<Edit_error>(r).message : "ok";
   };
   EXPECT_EQ("unknown-object: there is no table `nope`",
@@ -3059,7 +3059,7 @@ TEST(Schema_edit, replace_table_request_errors) {
   EXPECT_EQ("bad-request: the replace_table edit has an unknown member \"at\"",
             err(R"({"op": "replace_table", "table": )" + k_orders + R"(, "at": {"file": ""}})"));
   EXPECT_EQ("bad-request: \"renames\" of the replace_table edit has an unknown member \"indexes\"",
-            err(replace_table(k_orders, "{}").replace(replace_table(k_orders, "{}").find("\"columns\": {}"), 13, "\"indexes\": {}")));
+            err(R"({"op": "replace_table", "table": )" + k_orders + R"(, "renames": {"indexes": {}}})"));
   EXPECT_EQ("unknown-object: table `orders` has no column `nope` to rename", err(replace_table(k_orders, R"({"nope": "x"})")));
   EXPECT_EQ("bad-request: the table sent has no column `x`, which `note` is renamed to",
             err(replace_table(k_orders, R"({"note": "x"})")));
@@ -3077,11 +3077,8 @@ TEST(Schema_edit, replace_table_request_errors) {
   EXPECT_EQ("unknown-object: an index of `orders` names the column `nope`, which the table sent does not have",
             err(replace_table(orders_with(R"({"kind": "primary", "columns": ["id"]})", R"({"kind": "primary", "columns": ["nope"]})"))));
   EXPECT_EQ("unsupported: the columns of `l` are not known (CREATE TABLE ... AS or LIKE)",
-            [] {
-              const auto r = edit("CREATE TABLE t (a INT);\nCREATE TABLE l AS SELECT * FROM t;\n", {},
-                                  request("", replace_table(R"j({"name": "l", "columns": [{"name": "a", "type": "INT"}]})j")));
-              return std::get<Edit_error>(r).kind + ": " + std::get<Edit_error>(r).message;
-            }());
+            err(replace_table(R"j({"name": "l", "columns": [{"name": "a", "type": "INT"}]})j"),
+                "CREATE TABLE t (a INT);\nCREATE TABLE l AS SELECT * FROM t;\n"));
   // A column another table's foreign key uses stays.
   EXPECT_EQ("referenced: a foreign key of `orders` uses the column `customer`.`id`",
             err(replace_table(R"j({"name": "customer", "columns": [{"name": "name", "type": "VARCHAR(45)", "nullable": false}]})j")));
