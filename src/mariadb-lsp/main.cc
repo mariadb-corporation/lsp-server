@@ -1018,6 +1018,10 @@ std::optional<Options> parse_args(int argc, char **argv) {
       std::cerr << "mariadb-lsp: describe takes --statements or a file, not both\n";
       return std::nullopt;
     }
+    if (!o.edits.empty()) {
+      std::cerr << "mariadb-lsp: --edits goes with edit\n";
+      return std::nullopt;
+    }
     return o;
   }
   if (o.files.empty()) {

@@ -63,7 +63,7 @@ values of `verb`, `kind` and `status` may appear in format 1: read one you do no
 | `or_replace`, `if_exists`, `if_not_exists`, `temporary` | bool | as written; false when the statement cannot have them or is not `ok` |
 | `objects` | array | the objects it names (below); `[]` when it names none, names only REST paths, or is not `ok` |
 | `current_schema` | string or null | the schema the last `USE` before this statement selected; null for none |
-| `rest` | object or null | REST SQL only (below) |
+| `rest` | object or null | for a `rest_*` kind (below); null for every other statement, REST SQL of kind `other` included (`GRANT REST`, `SHOW REST`, `USE REST METADATA`, `DROP REST DAEMON`) |
 
 Nothing is guessed from the words of a statement that does not parse.
 

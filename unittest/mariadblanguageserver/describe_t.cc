@@ -348,6 +348,45 @@ TEST(Describe, list_item_holding_the_join_delimiter) {
   EXPECT_EQ("drop", d[1].description.verb);
 }
 
+// Found by review: body_end, sql_mode across items, several-statements
+// under a mode.
+TEST(Describe, list_item_edges) {
+  static Parser_pool pool(1);
+  {
+    // A `;` in a trailing comment is no delimiter.
+    const auto d = describe_list({"DROP VIEW v; -- done;", "DROP VIEW w -- no delimiter;"}, pool);
+    EXPECT_EQ(11u, d[0].body_end);
+    EXPECT_EQ(28u, d[1].body_end);
+  }
+  {
+    // The item after a SET sql_mode is split under that mode.
+    const auto d = describe_list({"SET sql_mode = 'NO_BACKSLASH_ESCAPES'", "CREATE TABLE t (a VARCHAR(5) DEFAULT 'a\\')"},
+                                 pool);
+    EXPECT_EQ(Describe_status::ok, d[1].description.status) << d[1].description.message;
+  }
+  {
+    Describe_options o;
+    o.sql_mode = "ANSI_QUOTES";
+    const auto d = describe_list({"CREATE TABLE \"t\" (a INT); CREATE TABLE \"u\" (b INT)"}, pool, o);
+    EXPECT_EQ(Describe_status::several_statements, d[0].description.status) << d[0].description.message;
+  }
+}
+
+TEST(Describe, rest_only_for_rest_kinds) {
+  const auto d = describe(
+      "ALTER REST CONTENT SET /c ON SERVICE /s NEW REQUEST PATH /c2;\n"
+      "USE REST METADATA SCHEMA mysql_rest_service_metadata;\n"
+      "GRANT REST READ ON SERVICE /s TO r;\n");
+  ASSERT_EQ(3u, d.size());
+  ASSERT_TRUE(d[0].rest);
+  EXPECT_EQ("rest_content_set", d[0].kind);
+  EXPECT_EQ("/c2", d[0].rest->new_path.value_or(""));
+  EXPECT_EQ("other", d[1].kind);
+  EXPECT_FALSE(d[1].rest);
+  EXPECT_EQ("other", d[2].kind);
+  EXPECT_FALSE(d[2].rest);
+}
+
 // Every REST CREATE, ALTER and DROP rule of the grammar is one of the kinds
 // describe names, or listed here as one it leaves `other` on purpose: a new
 // REST statement fails this test rather than coming out as `other`.

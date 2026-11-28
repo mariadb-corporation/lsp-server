@@ -254,13 +254,10 @@ class Reader {
 
     if (t_.node(st).symbol == g_.mrs_use_statement) {
       d.verb = "use";
-      if (service_node == npos && schema_node == npos) {
-        d.kind = "other";  // USE REST METADATA
-      } else {
-        d.kind = schema_node != npos ? "rest_schema" : "rest_service";
-        r.service = service();
-        r.schema = written_schema();
-      }
+      if (service_node == npos && schema_node == npos) return;  // USE REST METADATA: other
+      d.kind = schema_node != npos ? "rest_schema" : "rest_service";
+      r.service = service();
+      r.schema = written_schema();
       d.rest = std::move(r);
       return;
     }
@@ -275,7 +272,7 @@ class Reader {
     }
     static const char *const kinds[] = {"service", "schema",      "view",     "procedure", "function",
                                         "content_set", "content_file", "auth_app", "user",  "role"};
-    d.rest = Described_rest{};
+    // `rest` only for the rest_* kinds: DROP REST DAEMON and the like are other.
     if (verb.empty() || std::find(std::begin(kinds), std::end(kinds), kind) == std::end(kinds)) return;
     d.verb = verb;
     d.kind = "rest_" + kind;
@@ -317,6 +314,7 @@ class Reader {
       r.service = service();
       const int path_sym = kind == "content_set" ? g_.mrs_content_set_request_path : g_.mrs_content_file_request_path;
       if (const uint32_t p = t_.find(st, path_sym); p != npos) r.path = text(p);
+      new_request_path();  // ALTER REST CONTENT SET ... NEW REQUEST PATH
     } else if (kind == "auth_app" || kind == "role") {
       const uint32_t p = t_.find(st, kind == "auth_app" ? g_.mrs_auth_app_name : g_.mrs_role_name);
       if (p != npos) d.objects.push_back({{std::nullopt, rest_name(text(p))}, std::nullopt, std::nullopt});
@@ -464,10 +462,13 @@ void holds_several(Described_item &it, size_t n) {
   it.body_end = it.end = static_cast<uint32_t>(it.text.size());
 }
 
-// An item as several `;`-separated statements, when each of them parses.
-size_t separate_statements(const std::string &item, Parser_pool &pool, const Describe_options &options) {
+// An item as several `;`-separated statements, when each of them parses
+// under `sql_mode`, the one in force for the item.
+size_t separate_statements(const std::string &item, const std::string &sql_mode, Parser_pool &pool,
+                           const Describe_options &options) {
   Index_options io;
   io.version_id = options.version_id;
+  io.sql_mode = sql_mode;
   const auto index = Statement_index::build(item, io);
   const auto ds = describe_statements(item, index, pool, options);
   if (ds.size() < 2) return 0;
@@ -498,6 +499,8 @@ std::vector<Described_item> describe_list(const std::vector<std::string> &items,
     Described_item &it = out[i];
     it.text = items[i];
     it.end = it.body_end = static_cast<uint32_t>(it.text.size());
+    // Under the sql_mode the items joined before it leave in force, so that
+    // a SET sql_mode (NO_BACKSLASH_ESCAPES) changes how its strings end.
     const auto alone = Statement_index::build(it.text, io);
     Statement_description &d = it.description;
     if (alone.final_delimiter() != delimiter) {
@@ -516,7 +519,14 @@ std::vector<Described_item> describe_list(const std::vector<std::string> &items,
     text += it.text;
     range[i].second = static_cast<uint32_t>(text.size());
     text += "\n" + delimiter + "\n";
+    // The sql_mode after it: that of a statement following it.
+    const auto probe = Statement_index::build(it.text + "\n" + delimiter + "\nDO 0", io);
+    if (!probe.statements().empty()) {
+      const Statement_mode &after = probe.modes()[probe.statements().back().mode];
+      if (after.known) io.sql_mode = after.mode;
+    }
   }
+  io.sql_mode = options.sql_mode;  // the joined text starts where the first item does
 
   const auto index = Statement_index::build(text, io);
   const auto ds = describe_statements(text, index, pool, options);
@@ -545,18 +555,28 @@ std::vector<Described_item> describe_list(const std::vector<std::string> &items,
       it.body_end = std::min(s.body_end - base, size);
       it.end = std::min(s.end - base, size);
       // body_end before a trailing `;`, as in a text, where it is the
-      // delimiter.
-      const auto blank_before = [&](uint32_t e) {
-        while (e > it.begin && std::isspace(static_cast<unsigned char>(it.text[e - 1]))) --e;
-        return e;
-      };
-      if (const uint32_t e = blank_before(it.body_end); e > it.begin && it.text[e - 1] == ';')
-        it.body_end = blank_before(e - 1);
+      // delimiter: the item split at `;`, its last SQL statement ended by
+      // one (not a `;` in a comment or string after it).
+      const std::string &mode = index.modes()[s.mode].mode;
+      Index_options semi;
+      semi.version_id = options.version_id;
+      semi.sql_mode = mode;
+      const std::string_view body = std::string_view(it.text).substr(it.begin, it.body_end - it.begin);
+      const auto parts = Statement_index::build(body, semi);
+      for (auto p = parts.statements().rbegin(); p != parts.statements().rend(); ++p) {
+        if (p->kind != Statement_kind::sql) continue;
+        if (parts.delimiters()[p->delimiter] == ";") {
+          it.body_end = it.begin + p->body_end;
+          while (it.body_end > it.begin && std::isspace(static_cast<unsigned char>(it.text[it.body_end - 1])))
+            --it.body_end;
+        }
+        break;
+      }
       if (d.status == Describe_status::syntax_error) {
         it.description.error_begin = std::min(d.error_begin - base, size);
         it.description.error_end = std::min(d.error_end - base, size);
         // `DROP VIEW a; DROP VIEW b` reads as one statement here.
-        if (const size_t n = separate_statements(it.text, pool, options); n > 1) holds_several(it, n);
+        if (const size_t n = separate_statements(it.text, mode, pool, options); n > 1) holds_several(it, n);
       }
     }
   }
