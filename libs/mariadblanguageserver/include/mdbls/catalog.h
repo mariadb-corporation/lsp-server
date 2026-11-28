@@ -442,6 +442,35 @@ struct Rest_statement {
   uint32_t order = 0;                  // fold order, across files and includes
 };
 
+// The REST service and schema in use, as MariaDB Shell's MRS DDL executor
+// (mysqlshdk/libs/mrs/ddl_executor*.cc) keeps them: what a REST statement
+// that names no service or schema acts on.  Each change is one of the
+// shell's rules; the fold calls them, and readers such as describe see the
+// result between statements (Catalog::rest_context).
+struct Rest_context {
+  Rest_service_name service;  // the current service; `key` "" for none
+  std::string schema;         // the request path of its current schema; "" for none
+
+  // USE REST SERVICE s: s is current, and no schema is.
+  void use_service(const Rest_service_name &s) {
+    service = s;
+    schema.clear();
+  }
+  // USE REST [SERVICE s] SCHEMA p (after use_service for s).
+  void use_schema(const std::string &path) { schema = path; }
+  // CREATE REST SCHEMA gave the service `service_key` its first schema: on
+  // the current service, that schema becomes the current one.
+  void first_schema_created(const std::string &service_key, const std::string &path);
+  // ALTER REST SERVICE ... NEW REQUEST PATH: the current service follows.
+  void service_renamed(const std::string &from_key, const Rest_service_name &to);
+  // ALTER REST SCHEMA ... NEW REQUEST PATH: the current schema follows.
+  void schema_renamed(const std::string &service_key, const std::string &from, const std::string &to);
+  // DROP REST SERVICE of the current one: none is current, nor a schema.
+  void service_dropped(const std::string &key);
+  // DROP REST SCHEMA of the current one: no schema is current.
+  void schema_dropped(const std::string &service_key, const std::string &path);
+};
+
 // The schema objects a script defines, folded statement by statement in file
 // order: CREATE adds, ALTER changes, DROP removes, RENAME renames, USE sets
 // the schema unqualified names belong to.  Names compare without regard to
@@ -462,6 +491,8 @@ class Catalog {
   const std::vector<Named_object> &rest_roles() const { return m_roles; }
   const std::vector<Named_object> &rest_users() const { return m_users; }
   const std::string &current_schema() const { return m_current; }
+  // The REST service and schema in use after the statements applied so far.
+  const Rest_context &rest_context() const { return m_rest_context; }
   // Every statement about a REST item, in file order, also those before a
   // DROP and re-CREATE of it or written under an earlier path.
   const std::vector<Rest_statement> &rest_statements(const Rest_service &svc) const;
@@ -496,10 +527,7 @@ class Catalog {
   std::vector<Schema> m_schemas;
   std::string m_current;
   std::vector<Rest_service> m_services;
-  // What USE REST SERVICE / SCHEMA set, as MariaDB Shell keeps it: the
-  // current service, and the request path of its current schema.
-  Rest_service_name m_current_service;
-  std::string m_current_rest_schema;
+  Rest_context m_rest_context;
   std::vector<Named_object> m_auth_apps;
   std::vector<Named_object> m_roles;
   std::vector<Named_object> m_users;

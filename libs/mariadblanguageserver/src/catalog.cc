@@ -2151,6 +2151,26 @@ std::optional<Origin> Catalog_fold::leading_comments() const {
   return Origin{{top, end}, {top, end}, c_.m_source};
 }
 
+void Rest_context::first_schema_created(const std::string &service_key, const std::string &path) {
+  if (iequals(service_key, service.key)) schema = path;
+}
+
+void Rest_context::service_renamed(const std::string &from_key, const Rest_service_name &to) {
+  if (iequals(service.key, from_key)) service = to;
+}
+
+void Rest_context::schema_renamed(const std::string &service_key, const std::string &from, const std::string &to) {
+  if (iequals(service_key, service.key) && iequals(from, schema)) schema = to;
+}
+
+void Rest_context::service_dropped(const std::string &key) {
+  if (iequals(service.key, key)) *this = {};
+}
+
+void Rest_context::schema_dropped(const std::string &service_key, const std::string &path) {
+  if (iequals(service_key, service.key) && iequals(path, schema)) schema.clear();
+}
+
 // [developer, ...@]/path: developers unquoted and sorted as MariaDB Shell's
 // format_developers does (without regard to case, then by bytes).
 Rest_service_name Catalog_fold::rest_service_name(uint32_t n) const {
@@ -2224,7 +2244,7 @@ bool Catalog_fold::rest(uint32_t n) {
   // note) when there is neither.
   auto service_named = [&]() -> std::optional<Rest_service_name> {
     if (!service.key.empty()) return service;
-    if (!c_.m_current_service.key.empty()) return c_.m_current_service;
+    if (!c_.m_rest_context.service.key.empty()) return c_.m_rest_context.service;
     none_in_use("SERVICE");
     return std::nullopt;
   };
@@ -2235,8 +2255,8 @@ bool Catalog_fold::rest(uint32_t n) {
     auto svc = service_named();
     if (!svc) return std::nullopt;
     if (!schema_path.empty()) return std::pair{*svc, schema_path};
-    if (c_.m_current_rest_schema.empty()) { none_in_use("SCHEMA"); return std::nullopt; }
-    return std::pair{*svc, c_.m_current_rest_schema};
+    if (c_.m_rest_context.schema.empty()) { none_in_use("SCHEMA"); return std::nullopt; }
+    return std::pair{*svc, c_.m_rest_context.schema};
   };
   // A rest-object-kind note: the statement's path holds `ex`, of another kind.
   auto other_kind = [&](const Rest_object &ex, const char *effect) {
@@ -2353,7 +2373,7 @@ bool Catalog_fold::rest(uint32_t n) {
         note(Note_kind::rest_path_in_use, false, what() + ": REST service " + to.path + " exists");
         return false;
       }
-      if (iequals(c_.m_current_service.key, svc->name.key)) c_.m_current_service = to;
+      c_.m_rest_context.service_renamed(svc->name.key, to);
       std::set<std::string> live;  // a service there, in a disabled service's rename
       if (other != nullptr) add_rest_keys(live, *other);
       c_.rekey_rest_statements(rest_key_service(svc->name.key), rest_key_service(to.key), live);
@@ -2369,17 +2389,16 @@ bool Catalog_fold::rest(uint32_t n) {
     // It is the statement of the service and of the schema it names.
     const bool both = !service.key.empty() && !schema_path.empty();
     if (!service.key.empty()) {
-      c_.m_current_service = service;
-      c_.m_current_rest_schema.clear();
+      c_.m_rest_context.use_service(service);
       rest_statement(rest_key_service(service.key), "use", find(st, s_.mrs_service_request_path), both);
     }
     if (!schema_path.empty()) {
-      if (c_.m_current_service.key.empty()) {
+      if (c_.m_rest_context.service.key.empty()) {
         none_in_use("SERVICE");
         return false;
       }
-      c_.m_current_rest_schema = schema_path;
-      rest_statement(rest_key_schema(c_.m_current_service.key, schema_path), "use", schema_node, both);
+      c_.m_rest_context.use_schema(schema_path);
+      rest_statement(rest_key_schema(c_.m_rest_context.service.key, schema_path), "use", schema_node, both);
     }
     return false;
   }
@@ -2407,8 +2426,7 @@ bool Catalog_fold::rest(uint32_t n) {
       *it = std::move(rs);
     } else {
       svc.schemas.push_back(std::move(rs));
-      if (svc.schemas.size() == 1 && iequals(svc.name.key, c_.m_current_service.key))
-        c_.m_current_rest_schema = svc.schemas[0].path;
+      if (svc.schemas.size() == 1) c_.m_rest_context.first_schema_created(svc.name.key, svc.schemas[0].path);
     }
     return true;
   }
@@ -2435,8 +2453,7 @@ bool Catalog_fold::rest(uint32_t n) {
         note(Note_kind::rest_path_in_use, false, what() + ": REST schema " + to_path + " exists");
         return false;
       }
-      if (iequals(svc->name.key, c_.m_current_service.key) && iequals(rs->path, c_.m_current_rest_schema))
-        c_.m_current_rest_schema = to_path;
+      c_.m_rest_context.schema_renamed(svc->name.key, rs->path, to_path);
       std::set<std::string> live;  // a schema there, in a disabled service
       if (other != nullptr) add_rest_keys(live, svc->name.key, *other);
       c_.rekey_rest_statements(rest_key_schema(svc->name.key, rs->path), rest_key_schema(svc->name.key, to_path),
@@ -2479,10 +2496,7 @@ bool Catalog_fold::rest(uint32_t n) {
   if (sym == s_.mrs_drop_rest_service_statement) {
     rest_statement(rest_key_service(service.key), "drop", find(st, s_.mrs_service_request_path));
     std::erase_if(c_.m_services, [&](const Rest_service &x) { return iequals(x.name.key, service.key); });
-    if (iequals(c_.m_current_service.key, service.key)) {
-      c_.m_current_service = {};
-      c_.m_current_rest_schema.clear();
-    }
+    c_.m_rest_context.service_dropped(service.key);
     return true;
   }
   // A DROP of an object the file never created changes nothing; a service
@@ -2501,8 +2515,7 @@ bool Catalog_fold::rest(uint32_t n) {
         rs != nullptr && !for_db.empty() && !rs->schema.empty() && !iequals(rs->schema, for_db))
       return true;  // FOR DATABASE names another database: nothing changes
     if (svc != nullptr) erase_by_path(svc->schemas, schema_path);
-    if (iequals(svc_path->key, c_.m_current_service.key) && iequals(schema_path, c_.m_current_rest_schema))
-      c_.m_current_rest_schema.clear();
+    c_.m_rest_context.schema_dropped(svc_path->key, schema_path);
     return true;
   }
   auto drop_object = [&](const char *kind, int path_sym) {

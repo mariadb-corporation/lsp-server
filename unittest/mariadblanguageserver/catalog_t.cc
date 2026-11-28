@@ -338,6 +338,37 @@ TEST(Catalog, rest_current_service_and_schema) {
   EXPECT_NE(std::string::npos, o.notes[4].message.find("names no REST SCHEMA")) << o.notes[4].message;
 }
 
+// Catalog::rest_context between statements (what describe reads): each
+// row is a statement and the service key and schema path in use after it.
+TEST(Catalog, rest_context_after_each_statement) {
+  struct Step {
+    const char *sql;
+    const char *service;
+    const char *schema;
+  };
+  const Step steps[] = {
+      {"CREATE REST SERVICE /notes;\n", "", ""},                 // creating does not make it current
+      {"USE REST SERVICE /notes;\n", "/notes", ""},
+      {"CREATE REST SCHEMA /a FROM sakila;\n", "/notes", "/a"},   // the service's first schema
+      {"CREATE REST SCHEMA /b FROM world;\n", "/notes", "/a"},    // not its first
+      {"ALTER REST SCHEMA /a NEW REQUEST PATH /a2;\n", "/notes", "/a2"},
+      {"USE REST SCHEMA /b;\n", "/notes", "/b"},
+      {"ALTER REST SERVICE /notes NEW REQUEST PATH /n2;\n", "/n2", "/b"},
+      {"DROP REST SCHEMA /b;\n", "/n2", ""},
+      {"CREATE REST SERVICE mike, anna@/svc;\n", "/n2", ""},
+      {"USE REST SERVICE anna,mike@/svc SCHEMA /s;\n", "anna,mike@/svc", "/s"},
+      {"USE REST SERVICE /n2;\n", "/n2", ""},                    // clears the schema
+      {"DROP REST SERVICE /n2;\n", "", ""},
+  };
+  std::string text;
+  for (const Step &s : steps) {
+    text += s.sql;
+    const auto o = outline_of(text);
+    EXPECT_EQ(s.service, o.catalog.rest_context().service.key) << s.sql;
+    EXPECT_EQ(s.schema, o.catalog.rest_context().schema) << s.sql;
+  }
+}
+
 // The current service follows an ALTER REST SERVICE ... NEW REQUEST PATH
 // (its schema stays current); DROP REST SCHEMA / SERVICE of the current one
 // clears it, as MariaDB Shell does.

@@ -184,13 +184,17 @@ not qualified (it is not filled in from `current_schema`). Optional members:
   - Names come from `table_ident`/`sp_name` under `table_list` etc.
   - REST selectors come from `mrs_opt_from_service_schema_selector` /
     `mrs_service_schema_selector` and the `ON SERVICE`/`SCHEMA` rules.
-- **REST current state:** the service/schema in use is tracked by `Catalog_fold::rest` today.
-  Its tracking (`m_current_service`, `m_current_rest_schema`, the "first schema becomes
-  current" rule) moves into a small `Rest_context` type that both the fold and `describe`
-  step through, so the two cannot resolve differently. `describe` runs no catalog: it needs
-  to know which service and schema are in use, not which items exist.
-- **`current_schema`:** the `USE` statements seen so far in the input, in order (no backward
-  scan per statement).
+- **What is in use:** `describe` folds its input through a `Catalog`, one statement at a
+  time with `Catalog::apply`, as `build_outline` does, and reads it before each statement:
+  - `Catalog::rest_context()` for the REST service and schema. The fold keeps them in a
+    `Rest_context` (`catalog.h`), whose operations are the shell's rules (step 1, done), so
+    `describe` and the outline cannot resolve differently.
+  - `Catalog::current_schema()` for `current_schema`.
+
+  A catalog is needed, not just the `USE` statements: the "first schema becomes current"
+  rule depends on whether the service already has a schema, and a service gets schemas
+  from `CREATE REST SCHEMA`, from objects that only name a schema, and loses them by `DROP`.
+  The fold's results (objects, notes) are not used.
 - **Shared:** `schema_edit.cc`'s `subject_of` is a word scan of the same facts (next step 4
   of the context wants it gone). Once `describe` exists, `subject_of` should read
   `Statement_description` for statements that parse.
@@ -227,7 +231,8 @@ not qualified (it is not filled in from `current_schema`). Optional members:
 
 ## 7. Steps
 
-1. `Rest_context` out of `Catalog_fold::rest`, no change in behaviour (outline tests unchanged).
+1. `Rest_context` out of `Catalog_fold::rest`, no change in behaviour (outline tests unchanged),
+   and `Catalog::rest_context()`. Done: test `Catalog.rest_context_after_each_statement`.
 2. `describe` engine, JSON, CLI with text input; `docs/describe-format.md`; tests.
 3. List input `--statements`.
 4. `subject_of` on top of `Statement_description` (optional, behaviour kept).
