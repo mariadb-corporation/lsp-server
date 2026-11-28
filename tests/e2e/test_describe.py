@@ -81,6 +81,34 @@ class Describe_test(unittest.TestCase):
         self.assertTrue(st[1]["if_not_exists"])
         self.assertEqual(st[1]["rest"]["database_schema"], "db")
 
+    def test_statement_list(self):
+        # What msm sends: its tool's statements, one per item.
+        items = ["DROP VIEW v;",
+                 "CREATE PROCEDURE p() BEGIN SELECT 1; END",
+                 "DROP VIEW a; DROP VIEW b"]
+        r = run_cli("describe", "--statements", "-", stdin=json.dumps(items))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        st = json.loads(r.stdout)["statements"]
+        self.assertEqual([s["index"] for s in st], [0, 1, 2])
+        self.assertEqual((st[0]["status"], st[0]["verb"], st[0]["kind"]), ("ok", "drop", "view"))
+        self.assertEqual(items[0][st[0]["begin"]:st[0]["body_end"]], "DROP VIEW v")
+        self.assertEqual((st[1]["status"], st[1]["kind"]), ("ok", "procedure"))
+        self.assertEqual(st[2]["status"], "several-statements")
+
+    def test_statement_list_usage_errors(self):
+        r = run_cli("describe", "--statements", "-", stdin='{"not": "an array"}')
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("not a JSON array of strings", r.stderr)
+        r = run_cli("describe", "--statements", "-", stdin='["a", 1]')
+        self.assertEqual(r.returncode, 2)
+        r = run_cli("describe", "--statements", "-", "-", stdin="[]")
+        self.assertEqual(r.returncode, 2)
+        r = run_cli("split", "--statements", "-", stdin="[]")
+        self.assertEqual(r.returncode, 2)
+        r = run_cli("describe", "--statements", "-", stdin="[]")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), {"format": 1, "statements": []})
+
 
 if __name__ == "__main__":
     unittest.main()

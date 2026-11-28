@@ -21,6 +21,7 @@
 #include <rapidjson/writer.h>
 
 #include <algorithm>
+#include <cctype>
 #include <string>
 #include <utility>
 
@@ -341,6 +342,8 @@ const char *status_name(Describe_status s) {
     case Describe_status::syntax_error: return "syntax-error";
     case Describe_status::unsupported: return "unsupported";
     case Describe_status::source_directive: return "source-directive";
+    case Describe_status::several_statements: return "several-statements";
+    case Describe_status::empty: return "empty";
   }
   return "ok";
 }
@@ -442,11 +445,238 @@ std::vector<Statement_description> describe_statements(std::string_view text, co
   return out;
 }
 
+namespace {
+
+// A delimiter no item contains, so that each item ends where the text
+// joining them says.
+std::string unused_delimiter(const std::vector<std::string> &items) {
+  for (unsigned n = 0;; ++n) {
+    std::string d = "$$" + (n == 0 ? std::string() : std::to_string(n));
+    if (std::none_of(items.begin(), items.end(), [&](const std::string &i) { return i.find(d) != std::string::npos; }))
+      return d;
+  }
+}
+
+// An item as several `;`-separated statements, when each of them parses.
+size_t separate_statements(const std::string &item, Parser_pool &pool, const Describe_options &options) {
+  Index_options io;
+  io.version_id = options.version_id;
+  const auto index = Statement_index::build(item, io);
+  const auto ds = describe_statements(item, index, pool, options);
+  if (ds.size() < 2) return 0;
+  for (const auto &d : ds) {
+    if (d.status != Describe_status::ok) return 0;
+  }
+  return ds.size();
+}
+
+}  // namespace
+
+std::vector<Described_item> describe_list(const std::vector<std::string> &items, Parser_pool &pool,
+                                          const Describe_options &options) {
+  std::vector<Described_item> out(items.size());
+  const std::string delimiter = unused_delimiter(items);
+  Index_options io;
+  io.version_id = options.version_id;
+  io.sql_mode = options.sql_mode;
+  io.delimiter = delimiter;
+
+  // The items joined, each followed by the delimiter on a line of its own.
+  // One that would not end there (it changes the delimiter, or leaves a
+  // string or comment open) is described alone and left out.
+  std::string text;
+  std::vector<std::pair<uint32_t, uint32_t>> range(items.size(), {0, 0});  // in `text`
+  std::vector<bool> joined(items.size(), false);
+  for (size_t i = 0; i < items.size(); ++i) {
+    Described_item &it = out[i];
+    it.text = items[i];
+    it.end = it.body_end = static_cast<uint32_t>(it.text.size());
+    const auto alone = Statement_index::build(it.text, io);
+    Statement_description &d = it.description;
+    if (alone.final_delimiter() != delimiter) {
+      d.status = Describe_status::unsupported;
+      d.message = "an item needs no DELIMITER: it is one statement";
+      continue;
+    }
+    if (const char *open = open_context_name(alone.open_at_end())) {
+      d.status = Describe_status::syntax_error;
+      d.message = std::string("unterminated ") + open;
+      d.error_end = it.end;
+      continue;
+    }
+    joined[i] = true;
+    range[i].first = static_cast<uint32_t>(text.size());
+    text += it.text;
+    range[i].second = static_cast<uint32_t>(text.size());
+    text += "\n" + delimiter + "\n";
+  }
+
+  const auto index = Statement_index::build(text, io);
+  const auto ds = describe_statements(text, index, pool, options);
+  std::vector<std::vector<size_t>> of_item(items.size());
+  size_t i = 0;
+  for (size_t k = 0; k < ds.size(); ++k) {
+    const uint32_t at = index.statements()[ds[k].statement].begin;
+    while (i < items.size() && (!joined[i] || at >= range[i].second)) ++i;
+    if (i < items.size() && at >= range[i].first) of_item[i].push_back(k);
+  }
+  for (i = 0; i < items.size(); ++i) {
+    if (!joined[i]) continue;
+    Described_item &it = out[i];
+    if (of_item[i].empty()) {
+      it.description.status = Describe_status::empty;
+      it.description.message = "the item holds no statement";
+    } else if (of_item[i].size() > 1) {
+      it.description.status = Describe_status::several_statements;
+      it.description.message = "the item holds " + std::to_string(of_item[i].size()) + " statements";
+    } else {
+      const Statement_description &d = ds[of_item[i][0]];
+      const Statement &s = index.statements()[d.statement];
+      const uint32_t base = range[i].first;
+      const uint32_t size = static_cast<uint32_t>(it.text.size());
+      it.description = d;
+      it.begin = s.begin - base;
+      it.body_end = std::min(s.body_end - base, size);
+      it.end = std::min(s.end - base, size);
+      // body_end before a trailing `;`, as in a text, where it is the
+      // delimiter.
+      const auto blank_before = [&](uint32_t e) {
+        while (e > it.begin && std::isspace(static_cast<unsigned char>(it.text[e - 1]))) --e;
+        return e;
+      };
+      if (const uint32_t e = blank_before(it.body_end); e > it.begin && it.text[e - 1] == ';')
+        it.body_end = blank_before(e - 1);
+      if (d.status == Describe_status::syntax_error) {
+        it.description.error_begin = std::min(d.error_begin - base, size);
+        it.description.error_end = std::min(d.error_end - base, size);
+        // `DROP VIEW a; DROP VIEW b` reads as one statement here.
+        if (const size_t n = separate_statements(it.text, pool, options); n > 1) {
+          it.description = {};
+          it.description.status = Describe_status::several_statements;
+          it.description.message = "the item holds " + std::to_string(n) + " statements";
+          it.begin = 0;
+          it.body_end = it.end = size;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+namespace {
+
+// The members of one entry after its positions.
+void write_entry_rest(lsp::Json_writer &w, const Statement_description &d, std::string_view text,
+                      const Line_map &lines) {
+  auto str = [&](const std::string &s) { w.String(s.c_str(), static_cast<rapidjson::SizeType>(s.size())); };
+  const bool ok = d.status == Describe_status::ok;
+  w.Key("status");
+  w.String(status_name(d.status));
+  if (!ok) {
+    w.Key("message");
+    str(d.message);
+  }
+  if (d.status == Describe_status::syntax_error) {
+    w.Key("error_range");
+    lsp::write_range(w, text, lines, d.error_begin, d.error_end);
+  }
+  w.Key("verb");
+  if (ok) str(d.verb); else w.Null();
+  w.Key("kind");
+  if (ok) str(d.kind); else w.Null();
+  w.Key("or_replace");
+  w.Bool(d.or_replace);
+  w.Key("if_exists");
+  w.Bool(d.if_exists);
+  w.Key("if_not_exists");
+  w.Bool(d.if_not_exists);
+  w.Key("temporary");
+  w.Bool(d.temporary);
+  w.Key("objects");
+  w.StartArray();
+  for (const auto &o : d.objects) {
+    w.StartObject();
+    w.Key("schema");
+    write_optional(w, o.name.schema);
+    w.Key("name");
+    str(o.name.name);
+    if (o.table) {
+      w.Key("table");
+      write_name(w, *o.table);
+    }
+    if (o.new_name) {
+      w.Key("new_schema");
+      write_optional(w, o.new_name->schema);
+      w.Key("new_name");
+      str(o.new_name->name);
+    }
+    w.EndObject();
+  }
+  w.EndArray();
+  w.Key("current_schema");
+  write_optional(w, d.current_schema);
+  w.Key("rest");
+  if (!d.rest) {
+    w.Null();
+  } else {
+    const Described_rest &r = *d.rest;
+    w.StartObject();
+    w.Key("service");
+    if (r.service) {
+      w.StartObject();
+      w.Key("path");
+      str(r.service->path);
+      w.Key("developers");
+      w.StartArray();
+      for (const auto &dev : r.service->developers) str(dev);
+      w.EndArray();
+      w.Key("written");
+      w.Bool(r.service->written);
+      w.EndObject();
+    } else {
+      w.Null();
+    }
+    w.Key("schema");
+    if (r.schema) {
+      w.StartObject();
+      w.Key("path");
+      str(r.schema->path);
+      w.Key("written");
+      w.Bool(r.schema->written);
+      w.EndObject();
+    } else {
+      w.Null();
+    }
+    w.Key("path");
+    write_optional(w, r.path);
+    w.Key("new_path");
+    write_optional(w, r.new_path);
+    w.Key("database_schema");
+    write_optional(w, r.database_schema);
+    w.EndObject();
+  }
+}
+
+void write_positions(lsp::Json_writer &w, std::string_view text, const Line_map &lines, uint32_t begin,
+                     uint32_t body_end, uint32_t end) {
+  w.Key("begin");
+  w.Uint(begin);
+  w.Key("body_end");
+  w.Uint(body_end);
+  w.Key("end");
+  w.Uint(end);
+  w.Key("start");
+  lsp::write_position(w, lines.position(text, begin));
+  w.Key("stop");
+  lsp::write_position(w, lines.position(text, end));
+}
+
+}  // namespace
+
 std::string describe_json(const std::vector<Statement_description> &descriptions, std::string_view text,
                           const Statement_index &index, const Line_map &lines) {
   rapidjson::StringBuffer buf;
   lsp::Json_writer w(buf);
-  auto str = [&](const std::string &s) { w.String(s.c_str(), static_cast<rapidjson::SizeType>(s.size())); };
   w.StartObject();
   w.Key("format");
   w.Uint(1);
@@ -454,103 +684,32 @@ std::string describe_json(const std::vector<Statement_description> &descriptions
   w.StartArray();
   for (const auto &d : descriptions) {
     const Statement &s = index.statements()[d.statement];
-    const bool ok = d.status == Describe_status::ok;
     w.StartObject();
-    w.Key("begin");
-    w.Uint(s.begin);
-    w.Key("body_end");
-    w.Uint(s.body_end);
-    w.Key("end");
-    w.Uint(s.end);
-    w.Key("start");
-    lsp::write_position(w, lines.position(text, s.begin));
-    w.Key("stop");
-    lsp::write_position(w, lines.position(text, s.end));
-    w.Key("status");
-    w.String(status_name(d.status));
-    if (!ok) {
-      w.Key("message");
-      str(d.message);
-    }
-    if (d.status == Describe_status::syntax_error) {
-      w.Key("error_range");
-      lsp::write_range(w, text, lines, d.error_begin, d.error_end);
-    }
-    w.Key("verb");
-    if (ok) str(d.verb); else w.Null();
-    w.Key("kind");
-    if (ok) str(d.kind); else w.Null();
-    w.Key("or_replace");
-    w.Bool(d.or_replace);
-    w.Key("if_exists");
-    w.Bool(d.if_exists);
-    w.Key("if_not_exists");
-    w.Bool(d.if_not_exists);
-    w.Key("temporary");
-    w.Bool(d.temporary);
-    w.Key("objects");
-    w.StartArray();
-    for (const auto &o : d.objects) {
-      w.StartObject();
-      w.Key("schema");
-      write_optional(w, o.name.schema);
-      w.Key("name");
-      str(o.name.name);
-      if (o.table) {
-        w.Key("table");
-        write_name(w, *o.table);
-      }
-      if (o.new_name) {
-        w.Key("new_schema");
-        write_optional(w, o.new_name->schema);
-        w.Key("new_name");
-        str(o.new_name->name);
-      }
-      w.EndObject();
-    }
-    w.EndArray();
-    w.Key("current_schema");
-    write_optional(w, d.current_schema);
-    w.Key("rest");
-    if (!d.rest) {
-      w.Null();
-    } else {
-      const Described_rest &r = *d.rest;
-      w.StartObject();
-      w.Key("service");
-      if (r.service) {
-        w.StartObject();
-        w.Key("path");
-        str(r.service->path);
-        w.Key("developers");
-        w.StartArray();
-        for (const auto &dev : r.service->developers) str(dev);
-        w.EndArray();
-        w.Key("written");
-        w.Bool(r.service->written);
-        w.EndObject();
-      } else {
-        w.Null();
-      }
-      w.Key("schema");
-      if (r.schema) {
-        w.StartObject();
-        w.Key("path");
-        str(r.schema->path);
-        w.Key("written");
-        w.Bool(r.schema->written);
-        w.EndObject();
-      } else {
-        w.Null();
-      }
-      w.Key("path");
-      write_optional(w, r.path);
-      w.Key("new_path");
-      write_optional(w, r.new_path);
-      w.Key("database_schema");
-      write_optional(w, r.database_schema);
-      w.EndObject();
-    }
+    write_positions(w, text, lines, s.begin, s.body_end, s.end);
+    write_entry_rest(w, d, text, lines);
+    w.EndObject();
+  }
+  w.EndArray();
+  w.EndObject();
+  return buf.GetString();
+}
+
+std::string describe_list_json(const std::vector<Described_item> &items) {
+  rapidjson::StringBuffer buf;
+  lsp::Json_writer w(buf);
+  w.StartObject();
+  w.Key("format");
+  w.Uint(1);
+  w.Key("statements");
+  w.StartArray();
+  for (size_t i = 0; i < items.size(); ++i) {
+    const Described_item &it = items[i];
+    const Line_map lines(it.text);
+    w.StartObject();
+    w.Key("index");
+    w.Uint64(i);
+    write_positions(w, it.text, lines, it.begin, it.body_end, it.end);
+    write_entry_rest(w, it.description, it.text, lines);
     w.EndObject();
   }
   w.EndArray();

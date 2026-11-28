@@ -9,10 +9,14 @@ above all: the outline cannot show a DROP of an object the text never created. T
 
 ```text
 mariadb-lsp describe [--sql-mode LIST] [--delimiter D] [--version-id N] FILE|-
+mariadb-lsp describe --statements LIST.json [--sql-mode LIST] [--version-id N]
 ```
 
-- The text is split as `split` splits it (`DELIMITER` and `SET sql_mode` followed). There is
-  one entry per SQL statement, in file order; comment-only entries are left out.
+- **A text** (`FILE`, or `-` for stdin) is split as `split` splits it (`DELIMITER` and
+  `SET sql_mode` followed). There is one entry per SQL statement, in file order;
+  comment-only entries are left out.
+- **A list** (`--statements`, `-` for stdin) is a JSON array of strings, one statement per
+  item: entry `i` describes item `i` (see [Statement lists](#statement-lists)).
 - The output is always JSON, one object on stdout. The exit status is 0 whenever the input
   could be read, also when statements do not parse (that is in the entries), and 2 for usage
   errors and unreadable input.
@@ -48,7 +52,8 @@ values of `verb`, `kind` and `status` may appear in format 1: read one you do no
 
 | Member | Type | Meaning |
 | --- | --- | --- |
-| `begin`, `body_end`, `end` | number | byte offsets, as `split --format json` gives them: the statement's first byte, the end of its SQL, the end of its delimiter |
+| `index` | number | list input only: the item this entry describes |
+| `begin`, `body_end`, `end` | number | byte offsets, as `split --format json` gives them: the statement's first byte, the end of its SQL, the end of its delimiter; for list input, within the item |
 | `start`, `stop` | position | LSP positions of `begin` and `end` |
 | `status` | string | `ok`, or why there is no description (below) |
 | `message` | string | not `ok` only: why, for a person |
@@ -70,6 +75,8 @@ Nothing is guessed from the words of a statement that does not parse.
 | `syntax-error` | it does not; `message` is the one `check` gives |
 | `unsupported` | the parser cannot read it: invalid UTF-8, an `sql_mode` it does not support (ORACLE, MSSQL) |
 | `source-directive` | an MSM `SOURCE '<path>'` directive, or a statement holding one (not parsed, as in `check`) |
+| `several-statements` | list input: the item holds more than one statement |
+| `empty` | list input: the item is blank or only comments |
 
 ### `kind`
 
@@ -137,3 +144,20 @@ not qualified; it is never filled in from `current_schema`.
   as in the outline's `rest_settings`: `mike, anna@/svc` gives `{"path": "/svc",
   "developers": ["anna", "mike"]}`. MSM placeholders (`/*<msm:NAME>*/`) are comments and do
   not appear.
+
+## Statement lists
+
+With `--statements`, each item of the array is one statement:
+
+- A trailing `;` is optional, and a routine body's `;` needs no `DELIMITER`: the items are
+  joined, each followed by a delimiter that none of them contains, so an item always ends
+  where it ends. `body_end` stops before a trailing `;`, as in a text.
+- The items are described in order as one text, so `SET sql_mode`, `USE` and `USE REST` in
+  one item apply to the items after it.
+- An item that is not one statement gets a status instead of a description:
+  `several-statements` when it does not parse as one statement but splits at `;` into
+  statements that each parse (`DROP VIEW a; DROP VIEW b`), `empty` when it is blank or only
+  comments, `unsupported` when it changes the delimiter (`DELIMITER //`), and `syntax-error`
+  when it leaves a string or comment open. Such an item does not take part in the `sql_mode`
+  and `USE` carried to the next ones. Its positions cover the whole item.
+- A file that is not a JSON array of strings is a usage error (exit 2).

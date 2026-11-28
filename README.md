@@ -60,6 +60,8 @@ mariadb-lsp edit --edits R.json --source-dir DIR -
 mariadb-lsp describe FILE         # what each statement does, as JSON: verb, kind, flags,
                                   # the objects it names, REST service and schema
                                   # (docs/describe-format.md)
+mariadb-lsp describe --statements LIST.json
+                                  # the same for a JSON array of statements, one per item
 mariadb-lsp format FILE           # the file with its queries laid out, to stdout
 mariadb-lsp format --line-width 100 --keyword-case lower FILE
 mariadb-lsp split FILE            # the statements: position, kind, delimiter, sql_mode

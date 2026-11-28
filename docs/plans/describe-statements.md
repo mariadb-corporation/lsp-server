@@ -249,7 +249,13 @@ not qualified (it is not filled in from `current_schema`). Optional members:
      in a routine body or a query is taken for them (a `DEFINER=event@x` neither).
    - `Describe.every_rest_statement_has_a_kind` fails on a new REST create, alter or drop
      rule until it gets a kind or is listed as `other`.
-3. List input `--statements`.
+3. List input `--statements`. Done: `describe_list()` joins the items, each followed by a
+   delimiter none of them contains (`$$`, `$$1`, ...), and describes them as one text, so
+   `sql_mode`, `USE` and `USE REST` carry as planned. An item that would not end at its
+   delimiter (a `DELIMITER` line, an open string or comment) is described alone and left out
+   of the join (`unsupported` / `syntax-error`). `several-statements` is an item that does not
+   parse as one statement but splits at `;` into statements that each parse. Tests
+   `Describe.list_*`, `test_describe.py`.
 4. `subject_of` on top of `Statement_description` (optional, behaviour kept).
 5. msm switches its routing and drops `_CREATE` / `_IF_NOT_EXISTS` (mariadb-shell-plugins).
    msm uses `--statements` and routes by `index`, so it needs steps 2 and 3 in one release

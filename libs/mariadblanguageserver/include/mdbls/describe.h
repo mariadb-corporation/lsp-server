@@ -38,6 +38,8 @@ enum class Describe_status : uint8_t {
   syntax_error,        // it does not parse under its sql_mode
   unsupported,         // the lexer cannot read it (invalid UTF-8, an unsupported sql_mode)
   source_directive,    // an MSM SOURCE directive, or a statement holding one
+  several_statements,  // list input: the item holds more than one statement
+  empty,               // list input: the item is blank or only comments
 };
 
 // A name as written, unquoted; `schema` empty when it is not qualified.
@@ -92,6 +94,15 @@ struct Statement_description {
 struct Describe_options {
   unsigned long version_id = k_default_version_id;
   int priority = 0;
+  std::string sql_mode;  // describe_list: the sql_mode before the first item
+};
+
+// One item of a statement list: its description, with the statement's
+// positions within the item's own text.
+struct Described_item {
+  std::string text;
+  Statement_description description;  // `statement` unused
+  uint32_t begin = 0, body_end = 0, end = 0;
 };
 
 // One description per SQL statement of `index` (comments left out), in
@@ -101,9 +112,18 @@ struct Describe_options {
 std::vector<Statement_description> describe_statements(std::string_view text, const Statement_index &index,
                                                        Parser_pool &pool, const Describe_options &options = {});
 
+// One description per item of `items`, each item one statement: a trailing
+// delimiter is optional, and a routine body's `;` needs no DELIMITER.  The
+// items are described in order as one text, so SET sql_mode, USE and USE
+// REST in one item apply to the items after it.
+std::vector<Described_item> describe_list(const std::vector<std::string> &items, Parser_pool &pool,
+                                          const Describe_options &options = {});
+
 // {"format": 1, "statements": [...]} (docs/describe-format.md).
 std::string describe_json(const std::vector<Statement_description> &descriptions, std::string_view text,
                           const Statement_index &index, const Line_map &lines);
+// The same for describe_list(): each entry with its item's `index`.
+std::string describe_list_json(const std::vector<Described_item> &items);
 
 }  // namespace mdbls
 

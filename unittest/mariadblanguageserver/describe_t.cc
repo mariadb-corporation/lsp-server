@@ -279,6 +279,75 @@ TEST(Describe, json) {
   EXPECT_TRUE(st[1].HasMember("error_range"));
 }
 
+// List input: each item one statement, described in order as one text.
+TEST(Describe, list_items) {
+  static Parser_pool pool(2);
+  const std::vector<std::string> items = {
+      "DROP VIEW v;",
+      "CREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END;",  // its `;` need no DELIMITER
+      "  -- only a comment\n",
+      "DROP VIEW a; DROP VIEW b;",
+      "SELECT 'open",
+      "DELIMITER //\nCREATE PROCEDURE q() BEGIN SELECT 1; END//",
+      "SET sql_mode = 'ANSI_QUOTES'",
+      "CREATE TABLE \"x y\" (a INT)",  // the sql_mode of the item before
+      "USE REST SERVICE /app",
+      "DROP REST VIEW /n",  // the service in use, from the item before
+      "SELEC 1",
+      "",
+  };
+  const auto d = describe_list(items, pool);
+  ASSERT_EQ(items.size(), d.size());
+  auto status = [&](size_t i) { return d[i].description.status; };
+
+  EXPECT_EQ(Describe_status::ok, status(0));
+  EXPECT_EQ("drop", d[0].description.verb);
+  EXPECT_EQ(0u, d[0].begin);
+  EXPECT_EQ(11u, d[0].body_end);  // before the trailing `;`, as in a text
+  EXPECT_EQ(12u, d[0].end);
+
+  EXPECT_EQ(Describe_status::ok, status(1));
+  EXPECT_EQ("procedure", d[1].description.kind);
+  EXPECT_EQ("p", str(d[1].description.objects[0].name));
+
+  EXPECT_EQ(Describe_status::empty, status(2));
+  EXPECT_EQ(Describe_status::several_statements, status(3));
+  EXPECT_EQ("the item holds 2 statements", d[3].description.message);
+  EXPECT_TRUE(d[3].description.verb.empty());
+  EXPECT_EQ(Describe_status::syntax_error, status(4));
+  EXPECT_EQ(Describe_status::unsupported, status(5));
+
+  EXPECT_EQ(Describe_status::ok, status(7));
+  EXPECT_EQ("x y", str(d[7].description.objects[0].name));
+
+  ASSERT_TRUE(d[9].description.rest);
+  ASSERT_TRUE(d[9].description.rest->service);
+  EXPECT_EQ("/app", d[9].description.rest->service->path);
+  EXPECT_FALSE(d[9].description.rest->service->written);
+
+  EXPECT_EQ(Describe_status::syntax_error, status(10));
+  EXPECT_EQ(0u, d[10].description.error_begin);  // within the item
+  EXPECT_EQ(5u, d[10].description.error_end);
+  EXPECT_EQ(Describe_status::empty, status(11));
+
+  const std::string json = describe_list_json(d);
+  rapidjson::Document doc;
+  ASSERT_FALSE(doc.Parse(json.c_str()).HasParseError()) << json;
+  ASSERT_EQ(items.size(), doc["statements"].Size());
+  EXPECT_EQ(3, doc["statements"][3]["index"].GetInt());
+  EXPECT_STREQ("several-statements", doc["statements"][3]["status"].GetString());
+}
+
+// An item may hold the delimiter the items are joined with.
+TEST(Describe, list_item_holding_the_join_delimiter) {
+  static Parser_pool pool(1);
+  const auto d = describe_list({"SELECT '$$'", "DROP VIEW v"}, pool);
+  ASSERT_EQ(2u, d.size());
+  EXPECT_EQ(Describe_status::ok, d[0].description.status) << d[0].description.message;
+  EXPECT_EQ(Describe_status::ok, d[1].description.status) << d[1].description.message;
+  EXPECT_EQ("drop", d[1].description.verb);
+}
+
 // Every REST CREATE, ALTER and DROP rule of the grammar is one of the kinds
 // describe names, or listed here as one it leaves `other` on purpose: a new
 // REST statement fails this test rather than coming out as `other`.

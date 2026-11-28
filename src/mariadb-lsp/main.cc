@@ -28,6 +28,7 @@
 //   mariadb-lsp complete --at L:C FILE   completion candidates at a position
 //   mariadb-lsp connections      the connections the shell's secret store holds
 
+#include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 
@@ -133,6 +134,8 @@ const char *const k_usage =
     "  --text             split: include each statement's text in the output\n"
     "  --at LINE:COL      complete: the position, 1-based (COL in characters)\n"
     "  --edits FILE       edit: the schema edits, JSON (docs/edit-format.md)\n"
+    "  --statements FILE  describe: the statements, a JSON array of strings, one\n"
+    "                     statement per item, in place of FILE (- for stdin)\n"
     "  --ops              edit: print the ops this binary does, as JSON\n"
     "                     ({\"format\": 1, \"ops\": [...]}), and exit\n"
     "  --features         outline: print what this binary's outlines hold beyond\n"
@@ -209,6 +212,7 @@ struct Options {
   bool add_tables = true;  // complete: --no-add-tables
   std::string source_dir;  // --source-dir, absolute; "": the file's folder
   std::string edits;       // edit: --edits FILE
+  std::string statements;  // describe: --statements FILE
   bool list_ops = false;   // edit: --ops
   bool list_features = false;  // outline: --features
 };
@@ -890,6 +894,10 @@ std::optional<Options> parse_args(int argc, char **argv) {
       const auto v = value();
       if (!v) return std::nullopt;
       o.edits = *v;
+    } else if (arg == "--statements") {
+      const auto v = value();
+      if (!v) return std::nullopt;
+      o.statements = *v;
     } else if (arg == "--max-errors") {
       const auto n = number();
       if (!n) return std::nullopt;
@@ -1009,6 +1017,18 @@ std::optional<Options> parse_args(int argc, char **argv) {
     }
     return o;
   }
+  if (!o.statements.empty()) {
+    // The statements in place of a file.
+    if (o.command != "describe") {
+      std::cerr << "mariadb-lsp: --statements goes with describe\n";
+      return std::nullopt;
+    }
+    if (!o.files.empty()) {
+      std::cerr << "mariadb-lsp: describe takes --statements or a file, not both\n";
+      return std::nullopt;
+    }
+    return o;
+  }
   if (o.files.empty()) {
     std::cerr << "mariadb-lsp: no input file (use - for stdin)\n";
     return std::nullopt;
@@ -1027,6 +1047,38 @@ std::optional<Options> parse_args(int argc, char **argv) {
     return std::nullopt;
   }
   return o;
+}
+
+// describe --statements FILE: one description per item of a JSON array of
+// strings; exit 2 when the file cannot be read or is not such an array.
+int run_describe_list(const Options &o, mdbls::Parser_pool &pool) {
+  std::string json;
+  if (!read_input(o.statements, &json)) {
+    std::cerr << "mariadb-lsp: cannot read " << o.statements << "\n";
+    return k_exit_usage;
+  }
+  rapidjson::Document doc;
+  doc.Parse(json.data(), json.size());
+  std::vector<std::string> items;
+  bool strings = !doc.HasParseError() && doc.IsArray();
+  if (strings) {
+    for (const auto &v : doc.GetArray()) {
+      if (!v.IsString()) {
+        strings = false;
+        break;
+      }
+      items.emplace_back(v.GetString(), v.GetStringLength());
+    }
+  }
+  if (!strings) {
+    std::cerr << "mariadb-lsp: --statements " << o.statements << ": not a JSON array of strings\n";
+    return k_exit_usage;
+  }
+  mdbls::Describe_options dop;
+  dop.version_id = o.index.version_id;
+  dop.sql_mode = o.index.sql_mode;
+  std::cout << mdbls::describe_list_json(mdbls::describe_list(items, pool, dop)) << '\n';
+  return 0;
 }
 
 // edit: the request applied to `text`; the result or the error as JSON.
@@ -1262,6 +1314,7 @@ int main(int argc, char **argv) {
       o->command == "edit" || o->command == "describe") {
     pool = std::make_unique<mdbls::Parser_pool>(o->threads);
   }
+  if (!o->statements.empty()) return run_describe_list(*o, *pool);
 
   rapidjson::StringBuffer json_buf;
   rapidjson::Writer<rapidjson::StringBuffer> json(json_buf);

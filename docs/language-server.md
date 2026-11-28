@@ -372,7 +372,9 @@ tree: the verb, the kind of object, `OR REPLACE` / `IF [NOT] EXISTS` / `TEMPORAR
 objects it names (every name of a multi-name `DROP`, a trigger's or index's table, the new
 names of renames), the `USE` in force, and for REST SQL the service, schema and path, with
 those a statement does not name resolved as the outline resolves them. A statement that does
-not parse gets an entry with its error instead of a description. msm_plugin routes the
+not parse gets an entry with its error instead of a description. `describe --statements
+LIST.json` takes a JSON array of statements instead, one per item and no `DELIMITER` needed,
+and describes item `i` in entry `i`. msm_plugin routes the
 statements of a schema edit by it. The format is in [describe-format.md](describe-format.md);
 msm detects the command by a `--help` line starting `  describe `.
 
