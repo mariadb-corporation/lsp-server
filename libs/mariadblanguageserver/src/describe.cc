@@ -25,6 +25,7 @@
 #include <string>
 #include <utility>
 
+#include "catalog_symbols.h"
 #include "mdbls/catalog.h"
 #include "mdbls/lsp/json_position.h"
 #include "mdbls/syntax_check.h"
@@ -36,23 +37,16 @@ namespace mdbls {
 
 namespace {
 
-// The grammar symbols describe looks for: those of the catalog fold, whose
-// test checks that the grammar has every one.
-struct Grammar {
-#define SYM(x) int x = grammar::symbol(#x);
-#include "catalog_symbols.inc"
-#undef SYM
-};
-
-const Grammar &gram() {
-  static const Grammar g;
-  return g;
-}
+using Grammar = Catalog_symbols;
 
 constexpr uint32_t npos = Syntax_tree::npos;
 
 struct Parsed {
   Statement_check check;
+  // A statement starting CREATE, ALTER, DROP, RENAME or USE (REST SQL too):
+  // the only ones with more to describe than `other`, so the only ones
+  // parsed again for a tree.  A dump's INSERTs keep none.
+  bool read = false;
   bool accepted = false;
   Syntax_tree tree;
 };
@@ -63,19 +57,20 @@ struct Parsed {
 // the statement's kind, flags or names.
 class Reader {
  public:
-  Reader(const Syntax_tree &t, std::string_view text) : t_(t), text_(text), g_(gram()) {}
+  Reader(const Syntax_tree &t, std::string_view text) : t_(t), text_(text), g_(catalog_symbols()) {}
 
-  void describe(Statement_description &d, const Rest_context &rest, const std::string &current_schema) {
+  // `catalog`: the statements before this one, folded.
+  void describe(Statement_description &d, const Catalog &catalog) {
     d.verb = "other";
     d.kind = "other";
-    if (!current_schema.empty()) d.current_schema = current_schema;
+    if (!catalog.current_schema().empty()) d.current_schema = catalog.current_schema();
     if (t_.roots().empty()) return;
     const uint32_t vc = t_.find(t_.roots()[0], g_.verb_clause);
     if (vc == npos || t_.children(vc).empty()) return;
     const uint32_t st = t_.children(vc)[0];
     const int sym = t_.node(st).symbol;
     if (sym == g_.mrs_statement) {
-      if (!t_.children(st).empty()) rest_statement(d, t_.children(st)[0], rest);
+      if (!t_.children(st).empty()) rest_statement(d, t_.children(st)[0], catalog.rest_context());
       return;
     }
     if (sym == g_.create) d.verb = "create";
@@ -232,26 +227,29 @@ class Reader {
     Described_rest r;
     const uint32_t service_node = t_.find(st, g_.mrs_service_request_path);
     const uint32_t schema_node = t_.find(st, g_.mrs_schema_request_path);
-    auto written_service = [&]() -> std::optional<Described_rest_service> {
-      if (service_node == npos) return std::nullopt;
-      const Rest_service_name n = rest_service_name(t_, text_, service_node);
-      return Described_rest_service{n.written_request_path, n.developers, true};
-    };
-    auto service_in_use = [&]() -> std::optional<Described_rest_service> {
-      if (rest.service.key.empty()) return std::nullopt;
-      return Described_rest_service{rest.service.written_request_path, rest.service.developers, false};
-    };
-    auto service = [&]() {
-      auto s = written_service();
-      return s ? s : service_in_use();
+    const Rest_service_name named_service =
+        service_node == npos ? Rest_service_name{} : rest_service_name(t_, text_, service_node);
+    const std::string named_schema = text(schema_node);  // "" for none
+    // What the statement names, else what is in use: the fold's rule.
+    auto service = [&]() -> std::optional<Described_rest_service> {
+      const Rest_service_name *sv = rest.service_for(named_service);
+      if (sv == nullptr) return std::nullopt;
+      return Described_rest_service{sv->written_request_path, sv->developers, sv == &named_service};
     };
     auto schema = [&]() -> std::optional<Described_rest_schema> {
-      if (schema_node != npos) return Described_rest_schema{text(schema_node), true};
-      if (rest.schema.empty()) return std::nullopt;
-      return Described_rest_schema{rest.schema, false};
+      const std::string *path = rest.schema_for(named_schema);
+      if (path == nullptr) return std::nullopt;
+      return Described_rest_schema{*path, path == &named_schema};
     };
+    // Only what the statement names.
+    auto written_service = [&]() { return service_node == npos ? std::nullopt : service(); };
+    auto written_schema = [&]() { return schema_node == npos ? std::nullopt : schema(); };
     auto database = [&](uint32_t n) {
       if (n != npos) r.database_schema = name_of(n);
+    };
+    auto new_request_path = [&]() {
+      const uint32_t to = child(child(st, g_.mrs_opt_new_request_path), g_.mrs_request_path_identifier);
+      if (to != npos) r.new_path = text(to);
     };
 
     if (t_.node(st).symbol == g_.mrs_use_statement) {
@@ -261,7 +259,7 @@ class Reader {
       } else {
         d.kind = schema_node != npos ? "rest_schema" : "rest_service";
         r.service = service();
-        if (schema_node != npos) r.schema = Described_rest_schema{text(schema_node), true};
+        r.schema = written_schema();
       }
       d.rest = std::move(r);
       return;
@@ -296,17 +294,15 @@ class Reader {
       r.service = service();
       if (verb == "alter") {
         r.schema = schema();
-        if (const uint32_t to = child(child(st, g_.mrs_opt_new_request_path), g_.mrs_request_path_identifier);
-            to != npos)
-          r.new_path = text(to);
+        new_request_path();
         database(child(child(st, g_.mrs_opt_from_schema_name), g_.mrs_identifier));
       } else if (verb == "create") {
         database(child(st, g_.mrs_identifier));
-        // Without a request path the shell takes /<database schema>.
-        if (schema_node != npos) r.schema = Described_rest_schema{text(schema_node), true};
-        else if (r.database_schema) r.schema = Described_rest_schema{"/" + *r.database_schema, true};
+        r.schema = written_schema();
+        if (!r.schema && r.database_schema)
+          r.schema = Described_rest_schema{default_rest_schema_path(*r.database_schema), true};
       } else {
-        if (schema_node != npos) r.schema = Described_rest_schema{text(schema_node), true};
+        r.schema = written_schema();
         database(child(child(st, g_.mrs_opt_for_database), g_.mrs_identifier));
       }
     } else if (kind == "view" || kind == "procedure" || kind == "function") {
@@ -316,9 +312,7 @@ class Reader {
                            : kind == "procedure" ? g_.mrs_procedure_request_path
                                                  : g_.mrs_function_request_path;
       if (const uint32_t p = t_.find(st, path_sym); p != npos) r.path = text(p);
-      if (const uint32_t to = child(child(st, g_.mrs_opt_new_request_path), g_.mrs_request_path_identifier);
-          to != npos)
-        r.new_path = text(to);
+      new_request_path();
     } else if (kind == "content_set" || kind == "content_file") {
       r.service = service();
       const int path_sym = kind == "content_set" ? g_.mrs_content_set_request_path : g_.mrs_content_file_request_path;
@@ -383,9 +377,11 @@ std::vector<Statement_description> describe_statements(std::string_view text, co
       parsed[k].check = check_statement(text, index, sql[k], cache, options.version_id);
       if (parsed[k].check.status != Check_status::ok || parsed[k].check.has_source_directives) continue;
       const Statement &s = stmts[sql[k]];
+      const auto stmt_text = index.text_of(text, s);
+      parsed[k].read = may_change_catalog(stmt_text);
+      if (!parsed[k].read) continue;
       mdbp_parser *p = cache.get(index.modes()[s.mode].mode, options.version_id, true);
       if (p == nullptr) continue;
-      const auto stmt_text = index.text_of(text, s);
       mdbp_result r;
       if (mdbp_parse_sql(p, stmt_text.data(), stmt_text.size(), &r) == MDBP_OK && r.accepted) {
         parsed[k].accepted = true;
@@ -407,7 +403,7 @@ std::vector<Statement_description> describe_statements(std::string_view text, co
         if (c.has_source_directives) {
           d.status = Describe_status::source_directive;
           d.message = "the statement holds an MSM SOURCE directive";
-        } else if (!parsed[k].accepted) {
+        } else if (parsed[k].read && !parsed[k].accepted) {
           d.status = Describe_status::unsupported;
           d.message = "the statement could not be parsed again";
         }
@@ -437,8 +433,9 @@ std::vector<Statement_description> describe_statements(std::string_view text, co
         break;
     }
     if (d.status == Describe_status::ok) {
-      Reader(parsed[k].tree, text).describe(d, catalog.rest_context(), catalog.current_schema());
-      catalog.apply(parsed[k].tree, text, index.modes()[s.mode].bits);
+      // A statement not read has no tree: `other`.
+      Reader(parsed[k].tree, text).describe(d, catalog);
+      if (parsed[k].accepted) catalog.apply(parsed[k].tree, text, index.modes()[s.mode].bits);
     }
     out.push_back(std::move(d));
   }
@@ -455,6 +452,16 @@ std::string unused_delimiter(const std::vector<std::string> &items) {
     if (std::none_of(items.begin(), items.end(), [&](const std::string &i) { return i.find(d) != std::string::npos; }))
       return d;
   }
+}
+
+// Item `it` holds `n` statements: no description, positions over the whole
+// item.
+void holds_several(Described_item &it, size_t n) {
+  it.description = {};
+  it.description.status = Describe_status::several_statements;
+  it.description.message = "the item holds " + std::to_string(n) + " statements";
+  it.begin = 0;
+  it.body_end = it.end = static_cast<uint32_t>(it.text.size());
 }
 
 // An item as several `;`-separated statements, when each of them parses.
@@ -527,8 +534,7 @@ std::vector<Described_item> describe_list(const std::vector<std::string> &items,
       it.description.status = Describe_status::empty;
       it.description.message = "the item holds no statement";
     } else if (of_item[i].size() > 1) {
-      it.description.status = Describe_status::several_statements;
-      it.description.message = "the item holds " + std::to_string(of_item[i].size()) + " statements";
+      holds_several(it, of_item[i].size());
     } else {
       const Statement_description &d = ds[of_item[i][0]];
       const Statement &s = index.statements()[d.statement];
@@ -550,13 +556,7 @@ std::vector<Described_item> describe_list(const std::vector<std::string> &items,
         it.description.error_begin = std::min(d.error_begin - base, size);
         it.description.error_end = std::min(d.error_end - base, size);
         // `DROP VIEW a; DROP VIEW b` reads as one statement here.
-        if (const size_t n = separate_statements(it.text, pool, options); n > 1) {
-          it.description = {};
-          it.description.status = Describe_status::several_statements;
-          it.description.message = "the item holds " + std::to_string(n) + " statements";
-          it.begin = 0;
-          it.body_end = it.end = size;
-        }
+        if (const size_t n = separate_statements(it.text, pool, options); n > 1) holds_several(it, n);
       }
     }
   }
@@ -657,20 +657,6 @@ void write_entry_rest(lsp::Json_writer &w, const Statement_description &d, std::
   }
 }
 
-void write_positions(lsp::Json_writer &w, std::string_view text, const Line_map &lines, uint32_t begin,
-                     uint32_t body_end, uint32_t end) {
-  w.Key("begin");
-  w.Uint(begin);
-  w.Key("body_end");
-  w.Uint(body_end);
-  w.Key("end");
-  w.Uint(end);
-  w.Key("start");
-  lsp::write_position(w, lines.position(text, begin));
-  w.Key("stop");
-  lsp::write_position(w, lines.position(text, end));
-}
-
 }  // namespace
 
 std::string describe_json(const std::vector<Statement_description> &descriptions, std::string_view text,
@@ -685,7 +671,7 @@ std::string describe_json(const std::vector<Statement_description> &descriptions
   for (const auto &d : descriptions) {
     const Statement &s = index.statements()[d.statement];
     w.StartObject();
-    write_positions(w, text, lines, s.begin, s.body_end, s.end);
+    lsp::write_statement_bounds(w, text, lines, s.begin, s.body_end, s.end);
     write_entry_rest(w, d, text, lines);
     w.EndObject();
   }
@@ -708,7 +694,7 @@ std::string describe_list_json(const std::vector<Described_item> &items) {
     w.StartObject();
     w.Key("index");
     w.Uint64(i);
-    write_positions(w, it.text, lines, it.begin, it.body_end, it.end);
+    lsp::write_statement_bounds(w, it.text, lines, it.begin, it.body_end, it.end);
     write_entry_rest(w, it.description, it.text, lines);
     w.EndObject();
   }

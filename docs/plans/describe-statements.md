@@ -261,6 +261,22 @@ not qualified (it is not filled in from `current_schema`). Optional members:
    msm uses `--statements` and routes by `index`, so it needs steps 2 and 3 in one release
    pinned in MariaDB Shell: land them in the same release.
 
+**Left for later (from the /simplify review, 2026-11-28):**
+
+- A `Statement_index` built from given ranges, one statement per item, carrying the
+  `sql_mode` across them. `describe_list` would run on it instead of joining items with an
+  unused delimiter, and its special cases would become index results: an item with
+  `DELIMITER`, an open string, a trailing `;`, the second look for `several-statements`.
+- One tree-based reader of a statement's subject (kind, names, flags), used by `describe`,
+  `schema_edit.cc`'s `subject_of` (step 4) and the fold's name lookups (`idents_of`,
+  `qualified`), so the three cannot disagree.
+- One "parse these statements into trees" helper for `fold_outline` and
+  `describe_statements`. `check_statement` could hand back the tree of an accepted parse,
+  which would also remove the second parse `describe` still does for the statements it reads.
+- The npos-guarded tree helpers (`raw`, `text`, `child`, `find_all`), written in
+  `Catalog_fold`, `schema_edit.cc` and `describe.cc`, in one internal header next to
+  `catalog_symbols.h`. `schema_edit.cc` still builds its own copy of the symbol table.
+
 **msm's use (its reply, 2026-11-28):** it refuses every entry whose `status` is not `ok`
 (with `message`), a qualified `objects[].schema` (MSM scripts name objects unqualified),
 `kind: "schema"`, and for now any REST `written: false`: a statement relying on a `USE REST`

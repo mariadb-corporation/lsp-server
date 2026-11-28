@@ -303,16 +303,7 @@ void run_split(const Options &o, const std::string &text, const mdbls::Line_map 
     w.StartArray();
     for (const auto &s : stmts) {
       w.StartObject();
-      w.Key("begin");
-      w.Uint(s.begin);
-      w.Key("body_end");
-      w.Uint(s.body_end);
-      w.Key("end");
-      w.Uint(s.end);
-      w.Key("start");
-      write_position(w, lines.position(text, s.begin));
-      w.Key("stop");
-      write_position(w, lines.position(text, s.end));
+      mdbls::lsp::write_statement_bounds(w, text, lines, s.begin, s.body_end, s.end);
       w.Key("kind");
       w.String(kind_name(s.kind));
       w.Key("delimiter");

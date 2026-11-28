@@ -28,6 +28,7 @@
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 
+#include "catalog_symbols.h"
 #include "column_type.h"
 #include "mdbls/keywords.h"
 #include "mdbls/sql_mode.h"
@@ -119,17 +120,9 @@ Rest_schema *find_rest_schema(Rest_service &svc, std::string_view path) { return
 // A service with no setting is enabled.
 bool rest_enabled(const Rest_settings &s) { return !s.enabled || *s.enabled == "ENABLED"; }
 
-// The grammar symbols the fold looks for, resolved once.
-struct Syms {
-#define SYM(x) int x = grammar::symbol(#x);
-#include "catalog_symbols.inc"
-#undef SYM
-};
+using Syms = Catalog_symbols;
 
-const Syms &syms() {
-  static const Syms s;
-  return s;
-}
+const Syms &syms() { return catalog_symbols(); }
 
 // Every name of Syms, for catalog_missing_grammar_symbols().
 constexpr const char *k_sym_names[] = {
@@ -139,6 +132,11 @@ constexpr const char *k_sym_names[] = {
 };
 
 }  // namespace
+
+const Catalog_symbols &catalog_symbols() {
+  static const Catalog_symbols s;
+  return s;
+}
 
 const char *to_string(Note_kind kind) {
   switch (kind) {
@@ -2256,8 +2254,7 @@ bool Catalog_fold::rest(uint32_t n) {
   // The service the statement names, else the current one; nullopt (with a
   // note) when there is neither.
   auto service_named = [&]() -> std::optional<Rest_service_name> {
-    if (!service.key.empty()) return service;
-    if (!c_.m_rest_context.service.key.empty()) return c_.m_rest_context.service;
+    if (const Rest_service_name *s = c_.m_rest_context.service_for(service)) return *s;
     none_in_use("SERVICE");
     return std::nullopt;
   };
@@ -2267,9 +2264,9 @@ bool Catalog_fold::rest(uint32_t n) {
   auto rest_place = [&]() -> std::optional<std::pair<Rest_service_name, std::string>> {
     auto svc = service_named();
     if (!svc) return std::nullopt;
-    if (!schema_path.empty()) return std::pair{*svc, schema_path};
-    if (c_.m_rest_context.schema.empty()) { none_in_use("SCHEMA"); return std::nullopt; }
-    return std::pair{*svc, c_.m_rest_context.schema};
+    if (const std::string *path = c_.m_rest_context.schema_for(schema_path)) return std::pair{*svc, *path};
+    none_in_use("SCHEMA");
+    return std::nullopt;
   };
   // A rest-object-kind note: the statement's path holds `ex`, of another kind.
   auto other_kind = [&](const Rest_object &ex, const char *effect) {
@@ -2312,7 +2309,7 @@ bool Catalog_fold::rest(uint32_t n) {
     if (ex != nullptr) *ex = std::move(o); else it->objects.push_back(std::move(o));
     return true;
   };
-  auto name_at = [&](uint32_t p) { return unquote_any(text(p)); };
+  auto name_at = [&](uint32_t p) { return rest_name(text(p)); };
   auto named = [&](std::vector<Named_object> &v, int name_sym) {
     const uint32_t p = find(st, name_sym);
     upsert_named(v, Named_object{name_at(p), origin(p)});
@@ -2422,7 +2419,7 @@ bool Catalog_fold::rest(uint32_t n) {
     Rest_schema rs;
     rs.schema = name_of(child(st, s_.mrs_identifier));
     // Without a request path the shell takes /<database schema>.
-    rs.path = schema_node != npos ? schema_path : "/" + rs.schema;
+    rs.path = schema_node != npos ? schema_path : default_rest_schema_path(rs.schema);
     const uint32_t name_node = schema_node != npos ? schema_node : child(st, s_.mrs_identifier);
     rs.origin = origin(name_node);
     rs.declared = true;

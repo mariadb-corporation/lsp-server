@@ -427,6 +427,9 @@ Rest_service_name rest_service_name(const Syntax_tree &tree, std::string_view te
 // A REST name (auth app, role, user, content set) as the fold reads it:
 // unquoted, whether written as an identifier or as a string.
 std::string rest_name(std::string_view written);
+// The request path of a CREATE REST SCHEMA that writes none: /<database
+// schema>, as in MariaDB Shell.
+inline std::string default_rest_schema_path(std::string_view database) { return "/" + std::string(database); }
 
 struct Rest_service {
   Rest_service_name name;              // `path` as the statement that made it wrote it
@@ -467,6 +470,19 @@ struct Rest_context {
   }
   // USE REST [SERVICE s] SCHEMA p (after use_service for s).
   void use_schema(const std::string &path) { schema = path; }
+  // What a statement acts on: the service it names (`named`, key "" for
+  // none), else the current one; nullptr when there is neither, where the
+  // shell fails the statement.
+  const Rest_service_name *service_for(const Rest_service_name &named) const {
+    if (!named.key.empty()) return &named;
+    return service.key.empty() ? nullptr : &service;
+  }
+  // The same for the schema: the request path it names ("" for none), else
+  // the current schema's.
+  const std::string *schema_for(const std::string &named) const {
+    if (!named.empty()) return &named;
+    return schema.empty() ? nullptr : &schema;
+  }
   // CREATE REST SCHEMA gave the service `service_key` its first schema: on
   // the current service, that schema becomes the current one.
   void first_schema_created(const std::string &service_key, const std::string &path);
