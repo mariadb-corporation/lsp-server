@@ -412,12 +412,21 @@ struct Rest_schema {
 struct Rest_service_name {
   std::string path;                    // as written, blanks collapsed
   std::string request_path;            // unquoted
+  std::string written_request_path;    // as written, quotes kept, blanks collapsed
   std::vector<std::string> developers; // unquoted, sorted as the shell does
   // developers,...@request_path, a developer other than [A-Za-z0-9_]+ in
   // single quotes: equal (without regard to case) for the same service; ""
   // for no name.
   std::string key;
 };
+
+// The service name of an `mrs_service_request_path` node of `tree`, whose
+// offsets point into `text`; an empty name for npos.  What the fold and
+// describe both read.
+Rest_service_name rest_service_name(const Syntax_tree &tree, std::string_view text, uint32_t service_request_path);
+// A REST name (auth app, role, user, content set) as the fold reads it:
+// unquoted, whether written as an identifier or as a string.
+std::string rest_name(std::string_view written);
 
 struct Rest_service {
   Rest_service_name name;              // `path` as the statement that made it wrote it

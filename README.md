@@ -57,6 +57,9 @@ mariadb-lsp edit --edits R.json --source-dir DIR -
                                   # keys, views, routines) applied to an MSM script and its
                                   # includes: text edits, migration DDL, new outline as JSON
                                   # (docs/edit-format.md); writes no file
+mariadb-lsp describe FILE         # what each statement does, as JSON: verb, kind, flags,
+                                  # the objects it names, REST service and schema
+                                  # (docs/describe-format.md)
 mariadb-lsp format FILE           # the file with its queries laid out, to stdout
 mariadb-lsp format --line-width 100 --keyword-case lower FILE
 mariadb-lsp split FILE            # the statements: position, kind, delimiter, sql_mode

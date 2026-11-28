@@ -21,6 +21,7 @@
 //   mariadb-lsp check   FILE...  syntax errors, or success
 //   mariadb-lsp outline FILE     the schema objects a file defines, as JSON
 //   mariadb-lsp edit --edits R - schema edits applied to an MSM script, as JSON
+//   mariadb-lsp describe FILE    what each statement does, as JSON
 //   mariadb-lsp split   FILE     the statement index of a SQL file
 //   mariadb-lsp tokens  FILE     the tokens of every statement
 //   mariadb-lsp tree    FILE     the parse tree of every statement
@@ -58,6 +59,7 @@
 #include "mdbls/lsp/json_position.h"
 #include "mdbls/lsp/server.h"
 #include "mdbls/lsp/transport.h"
+#include "mdbls/describe.h"
 #include "mdbls/outline.h"
 #include "mdbls/schema_edit.h"
 #include "mdbls/parser_pool.h"
@@ -106,6 +108,9 @@ const char *const k_usage =
     "           views, tables, routines, compound statements, GRANT, REVOKE,\n"
     "           users, REST SQL, when they parse; the rest, and the rows of a\n"
     "           dump, as they are)\n"
+    "  describe what each statement of a SQL file does, as JSON: its verb,\n"
+    "           kind, IF [NOT] EXISTS / OR REPLACE / TEMPORARY, the objects it\n"
+    "           names, and the REST service and schema it acts on\n"
     "  split    list the statements of a SQL file\n"
     "  tokens   list the tokens of every statement of a SQL file\n"
     "  tree     print the parse tree of every statement of a SQL file\n"
@@ -953,7 +958,7 @@ std::optional<Options> parse_args(int argc, char **argv) {
   if (o.command != "split" && o.command != "tokens" && o.command != "check" &&
       o.command != "tree" && o.command != "outline" && o.command != "lsp" &&
       o.command != "complete" && o.command != "connections" && o.command != "format" &&
-      o.command != "edit") {
+      o.command != "edit" && o.command != "describe") {
     std::cerr << (o.command.empty() ? std::string("mariadb-lsp: no command given\n")
                                     : "mariadb-lsp: unknown command " + o.command + "\n")
               << usage();
@@ -1254,7 +1259,7 @@ int main(int argc, char **argv) {
 
   std::unique_ptr<mdbls::Parser_pool> pool;
   if (o->command == "check" || o->command == "outline" || o->command == "complete" ||
-      o->command == "edit") {
+      o->command == "edit" || o->command == "describe") {
     pool = std::make_unique<mdbls::Parser_pool>(o->threads);
   }
 
@@ -1299,6 +1304,11 @@ int main(int argc, char **argv) {
     t0 = Clock::now();
     if (o->command == "split") {
       run_split(*o, text, lines, index);
+    } else if (o->command == "describe") {
+      mdbls::Describe_options dop;
+      dop.version_id = o->index.version_id;
+      const auto descriptions = mdbls::describe_statements(text, index, *pool, dop);
+      std::cout << mdbls::describe_json(descriptions, text, index, lines) << '\n';
     } else if (o->command == "tokens") {
       run_tokens(*o, text, lines, index);
     } else if (o->command == "tree") {

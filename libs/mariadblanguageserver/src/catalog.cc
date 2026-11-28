@@ -2173,13 +2173,20 @@ void Rest_context::schema_dropped(const std::string &service_key, const std::str
 
 // [developer, ...@]/path: developers unquoted and sorted as MariaDB Shell's
 // format_developers does (without regard to case, then by bytes).
-Rest_service_name Catalog_fold::rest_service_name(uint32_t n) const {
+Rest_service_name rest_service_name(const Syntax_tree &tree, std::string_view text, uint32_t n) {
+  const Syms &s_ = syms();
+  constexpr uint32_t npos = Syntax_tree::npos;
+  auto raw = [&](uint32_t m) { return m == npos ? std::string_view() : tree.text(text, m); };
+  auto child = [&](uint32_t m, int sym) { return m == npos ? npos : tree.child(m, sym); };
   Rest_service_name name;
   if (n == npos) return name;
-  name.path = text(n);
-  name.request_path = unquote_any(trim(raw(child(n, s_.mrs_request_path_identifier))));
-  for (const uint32_t d : find_all(child(n, s_.mrs_service_developers_identifier),
-                                   s_.mrs_service_developer_identifier)) {
+  name.path = collapse(raw(n));
+  const uint32_t request_path = child(n, s_.mrs_request_path_identifier);
+  name.request_path = unquote_any(trim(raw(request_path)));
+  name.written_request_path = collapse(raw(request_path));
+  const uint32_t developers = child(n, s_.mrs_service_developers_identifier);
+  for (const uint32_t d : developers == npos ? std::vector<uint32_t>{}
+                                             : tree.find_all(developers, s_.mrs_service_developer_identifier)) {
     name.developers.push_back(unquote_any(trim(raw(d))));
   }
   std::sort(name.developers.begin(), name.developers.end(), [](const std::string &a, const std::string &b) {
@@ -2206,6 +2213,12 @@ Rest_service_name Catalog_fold::rest_service_name(uint32_t n) const {
   }
   name.key = devs.empty() ? name.request_path : devs + "@" + name.request_path;
   return name;
+}
+
+std::string rest_name(std::string_view written) { return unquote_any(written); }
+
+Rest_service_name Catalog_fold::rest_service_name(uint32_t n) const {
+  return mdbls::rest_service_name(t_, text_, n);
 }
 
 // REST statements resolve the service and schema they do not name as

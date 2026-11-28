@@ -233,7 +233,22 @@ not qualified (it is not filled in from `current_schema`). Optional members:
 
 1. `Rest_context` out of `Catalog_fold::rest`, no change in behaviour (outline tests unchanged),
    and `Catalog::rest_context()`. Done: test `Catalog.rest_context_after_each_statement`.
-2. `describe` engine, JSON, CLI with text input; `docs/describe-format.md`; tests.
+2. `describe` engine, JSON, CLI with text input; `docs/describe-format.md`; tests. Done:
+   `include/mdbls/describe.h`, `src/describe.cc`, `unittest/.../describe_t.cc`,
+   `tests/e2e/test_describe.py`. Details settled while building it, all in
+   `docs/describe-format.md`:
+   - `message` is present only when `status` is not `ok`.
+   - A `CREATE REST SCHEMA` without a path reports `/<database schema>` with `written: true`.
+   - A service's `new_path` keeps the developers it writes.
+   - `Rest_service_name` now keeps the request path as written (`written_request_path`), and
+     `rest_service_name()` and `rest_name()` are shared with the fold (`catalog.h`).
+   - Statements holding a SOURCE line in a body are `source-directive`, not parsed with the
+     line blanked.
+   - The kind, flags and names are read from the statement node's children and the head
+     rules that wrap them (`create_routine`, `trigger_tail`, `mrs_*_prefix`, ...), so nothing
+     in a routine body or a query is taken for them (a `DEFINER=event@x` neither).
+   - `Describe.every_rest_statement_has_a_kind` fails on a new REST create, alter or drop
+     rule until it gets a kind or is listed as `other`.
 3. List input `--statements`.
 4. `subject_of` on top of `Statement_description` (optional, behaviour kept).
 5. msm switches its routing and drops `_CREATE` / `_IF_NOT_EXISTS` (mariadb-shell-plugins).
