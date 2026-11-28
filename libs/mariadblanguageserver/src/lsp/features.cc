@@ -146,6 +146,20 @@ void write_range(Json_writer &w, std::string_view text, const Line_map &lines, u
   w.EndObject();
 }
 
+void write_statement_bounds(Json_writer &w, std::string_view text, const Line_map &lines, uint32_t begin,
+                            uint32_t body_end, uint32_t end) {
+  w.Key("begin");
+  w.Uint(begin);
+  w.Key("body_end");
+  w.Uint(body_end);
+  w.Key("end");
+  w.Uint(end);
+  w.Key("start");
+  write_position(w, lines.position(text, begin));
+  w.Key("stop");
+  write_position(w, lines.position(text, end));
+}
+
 void write_range(Json_writer &w, const Snapshot &s, uint32_t begin, uint32_t end) {
   write_range(w, *s.text, *s.lines, begin, end);
 }

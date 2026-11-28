@@ -21,12 +21,14 @@
 //   mariadb-lsp check   FILE...  syntax errors, or success
 //   mariadb-lsp outline FILE     the schema objects a file defines, as JSON
 //   mariadb-lsp edit --edits R - schema edits applied to an MSM script, as JSON
+//   mariadb-lsp describe FILE    what each statement does, as JSON
 //   mariadb-lsp split   FILE     the statement index of a SQL file
 //   mariadb-lsp tokens  FILE     the tokens of every statement
 //   mariadb-lsp tree    FILE     the parse tree of every statement
 //   mariadb-lsp complete --at L:C FILE   completion candidates at a position
 //   mariadb-lsp connections      the connections the shell's secret store holds
 
+#include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 
@@ -58,6 +60,7 @@
 #include "mdbls/lsp/json_position.h"
 #include "mdbls/lsp/server.h"
 #include "mdbls/lsp/transport.h"
+#include "mdbls/describe.h"
 #include "mdbls/outline.h"
 #include "mdbls/schema_edit.h"
 #include "mdbls/parser_pool.h"
@@ -106,6 +109,9 @@ const char *const k_usage =
     "           views, tables, routines, compound statements, GRANT, REVOKE,\n"
     "           users, REST SQL, when they parse; the rest, and the rows of a\n"
     "           dump, as they are)\n"
+    "  describe what each statement of a SQL file does, as JSON: its verb,\n"
+    "           kind, IF [NOT] EXISTS / OR REPLACE / TEMPORARY, the objects it\n"
+    "           names, and the REST service and schema it acts on\n"
     "  split    list the statements of a SQL file\n"
     "  tokens   list the tokens of every statement of a SQL file\n"
     "  tree     print the parse tree of every statement of a SQL file\n"
@@ -128,6 +134,8 @@ const char *const k_usage =
     "  --text             split: include each statement's text in the output\n"
     "  --at LINE:COL      complete: the position, 1-based (COL in characters)\n"
     "  --edits FILE       edit: the schema edits, JSON (docs/edit-format.md)\n"
+    "  --statements FILE  describe: the statements, a JSON array of strings, one\n"
+    "                     statement per item, in place of FILE (- for stdin)\n"
     "  --ops              edit: print the ops this binary does, as JSON\n"
     "                     ({\"format\": 1, \"ops\": [...]}), and exit\n"
     "  --features         outline: print what this binary's outlines hold beyond\n"
@@ -204,6 +212,7 @@ struct Options {
   bool add_tables = true;  // complete: --no-add-tables
   std::string source_dir;  // --source-dir, absolute; "": the file's folder
   std::string edits;       // edit: --edits FILE
+  std::string statements;  // describe: --statements FILE
   bool list_ops = false;   // edit: --ops
   bool list_features = false;  // outline: --features
 };
@@ -294,16 +303,7 @@ void run_split(const Options &o, const std::string &text, const mdbls::Line_map 
     w.StartArray();
     for (const auto &s : stmts) {
       w.StartObject();
-      w.Key("begin");
-      w.Uint(s.begin);
-      w.Key("body_end");
-      w.Uint(s.body_end);
-      w.Key("end");
-      w.Uint(s.end);
-      w.Key("start");
-      write_position(w, lines.position(text, s.begin));
-      w.Key("stop");
-      write_position(w, lines.position(text, s.end));
+      mdbls::lsp::write_statement_bounds(w, text, lines, s.begin, s.body_end, s.end);
       w.Key("kind");
       w.String(kind_name(s.kind));
       w.Key("delimiter");
@@ -885,6 +885,10 @@ std::optional<Options> parse_args(int argc, char **argv) {
       const auto v = value();
       if (!v) return std::nullopt;
       o.edits = *v;
+    } else if (arg == "--statements") {
+      const auto v = value();
+      if (!v) return std::nullopt;
+      o.statements = *v;
     } else if (arg == "--max-errors") {
       const auto n = number();
       if (!n) return std::nullopt;
@@ -953,7 +957,7 @@ std::optional<Options> parse_args(int argc, char **argv) {
   if (o.command != "split" && o.command != "tokens" && o.command != "check" &&
       o.command != "tree" && o.command != "outline" && o.command != "lsp" &&
       o.command != "complete" && o.command != "connections" && o.command != "format" &&
-      o.command != "edit") {
+      o.command != "edit" && o.command != "describe") {
     std::cerr << (o.command.empty() ? std::string("mariadb-lsp: no command given\n")
                                     : "mariadb-lsp: unknown command " + o.command + "\n")
               << usage();
@@ -1004,6 +1008,22 @@ std::optional<Options> parse_args(int argc, char **argv) {
     }
     return o;
   }
+  if (!o.statements.empty()) {
+    // The statements in place of a file.
+    if (o.command != "describe") {
+      std::cerr << "mariadb-lsp: --statements goes with describe\n";
+      return std::nullopt;
+    }
+    if (!o.files.empty()) {
+      std::cerr << "mariadb-lsp: describe takes --statements or a file, not both\n";
+      return std::nullopt;
+    }
+    if (!o.edits.empty()) {
+      std::cerr << "mariadb-lsp: --edits goes with edit\n";
+      return std::nullopt;
+    }
+    return o;
+  }
   if (o.files.empty()) {
     std::cerr << "mariadb-lsp: no input file (use - for stdin)\n";
     return std::nullopt;
@@ -1022,6 +1042,38 @@ std::optional<Options> parse_args(int argc, char **argv) {
     return std::nullopt;
   }
   return o;
+}
+
+// describe --statements FILE: one description per item of a JSON array of
+// strings; exit 2 when the file cannot be read or is not such an array.
+int run_describe_list(const Options &o, mdbls::Parser_pool &pool) {
+  std::string json;
+  if (!read_input(o.statements, &json)) {
+    std::cerr << "mariadb-lsp: cannot read " << o.statements << "\n";
+    return k_exit_usage;
+  }
+  rapidjson::Document doc;
+  doc.Parse(json.data(), json.size());
+  std::vector<std::string> items;
+  bool strings = !doc.HasParseError() && doc.IsArray();
+  if (strings) {
+    for (const auto &v : doc.GetArray()) {
+      if (!v.IsString()) {
+        strings = false;
+        break;
+      }
+      items.emplace_back(v.GetString(), v.GetStringLength());
+    }
+  }
+  if (!strings) {
+    std::cerr << "mariadb-lsp: --statements " << o.statements << ": not a JSON array of strings\n";
+    return k_exit_usage;
+  }
+  mdbls::Describe_options dop;
+  dop.version_id = o.index.version_id;
+  dop.sql_mode = o.index.sql_mode;
+  std::cout << mdbls::describe_list_json(mdbls::describe_list(items, pool, dop)) << '\n';
+  return 0;
 }
 
 // edit: the request applied to `text`; the result or the error as JSON.
@@ -1254,9 +1306,10 @@ int main(int argc, char **argv) {
 
   std::unique_ptr<mdbls::Parser_pool> pool;
   if (o->command == "check" || o->command == "outline" || o->command == "complete" ||
-      o->command == "edit") {
+      o->command == "edit" || o->command == "describe") {
     pool = std::make_unique<mdbls::Parser_pool>(o->threads);
   }
+  if (!o->statements.empty()) return run_describe_list(*o, *pool);
 
   rapidjson::StringBuffer json_buf;
   rapidjson::Writer<rapidjson::StringBuffer> json(json_buf);
@@ -1299,6 +1352,11 @@ int main(int argc, char **argv) {
     t0 = Clock::now();
     if (o->command == "split") {
       run_split(*o, text, lines, index);
+    } else if (o->command == "describe") {
+      mdbls::Describe_options dop;
+      dop.version_id = o->index.version_id;
+      const auto descriptions = mdbls::describe_statements(text, index, *pool, dop);
+      std::cout << mdbls::describe_json(descriptions, text, index, lines) << '\n';
     } else if (o->command == "tokens") {
       run_tokens(*o, text, lines, index);
     } else if (o->command == "tree") {

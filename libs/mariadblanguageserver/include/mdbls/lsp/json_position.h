@@ -40,6 +40,12 @@ void write_position(Json_writer &w, Position p);
 void write_range(Json_writer &w, std::string_view text, const Line_map &lines, uint32_t begin,
                  uint32_t end);
 
+// A statement's bounds as `split` and `describe` write them: the members
+// "begin", "body_end", "end" (byte offsets) and "start", "stop" (the
+// positions of begin and end).
+void write_statement_bounds(Json_writer &w, std::string_view text, const Line_map &lines, uint32_t begin,
+                            uint32_t body_end, uint32_t end);
+
 }  // namespace mdbls::lsp
 
 #endif  // MDBLS_LSP_JSON_POSITION_H_

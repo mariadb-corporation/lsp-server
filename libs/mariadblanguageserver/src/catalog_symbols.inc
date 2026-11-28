@@ -1,6 +1,7 @@
-// The grammar symbols src/catalog.cc and src/schema_edit.cc look for, one
-// per line.  Included with SYM defined to make a member and to make a name;
-// catalog_missing_grammar_symbols() checks that the grammar has each.
+// The grammar symbols src/catalog.cc, src/schema_edit.cc and src/describe.cc
+// look for, one per line.  Included with SYM defined to make a member and to
+// make a name; catalog_missing_grammar_symbols() checks that the grammar has
+// each.
 SYM(verb_clause)
 SYM(create)
 SYM(alter)
@@ -383,3 +384,12 @@ SYM(HEX_STRING)
 SYM(BIN_NUM)
 SYM(CHAR_SYM)
 SYM(REAL)
+// describe.cc
+SYM(table_or_tables)
+SYM(ident_or_empty)
+SYM(table_to_table_list)
+SYM(opt_if_exists)
+SYM(opt_if_exists_table_element)
+SYM(mrs_opt_if_not_exists)
+SYM(mrs_content_file_request_path)
+SYM(TABLES)
